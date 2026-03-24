@@ -1,0 +1,34 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: notes
+Upstream-Contact: Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
+Source: https://github.com/ResendeGHF/notes
+Comment:
+ This tree is a personal fork of Saber (https://github.com/saber-notes/saber),
+ maintained upstream by Adil Hanney <https://github.com/adil192>.
+ SPDX tags in each file under lib/ state copyright for that source file:
+ — If the same path exists on saber-notes/saber (branch main), the file lists
+   both Adil Hanney and Gustavo Henrique Freitas de Resende.
+ — If the path exists only in this fork, the file lists only Gustavo Henrique
+   Freitas de Resende.
+ Headers in lib/ can be refreshed with: python3 tool/apply_lib_reuse_headers.py
+ The paragraphs below cover the rest of the tree (platform assets, build config,
+ scripts, vendored packages, etc.), including upstream Saber material and
+ fork-specific changes.
+
+Files: packages/perfect_freehand/**
+Copyright: Stephen Ruiz
+Copyright: Adil Hanney
+License: MIT
+
+Files: packages/onyxsdk_pen/**
+Copyright: Adil Hanney
+License: BSD-3-Clause
+
+Files: LICENSES/*
+Copyright: SPDX Contributors
+License: CC0-1.0
+
+Files: *
+Copyright: Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
+Copyright: Adil Hanney <https://github.com/adil192>
+License: GPL-3.0-or-later

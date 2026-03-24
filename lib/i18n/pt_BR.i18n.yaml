@@ -1,0 +1,678 @@
+# SPDX-FileCopyrightText: 2022 Adil Hanney <https://github.com/adil192>
+# SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+common:
+  delete: Apagar
+  done: Feito
+  continueBtn: Continuar
+  cancel: Cancelar
+home:
+  folderColor:
+    changeColor: Alterar cor
+    chooseColor: Escolher cor
+    reset: Redefinir cor
+  sortNames:
+    sort: Ordenar
+    alphabetical: Alfabético
+    lastModified: Última modificação
+    sizeOnDisk: Tamanho em disco
+    increasing: Crescente
+  selectAllNotes: Selecionar tudo
+  deselectAllNotes: Desmarcar tudo
+  tabs:
+    search: Buscar
+    home: Início
+    browse: Explorar
+    whiteboard: Quadro branco
+    settings: Configurações
+  titles:
+    search: Buscar
+    home: Notas recentes
+    browse: Navegar
+    whiteboard: Quadro branco
+    settings: Configurações
+  graph:
+    showingNotes: Mostrando $shown de $total notas
+    rootSearchHint: Pesquisar por nome ou tag para definir a raiz
+    clearRoot: Todas as notas
+    selectRoot: Selecionar raiz
+  tooltips:
+    viewMode: Alternar modo de visualização
+    treeView: Modo árvore
+    folderView: Modo pastas
+    newNote: Nova nota
+    showUpdateDialog: Mostrar caixa de diálogo de atualização
+    exportNote: Exportar nota
+  create:
+    newNote: Nova nota
+    importNote: Importar nota
+    infiniteNote: Nota infinita
+  welcome: Bem-vindo(a) ao Saber
+  invalidFormat: O arquivo que você selecionou não é suportado. Por favor selecione um arquivo .sbn, .sbn2, .sba ou .pdf.
+  noFiles: Nenhum arquivo encontrado
+  noPreviewAvailable: Nenhuma visualização disponível
+  createNewNote: Toque no botão + para criar uma nova nota
+  backFolder: Retornar para a pasta anterior
+  newFolder:
+    newFolder: Nova pasta
+    folderName: Nome da pasta
+    create: Criar
+    folderNameEmpty: O nome da pasta não pode estar vazio
+    folderNameContainsSlash: O nome da pasta não pode conter uma barra
+    folderNameExists: A pasta já existe
+  renameNote:
+    renameNote: Renomear nota
+    noteName: Nome da nota
+    rename: Renomear
+    noteNameEmpty: O nome da nota não pode estar vazio
+    noteNameContainsSlash: O nome da nota não pode conter uma barra
+    noteNameExists: Já existe uma nota com este nome
+  moveNote:
+    moveNote: Mover nota
+    moveNotes: Mover $n notas
+    moveName: Mover $f
+    move: Mover
+    renamedTo: A nota será renomeada para $newName
+    multipleRenamedTo: "As seguintes notas serão renomeadas:"
+    numberRenamedTo: $n notas serão renomeadas para evitar conflitos
+  deleteNote: Apagar nota
+  renameFolder:
+    renameFolder: Renomear pasta
+    folderName: Nome da pasta
+    rename: Renomear
+    folderNameEmpty: O nome da pasta não pode estar vazio
+    folderNameContainsSlash: O nome da pasta não pode conter uma barra
+    folderNameExists: Já existe uma pasta com este nome
+  deleteFolder:
+    deleteFolder: Apagar pasta
+    deleteName: Apagar $f
+    delete: Apagar
+    alsoDeleteContents: Apagar também todas as notas dentro desta pasta
+  moveFolder:
+    moveFolder: Mover pasta
+    moveName: Mover $f
+    move: Mover
+    renamedTo: A pasta será renomeada para $newName
+    cantMoveHere: Não é possível mover a pasta para cá
+  folderColorTitle: Cor da pasta
+  noNotesFound: Nenhuma nota encontrada
+  noSubfolders: Nenhuma subpasta
+  moveFolderTo: Mover "$name" para...
+  goUp: Subir
+  root: Raiz
+  properties: Propriedades
+  path: Caminho
+  pathValue: "Caminho: $path"
+  lastModified: Última modificação
+  lastModifiedValue: "Última modificação: $date"
+  size: Tamanho
+  sizeValue: "Tamanho: $size KB"
+  close: Fechar
+  deleteNoteConfirm: Tem certeza de que deseja apagar esta nota?
+  color: Cor
+  noNotesToGraph: Nenhuma nota para o gráfico
+  failedToLoadGraph: "Falha ao carregar o gráfico: $error"
+  graphTitle: Gráfico
+  importPdf: Importar PDF
+  pdfFilesSelected: "Você selecionou $count arquivos PDF. Como deseja importá-los?"
+  separateNotes: Notas separadas
+  mergeIntoOne: Mesclar em um único arquivo
+  deviceNoPdfImport: Este dispositivo não suporta importação de PDF.
+  errorImporting: "Erro ao importar: $error"
+  filesImported: $count arquivos importados
+sentry:
+  consent:
+    title: Ajudar a melhorar o Saber?
+    description:
+      question: Você gostaria de relatar automaticamente erros inesperados? Isso me ajuda a identificar e corrigir problemas mais rapidamente.
+      scope: Os relatórios podem conter informações sobre o erro e seu dispositivo. Fiz todos os esforços para filtrar dados pessoais, mas alguns podem permanecer.
+      currentlyOff: Se você conceder consentimento, o relatório de erros será ativado após reiniciar o aplicativo.
+      currentlyOn: Se você revogar o consentimento, reinicie o aplicativo para desativar os relatórios de erros.
+      learnMoreInPrivacyPolicy(rich): Saiba mais na ${link(Política de Privacidade)}.
+    answers:
+      yes: Sim
+      no: Não
+      later: Pergunte-me mais tarde
+settings:
+  prefLabels:
+    strokeStabilization: Estabilização de traço
+    flatEdge: Borda plana
+    highlighterCapFlat: Plano
+    highlighterCapRound: Redondo
+    strokeStabilizationAmount: Quantidade de estabilização
+    strokePrediction: Predição de traço
+    strokePredictionAmount: Intensidade da predição
+    toolbarColorSlotsCount: Slots de cor na barra
+    themeVariant: Variante do tema
+    locale: Idioma do aplicativo
+    appTheme: Tema do aplicativo
+    platform: Tipo do tema
+    layoutSize: Tipo de leiaute
+    customAccentColor: Cor de destaque personalizada
+    hyperlegibleFont: Fonte Atkinson Hyperlegible
+    shouldCheckForUpdates: Verificar atualizações do Saber
+    shouldAlwaysAlertForUpdates: Atualizações mais rápidas
+    allowInsecureConnections: Permitir conexões inseguras
+    editorToolbarAlignment: Posição da barra de ferramentas
+    editorToolbarShowInFullscreen: Mostrar a barra de ferramentas em tela cheia
+    editorAutoInvert: Inverter notas no modo escuro
+    preferGreyscale: Preferir cores em escala de cinza
+    maxImageSize: Tamanho máximo da imagem
+    autoClearWhiteboardOnExit: Limpar quadro branco ao sair
+    disableEraserAfterUse: Desativar borracha automaticamente
+    hideFingerDrawingToggle: Ocultar botão de desenho com dedo
+    autoDisableFingerDrawingWhenStylusDetected: Desativar desenho com dedo automaticamente
+    editorPromptRename: Perguntar nome para novas notas
+    recentColorsDontSavePresets: Não salvar predefinições em cores recentes
+    recentColorsLength: Quantas cores recentes armazenar
+    printPageIndicators: Imprimir indicadores de página
+    autosave: Salvamento automático
+    shapeRecognitionDelay: Atraso no reconhecimento de forma
+    autoStraightenLines: Endireitar linhas automaticamente
+    simplifiedHomeLayout: Leiaute inicial simplificado
+    customDataDir: Pasta personalizada do Saber
+    sentry: Relatório de erros
+  prefDescriptions:
+    strokeStabilization: Suaviza sua escrita à mão
+    strokePrediction: Mostra uma ponta de tinta ligeiramente à frente da caneta enquanto você desenha (não é salva na nota; reduz a sensação de atraso)
+    strokePredictionAmount: Quão longe extrapolar enquanto desenha
+    toolbarColorSlotsCount: Número de cores para mostrar na barra de ferramentas
+    themeVariant: Variante do esquema de cores
+    hyperlegibleFont: Aumenta a legibilidade para usuários com baixa visão
+    allowInsecureConnections: (Não recomendado) Permitir que o Saber conecte a servidores com certificados autoassinados/não confiáveis
+    preferGreyscale: Para telas e-ink
+    autoClearWhiteboardOnExit: Limpa o quadro branco após você sair do aplicativo
+    disableEraserAfterUse: Volta automaticamente para a caneta após usar a borracha
+    maxImageSize: Imagens maiores que isso serão compactadas
+    hideFingerDrawing:
+      shown: Previne alternância acidental
+      fixedOn: O desenho com o dedo está fixo como ativado
+      fixedOff: O desenho com o dedo está fixo como desativado
+    autoDisableFingerDrawingWhenStylusDetected: Desativa o desenho com dedo quando uma caneta é detectada
+    editorPromptRename: Você sempre pode renomear notas depois
+    printPageIndicators: Mostrar indicadores de página nas exportações
+    autosave: Salvar automaticamente após um pequeno atraso, ou nunca
+    shapeRecognitionDelay: Com que frequência atualizar a visualização da forma
+    autoStraightenLines: Endireita linhas longas sem precisar usar a caneta de forma
+    simplifiedHomeLayout: Define uma altura fixa para cada visualização de nota
+    shouldAlwaysAlertForUpdates: Avise-me sobre atualizações assim que estiverem disponíveis
+    sentry:
+      active: Ativo
+      inactive: Inativo
+      activeUntilRestart: Ativo até você reiniciar o aplicativo
+      inactiveUntilRestart: Inativo até você reiniciar o aplicativo
+  themeVariants:
+    material: Material
+    amoled: AMOLED
+  prefCategories:
+    general: Geral
+    writing: Escrita
+    editor: Editor
+    performance: Desempenho
+    advanced: Avançado
+  themeModes:
+    system: Sistema
+    light: Claro
+    dark: Escuro
+  layoutSizes:
+    auto: Automático
+    phone: Celular
+    tablet: Tablet
+  accentColorPicker:
+    pickAColor: Selecionar uma cor
+  systemLanguage: Automático
+  axisDirections:
+    - Em cima
+    - Direita
+    - Embaixo
+    - Esquerda
+  reset:
+    title: Redefinir esta configuração?
+    button: Redefinir
+  resyncEverything: Ressincronizar tudo
+  openDataDir: Abrir pasta do Saber
+  customDataDir:
+    cancel: Cancelar
+    select: Selecionar
+    mustBeEmpty: A pasta selecionada deve estar vazia
+    mustBeDoneSyncing: Certifique-se de que a sincronização esteja concluída antes de alterar a pasta
+    unsupported: Este recurso é atualmente apenas para desenvolvedores. Usá-lo provavelmente resultará em perda de dados.
+  autosaveDisabled: Nunca
+  shapeRecognitionDisabled: Nunca
+  defaultPageColor: Cor padrão da página
+  pageColor: Cor da página
+  defaultLineColor: Cor padrão da linha
+  lineColor: Cor da linha
+  defaultLineHeight: "Altura padrão da linha: $height"
+  defaultMargins: Margens padrão
+  defaultMarginColor: Cor padrão das margens
+  invertInDarkMode: Inverter no modo escuro
+  invertColors: Inverter cores
+  invertColorsSubtitle: Ideal para modo escuro
+  selectTitle: Selecionar $title
+logs:
+  logs: Registros
+  viewLogs: Ver registros
+  debuggingInfo: Os registros contêm informações úteis para depuração e desenvolvimento
+  noLogs: Nenhum registro aqui!
+  useTheApp: Os registros aparecerão aqui conforme você usa o aplicativo
+login:
+  title: Login
+  form:
+    agreeToPrivacyPolicy(rich): Ao fazer login, você concorda com a ${linkToPrivacyPolicy(Política de Privacidade)}.
+  signup(rich): Ainda não tem uma conta? ${linkToSignup(Registre-se agora)}!
+  notYou(rich): Não é você? ${undoLogin(Escolher outra conta)}.
+  status:
+    loggedOut: Desconectado
+    tapToLogin: Toque para fazer login com o Nextcloud
+    hi: Olá, $u!
+    almostDone: Quase pronto para sincronização, toque para finalizar o login
+    loggedIn: Logado com o Nextcloud
+  ncLoginStep:
+    whereToStoreData: "Escolha onde deseja armazenar seus dados:"
+    saberNcServer: Servidor Nextcloud do Saber
+    otherNcServer: Outro servidor Nextcloud
+    serverUrl: URL do servidor
+    loginWithSaber: Login com Saber
+    loginWithNextcloud: Login com Nextcloud
+    loginFlow:
+      pleaseAuthorize: Por favor, autorize o Saber a acessar sua conta Nextcloud
+      followPrompts: Por favor, siga as instruções na interface do Nextcloud
+      browserDidntOpen: A página de login não abriu? Clique aqui
+  encLoginStep:
+    enterEncPassword: "Para proteger seus dados, digite sua senha de criptografia:"
+    newToSaber: Novo no Saber? Basta digitar uma nova senha de criptografia.
+    encPassword: Senha de criptografia
+    encFaqTitle: Perguntas frequentes
+    wrongEncPassword: A descriptografia falhou com a senha fornecida. Por favor, tente inseri-la novamente.
+    connectionFailed: Algo deu errado ao conectar-se ao servidor. Por favor, tente novamente mais tarde.
+    encFaq:
+      -
+        q: O que é uma senha de criptografia? Por que usar duas senhas?
+        a: |-
+          A senha do Nextcloud é usada para acessar a nuvem. A senha de criptografia "embaralha" seus dados antes que eles cheguem à nuvem.
+          Mesmo que alguém obtenha acesso à sua conta do Nextcloud, suas notas permanecerão seguras e criptografadas com uma senha separada. Isso fornece uma segunda camada de segurança para proteger seus dados.
+          Ninguém pode acessar suas notas no servidor sem sua senha de criptografia, mas isso também significa que se você esquecer sua senha de criptografia, perderá o acesso aos seus dados.
+      -
+        q: Ainda não defini uma senha de criptografia. Onde consigo uma?
+        a: |-
+          Escolha uma nova senha de criptografia e digite-a acima.
+          O Saber gerará suas chaves de criptografia a partir desta senha automaticamente.
+      -
+        q: Posso usar a mesma senha da minha conta Nextcloud?
+        a: Sim, mas tenha em mente que seria mais fácil para o administrador do servidor ou outra pessoa acessar suas notas se eles obtiverem acesso à sua conta Nextcloud.
+profile:
+  title: Meu perfil
+  logout: Sair
+  quotaUsage: Você está usando $used de $total ($percent%)
+  connectedTo: Conectado a
+  quickLinks:
+    serverHomepage: Página inicial do servidor
+    deleteAccount: Apagar conta
+  faqTitle: Perguntas frequentes
+  faq:
+    -
+      q: Eu perderei minhas notas se eu sair da minha conta?
+      a: Não. Suas notas permanecerão tanto no seu dispositivo quanto no servidor. Elas não serão sincronizadas com o servidor até você fazer login novamente. Certifique-se de que a sincronização esteja concluída antes de sair para não perder nenhum dado (veja o progresso da sincronização na tela inicial).
+    -
+      q: Como altero minha senha do Nextcloud?
+      a: Vá para o site do seu servidor e faça login. Então vá para Configurações > Segurança > Mudar senha. Você precisará sair e fazer login novamente no Saber após alterar sua senha.
+    -
+      q: Como altero minha senha de criptografia?
+      a: |-
+        0. Certifique-se de que a sincronização esteja concluída (veja o progresso da sincronização na tela inicial).
+        1. Saia do Saber.
+        2. Vá para o site do seu servidor e apague sua pasta 'Saber'. Isso apagará todas as suas notas do servidor.
+        3. Faça login novamente no Saber. Você pode escolher uma nova senha de criptografia ao fazer login.
+        4. Não se esqueça de sair e fazer login novamente no Saber em seus outros dispositivos também.
+    -
+      q: Como posso apagar minha conta?
+      a: |-
+        Toque no botão "@:profile.quickLinks.deleteAccount" acima e faça login se necessário.
+        Se você estiver usando o servidor oficial do Saber, sua conta será apagada após um período de carência de 1 semana. Você pode entrar em contato comigo em adilhanney@disroot.org durante este período para cancelar a exclusão.
+        Se você estiver usando um servidor de terceiros, pode não haver uma opção para apagar sua conta: você precisará consultar a política de privacidade do servidor para mais informações.
+appInfo:
+  licenseNotice: |-
+    Notes  Copyright © 2025-$buildYear  Gustavo Resende
+    Saber  Copyright © 2022-$buildYear  Adil Hanney
+    Este programa vem sem absolutamente nenhuma garantia. Este é um software livre e você pode redistribuí-lo sob certas condições.
+  debug: DEBUG
+  sponsorButton: Toque aqui para me patrocinar ou comprar mais armazenamento
+  licenseButton: Toque aqui para ver mais informações de licença
+  privacyPolicyButton: Toque aqui para ver a política de privacidade
+update:
+  updateAvailable: Atualização disponível
+  updateAvailableDescription: "Uma nova versão do aplicativo está disponível:"
+  update: Atualizar
+  downloadNotAvailableYet: O download ainda não está disponível para sua plataforma. Verifique novamente em breve.
+editor:
+  navigation:
+    title: Notes
+    pdfOutlines: Tópicos do PDF
+    firstPage: Primeira página
+    lastPage: Última página
+    goToPage: Ir para página
+    pageNumber: Número da página
+    pageNumberHint: "Página $total"
+  pens:
+    calligraphyPen: Caneta de caligrafia
+    fountainPen: Caneta tinteiro
+    ballpointPen: Caneta esferográfica
+    highlighter: Marcador
+    shapePen: Caneta de forma
+    laserPointer: Apontador laser
+  selectionBar:
+    copy: Copiar
+    cut: Recortar
+    paste: Colar
+    move: Mover
+    delete: Excluir
+    duplicate: Duplicar
+    share: Compartilhar
+    shareAsSvg: Compartilhar como SVG
+  toolbar:
+    toggleColors: Alternar cores
+    select: Selecionar
+    toggleEraser: Alternar borracha
+    photo: Imagens
+    text: Texto
+    toggleFingerDrawing: Alternar desenho com dedo
+    undo: Desfazer
+    redo: Refazer
+    export: Exportar
+    exportAs: "Exportar como:"
+    fullscreen: Tela cheia (F11)
+  penOptions:
+    size: Tamanho
+    opacity: Opacidade
+  colors:
+    colorPicker: Seletor de cores
+    customBrightnessHue: Personalizado $b $h
+    customHue: Personalizado $h
+    dark: escuro
+    light: claro
+    black: Preto
+    darkGrey: Cinza escuro
+    grey: Cinza
+    lightGrey: Cinza claro
+    white: Branco
+    red: Vermelho
+    green: Verde
+    cyan: Ciano
+    blue: Azul
+    yellow: Amarelo
+    purple: Roxo
+    pink: Rosa
+    orange: Laranja
+    pastelRed: Vermelho pastel
+    pastelOrange: Laranja pastel
+    pastelYellow: Amarelo pastel
+    pastelGreen: Verde pastel
+    pastelCyan: Ciano pastel
+    pastelBlue: Azul pastel
+    pastelPurple: Roxo pastel
+    pastelPink: Rosa pastel
+  pdfLoading:
+    decrypting: Descriptografando PDF…
+    loading: Carregando PDF…
+  vaultPdfLargeRam:
+    allowLarge: Permitir PDFs grandes na RAM
+    allowLargeSubtitleOn: PDFs >100MB podem carregar na RAM (risco de travamento)
+    allowLargeSubtitleOff: PDFs >100MB sempre usam arquivo temporário (padrão, seguro)
+  imageOptions:
+    title: Opções de imagem
+    invertible: Invertível
+    download: Download
+    setAsBackground: Definir como fundo
+    removeAsBackground: Remover como fundo
+    delete: Excluir
+  menu:
+    setCoverImage: Definir imagem de capa
+    clearPage: Limpar página $page/$totalPages
+    clearAllPages: Limpar todas as páginas
+    insertPage: Inserir página abaixo
+    duplicatePage: Duplicar página
+    deletePage: Apagar página
+    lineHeight: Altura da linha
+    lineHeightDescription: Também controla o tamanho do texto para notas digitadas
+    lineThickness: Espessura da linha
+    lineThicknessDescription: Espessura da linha de fundo
+    backgroundImageFit: Ajuste da imagem de fundo
+    backgroundPattern: Padrão de fundo
+    import: Importar
+    watchServer: Observar atualizações no servidor
+    watchServerReadOnly: A edição está desativada enquanto observa o servidor
+    boxFits:
+      fill: Esticar
+      cover: Cobrir
+      contain: Conter
+    bgPatterns:
+      none: Em branco
+      college: Pautado com margem
+      collegeRtl: Pautado com margem (Invertido)
+      lined: Pautado
+      grid: Grade
+      dots: Pontos
+      staffs: Pentagrama
+      tablature: Tablatura
+      cornell: Cornell
+  newerFileFormat:
+    readOnlyMode: Modo somente leitura
+    title: Esta nota foi editada usando uma versão mais recente do Saber
+    subtitle: A edição desta nota pode resultar na perda de algumas informações. Deseja ignorar isso e editá-la mesmo assim?
+    allowEditing: Permitir edição
+  quill:
+    typeSomething: Digite algo aqui...
+  hud:
+    unlockZoom: Desbloquear zoom
+    lockZoom: Bloquear zoom
+    unlockSingleFingerPan: Ativar rolagem com um dedo
+    lockSingleFingerPan: Desativar rolagem com um dedo
+    unlockAxisAlignedPan: Desbloquear rolagem horizontal ou vertical
+    lockAxisAlignedPan: Bloquear rolagem horizontal ou vertical
+  pages: Páginas
+  untitled: Sem título
+  needsToSaveBeforeExiting: Salvando suas alterações... Você pode sair do editor com segurança quando terminar
+  plot3dSurface: Plotar superfície 3D
+  addInternalLink: Adicionar link interno
+  noNotesMatchQuery: Nenhuma nota corresponde à pesquisa
+  tagsAndLinks: Tags e links
+  noLinksOnPage: Nenhum link nesta página
+  strokeToText: Traço para texto
+  selectionToLatex: Seleção para LaTeX
+  noteHandwritingToLatex: Traços da nota para LaTeX
+  recognizedLatexTitle: LaTeX reconhecido
+  calculate: Calcular
+  lockImage: Bloquear imagem
+  unlockImage: Desbloquear imagem
+  cropImage: Recortar imagem
+  setAsBackground: Definir como fundo
+  copyToClipboard: Copiado para a área de transferência
+  copy: Copiar
+  goBack: Voltar
+  areaEraserMemorySafeQueue: Borracha limitada para evitar falta de memória — finalizando em segundo plano
+  add: Adicionar
+  close: Fechar
+  imageSetAsBackground: Imagem definida como fundo
+  cropBitmapOnly: Recorte disponível apenas para imagens bitmap
+  failedToLoadImageForCrop: Falha ao carregar imagem para recorte
+  failedToResolveEquation: "Falha ao resolver equação: $error"
+  equationHint: 'Não foi possível resolver a equação. Certifique-se de incluir o sinal de igual "=".'
+  couldNotRecognizeText: Não foi possível reconhecer o texto
+  recognitionError: "Erro de reconhecimento: $error"
+  failedToDeleteNote: "Falha ao apagar nota: $error"
+  errorImportingImage: Erro ao importar imagem
+  errorImportingImageIndex: "Erro ao importar imagem $index: $error"
+  errorInsertingImage: "Erro ao inserir imagem: $error"
+  createTable: Criar tabela
+  dataAndTools: Dados e ferramentas
+  insert: Inserir
+  export: Exportar
+  splitView: Modo dividido
+  actions: Ações
+  invertInDarkMode: Inverter no modo escuro
+  overrideAppSettingForNote: Substituir configuração do app apenas para esta nota
+  replaceDefault: Substituir padrão
+  portrait: Retrato
+  landscape: Paisagem
+  selectTitle: Selecionar $title
+  plotFunction: Plotar função
+  calculator: Calculadora
+  insertTable: Inserir tabela
+  plot3D: Plot 3D
+  openSecondNote: Abrir segunda nota
+  noNotesMatchSearch: Nenhuma nota corresponde à pesquisa
+  pickFile: Escolher arquivo
+  editorTitle: Editor
+export:
+  noValidPagesSelected: Nenhuma página válida selecionada
+  exportFailed: "Falha na exportação: $error"
+  exportNote: Exportar nota
+  format: Formato
+  pdf: PDF
+  png: PNG
+  pngSubtitle: Exportação rápida; codificação nativa (melhor em alta resolução)
+  jpeg: JPEG
+  jpegSubtitle: Arquivos menores; mais lento em alta resolução que PNG
+  pages: Páginas
+  allPages: Todas as páginas
+  currentPage: Página atual
+  customRange: Intervalo personalizado
+  invertColors: Inverter cores
+  invertColorsSubtitle: Exportar nota com cores de página e tinta invertidas
+  cancel: Cancelar
+  export: Exportar
+  exportSba: Exportar SBA
+  exportMetadata: Exportar metadados
+  exportMetadataSubtitle: Incluir datas de criação e edição, tempo gasto, local e impressão digital da página no arquivo. Desligue para compartilhar com menos dados.
+  unencrypted: Não criptografado
+  encrypted: Criptografado (definir senha)
+  setSharedPassword: Definir senha compartilhada
+  encryptedSba: SBA criptografado
+  import: Importar
+  exportSbaContent: "Exporte sem criptografia (compartilhe como está) ou criptografado com uma senha que você pode compartilhar com o destinatário.\n\nLinks e tags são sempre removidos ao exportar."
+  setPasswordContent: "Digite uma senha para criptografar o SBA. Compartilhe esta senha com o destinatário para que ele possa abrir o arquivo."
+  passwordRequired: Senha é obrigatória
+  passwordsDoNotMatch: As senhas não coincidem
+  confirmPassword: Confirmar senha
+  encryptedSbaContent: "Este arquivo SBA está criptografado. Digite a senha compartilhada para importar a nota."
+  customRangeHint: "ex: 1,3,5-7"
+  pageNumbers: Números das páginas
+  resolution: Resolução
+  resolutionPdfVector: Traços vetoriais (leve, nítido em qualquer zoom)
+  resolution72: 72 DPI (rápido)
+  resolution150: 150 DPI
+  resolution300: 300 DPI (qualidade de impressão)
+  exportFolder: Exportar pasta
+  exportFolderAsSba: Como arquivos SBA
+  exportFolderAsPdf: Como arquivos PDF
+  exportFolderSubtitle: Um arquivo por nota — sem arquivos sbn2 separados
+  preparingExport: Preparando exportação...
+  exportFolderEmpty: Nenhuma nota para exportar nesta pasta
+  shareLinks: Compartilhar Links
+  shareLinksSubtitle: Incluir páginas vinculadas na exportação para o destinatário receber um documento autocontido
+  defaultExportPath: Caminho padrão de exportação
+  defaultExportPathSubtitle: Arquivos exportados são salvos aqui. Obrigatório ao exportar com Compartilhar Links.
+  defaultExportPathRequired: Defina o Caminho padrão de exportação nas Configurações antes de exportar com Compartilhar Links.
+  exportingNote: Exportando nota...
+  exportComplete: Exportação concluída
+  importAfterExportDone: Por favor, importe após a exportação terminar.
+vault:
+  unlock: Desbloquear
+  vaultLocked: Cofre bloqueado
+  vaultLockedMessage: Suas notas estão criptografadas. Digite sua senha para acessá-las.
+  filesWaitingToImport: Você tem $count arquivo(s) aguardando importação. Desbloqueie para continuar.
+  password: Senha
+  failedToInit: Falha ao inicializar o cofre. Tente novamente.
+  incorrectOrCorrupted: Senha incorreta ou cofre corrompido.
+  migrationErrorContent: "Falha ao migrar arquivos: $error\n\nSeus arquivos permanecem no local original."
+  vaultCreatedContent: "Suas notas foram criptografadas e armazenadas no cofre. Você precisará digitar sua senha ao reiniciar o aplicativo."
+  vaultDisabledContent: Suas notas foram descriptografadas e movidas de volta ao armazenamento regular.
+  migrationError: Erro de migração
+  vaultCreated: Cofre criado
+  incorrectPassword: Senha incorreta
+  incorrectPasswordMessage: A senha que você digitou está incorreta.
+  vaultDisabled: Cofre desativado
+  createVault: Criar cofre
+  encryptionPassword: Senha de criptografia
+  backupFileName: Nome do arquivo de backup
+  backupComplete: Backup concluído
+  restoreComplete: Restauração concluída
+  error: Erro
+  migratingFiles: Migrando arquivos
+  migratingFilesMessage: Por favor, aguarde enquanto os arquivos estão sendo migrados...
+  pbkdf16384: "16384 (Padrão)"
+  pbkdf32768: "32768 (Mais forte)"
+  pbkdf65536: "65536 (Paranóico)"
+  pbkdf131072: "131072 (Extremo)"
+  block1024: "1024 bytes (Legado)"
+  block4096: "4096 bytes (Padrão)"
+  block8192: "8192 bytes"
+  block65536: "65536 bytes (Máx)"
+  createVaultContent: Digite uma senha para criptografar suas notas.
+  confirmPassword: Confirmar senha
+  passwordMinLength: A senha deve ter pelo menos 6 caracteres
+  advancedSecurityOptions: Opções avançadas de segurança
+  backupVault: Fazer backup do cofre
+  backupData: Fazer backup dos dados
+  backupVaultSubtitle: Exportar cofre criptografado como arquivo zip
+  backupDataSubtitle: Exportar notas, configurações e metadados como arquivo zip
+  restoreVault: Restaurar cofre
+  restoreData: Restaurar dados
+  restoreVaultSubtitle: Substituir cofre por arquivo de backup
+  restoreDataSubtitle: Substituir notas, configurações e metadados por arquivo de backup
+  backupCompleteVault: "Seu backup do cofre criptografado foi salvo. O cofre está agora bloqueado e deve ser desbloqueado para continuar."
+  backupCompleteData: Suas notas, configurações e metadados foram salvos em backup.
+  restoreCompleteData: "Suas notas, configurações e metadados foram restaurados. O aplicativo pode precisar reiniciar para aplicar as alterações."
+  restoreCompleteVault: Cofre restaurado com sucesso. Desbloqueie seu cofre para acessar as notas.
+  backupFailed: "Falha no backup: $error"
+  restoreFailed: "Falha na restauração: $error"
+  restoreBackup: Restaurar backup
+  restoreDataConfirm: "Isso substituirá suas notas, configurações e metadados atuais pelo conteúdo do backup. Continuar?"
+  restoreVaultConfirm: "Isso substituirá seu cofre atual pelo conteúdo do backup. Continuar?"
+  fileName: Nome do arquivo
+toolbar:
+  derivative: Derivada
+  integral: Integral
+  mode2d: "2D"
+  mode3d: "3D"
+  calculusGraphSaved: Gráfico de cálculo com legenda salvo!
+  addNewSurface: Adicionar nova superfície
+  addNewField: Adicionar novo campo
+  addNewFunction: Adicionar nova função
+  system2d: "Sistema 2D (x, y)"
+  system3d: "Sistema 3D (x, y, z)"
+  play: Reproduzir
+  stop: Parar
+  clear: Limpar
+  copyValues: Copiar valores
+  saveImage: Salvar imagem
+  saveImageMetadata: Salvar imagem + metadados
+  start: Início
+  startCap: Tampa inicial
+  end: Fim
+  endCap: Tampa final
+  simulatePressure: Simular pressão
+  complete: Concluir
+  savePreset: Salvar predefinição
+  updatePreset: Atualizar predefinição
+  deletePreset: Excluir predefinição
+  fill: Preencher
+  mode: Modo
+  eraseStroke: Apagar traço
+  eraseArea: Apagar área
+  plot: Plotar
+  plot2dCartesian: "2D (Cartesiano)"
+  plot2dPolar: "2D (Polar)"
+  plot3dSurface: "Superfície 3D (Cartesiano)"
+  plot3dSpherical: "Superfície 3D (Esférico)"
+  vectorField2d: Campo vetorial 2D
+  vectorField3d: Campo vetorial 3D (fatia)
+  findRoots: Encontrar raízes
+  findMin: Encontrar mínimo
+  findMax: Encontrar máximo
+  showAsymptotes: Mostrar assíntotas
+  findSaddle: Encontrar ponto de sela
+  f2d: "2D f(x)"
+  f3d: "3D f(x,y)"

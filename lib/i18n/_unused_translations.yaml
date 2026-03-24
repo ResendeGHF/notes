@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2022 Adil Hanney <https://github.com/adil192>
+# SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"@@info": 
+  - Here are translations that exist in secondary locales but not in <en>.
+  - "[--full enabled] Furthermore, translations not used in 'lib/' according to the 't.<path>' pattern are written into <en>."
+en: 
+ar: 
+cs: 
+de: 
+eo: 
+es: 
+fa: 
+fr: 
+he: 
+hu: 
+it: 
+ja: 
+pt-BR: 
+ru: 
+tr: 
+zh-Hans-CN: 
+zh-Hant-TW: 
