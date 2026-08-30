@@ -44,7 +44,7 @@ class CanvasPreview extends StatelessWidget implements PreferredSizeWidget {
       currentStrokeDetectedShape: null,
       currentSelection: null,
       currentToolIsSelect: false,
-      currentScale: highQuality ? double.maxFinite : double.minPositive,
+      currentScale: highQuality ? double.maxFinite : 0.4,
       overrideInvert: overrideInvert,
     );
   }

@@ -28,7 +28,7 @@ Applies note tool settings to stows and tool singletons.
 ## Imports
 
 - `dart:convert`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/data/prefs.dart`
 - `package:saber/data/tools/_tool.dart`
 - `package:saber/data/tools/eraser.dart`

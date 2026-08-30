@@ -15,11 +15,6 @@ Comment:
  scripts, vendored packages, etc.), including upstream Saber material and
  fork-specific changes.
 
-Files: packages/perfect_freehand/**
-Copyright: Stephen Ruiz
-Copyright: Adil Hanney
-License: MIT
-
 Files: packages/onyxsdk_pen/**
 Copyright: Adil Hanney
 License: BSD-3-Clause

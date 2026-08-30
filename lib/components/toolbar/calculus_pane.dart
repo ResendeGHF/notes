@@ -75,32 +75,35 @@ class CalculusPane extends StatefulWidget {
     required this.colorScheme,
     required this.isDark,
     this.overlayContext,
+    this.initialMetadata,
+    this.onMetadataChanged,
   });
 
   final ColorScheme colorScheme;
   final bool isDark;
 
   final BuildContext? overlayContext;
+  final Map<String, dynamic>? initialMetadata;
+  final ValueChanged<Map<String, dynamic>>? onMetadataChanged;
 
   @override
   State<CalculusPane> createState() => _CalculusPaneState();
 }
 
 class _CalculusPaneState extends State<CalculusPane> {
-
   bool _isDerivative = true;
 
   bool _is2D = true;
 
-  final _exprCtrl = TextEditingController(text: 'x^2*sin(x)');
-  final _xPointCtrl = TextEditingController(text: '1');
-  final _yPointCtrl = TextEditingController(text: '0');
-  final _dirXCtrl = TextEditingController(text: '1');
-  final _dirYCtrl = TextEditingController(text: '0');
-  final _aCtrl = TextEditingController(text: '0');
-  final _bCtrl = TextEditingController(text: '1');
-  final _yMinCtrl = TextEditingController(text: '0');
-  final _yMaxCtrl = TextEditingController(text: '1');
+  late final TextEditingController _exprCtrl;
+  late final TextEditingController _xPointCtrl;
+  late final TextEditingController _yPointCtrl;
+  late final TextEditingController _dirXCtrl;
+  late final TextEditingController _dirYCtrl;
+  late final TextEditingController _aCtrl;
+  late final TextEditingController _bCtrl;
+  late final TextEditingController _yMinCtrl;
+  late final TextEditingController _yMaxCtrl;
 
   DerivativeMethod _derivMethod = DerivativeMethod.complexStep;
   IntegrationMethod _integMethod = IntegrationMethod.gaussKronrod;
@@ -113,6 +116,85 @@ class _CalculusPaneState extends State<CalculusPane> {
   bool _isComputing = false;
 
   static final _parser = ComplexParser();
+
+  Map<String, dynamic> get metadata => {
+    'expression': _exprCtrl.text,
+    'xPoint': _xPointCtrl.text,
+    'yPoint': _yPointCtrl.text,
+    'dirX': _dirXCtrl.text,
+    'dirY': _dirYCtrl.text,
+    'a': _aCtrl.text,
+    'b': _bCtrl.text,
+    'yMin': _yMinCtrl.text,
+    'yMax': _yMaxCtrl.text,
+    'isDerivative': _isDerivative,
+    'is2D': _is2D,
+    'derivativeMethod': _derivMethod.name,
+    'integrationMethod': _integMethod.name,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    final data = widget.initialMetadata ?? const <String, dynamic>{};
+    _exprCtrl = TextEditingController(text: data['expression']?.toString());
+    _xPointCtrl = TextEditingController(text: data['xPoint']?.toString());
+    _yPointCtrl = TextEditingController(text: data['yPoint']?.toString());
+    _dirXCtrl = TextEditingController(text: data['dirX']?.toString());
+    _dirYCtrl = TextEditingController(text: data['dirY']?.toString());
+    _aCtrl = TextEditingController(text: data['a']?.toString());
+    _bCtrl = TextEditingController(text: data['b']?.toString());
+    _yMinCtrl = TextEditingController(text: data['yMin']?.toString());
+    _yMaxCtrl = TextEditingController(text: data['yMax']?.toString());
+    _isDerivative = data['isDerivative'] != false;
+    _is2D = data['is2D'] != false;
+    _derivMethod = DerivativeMethod.values.firstWhere(
+      (method) => method.name == data['derivativeMethod'],
+      orElse: () => DerivativeMethod.complexStep,
+    );
+    _integMethod = IntegrationMethod.values.firstWhere(
+      (method) => method.name == data['integrationMethod'],
+      orElse: () => IntegrationMethod.gaussKronrod,
+    );
+    for (final controller in [
+      _exprCtrl,
+      _xPointCtrl,
+      _yPointCtrl,
+      _dirXCtrl,
+      _dirYCtrl,
+      _aCtrl,
+      _bCtrl,
+      _yMinCtrl,
+      _yMaxCtrl,
+    ]) {
+      controller.addListener(_notifyMetadataChanged);
+    }
+  }
+
+  void _notifyMetadataChanged() {
+    widget.onMetadataChanged?.call(metadata);
+  }
+
+  void resetPane() {
+    setState(() {
+      _exprCtrl.clear();
+      _xPointCtrl.clear();
+      _yPointCtrl.clear();
+      _dirXCtrl.clear();
+      _dirYCtrl.clear();
+      _aCtrl.clear();
+      _bCtrl.clear();
+      _yMinCtrl.clear();
+      _yMaxCtrl.clear();
+      _isDerivative = true;
+      _is2D = true;
+      _derivMethod = DerivativeMethod.complexStep;
+      _integMethod = IntegrationMethod.gaussKronrod;
+      _resultText = '';
+      _errorText = '';
+    });
+    _notifyMetadataChanged();
+  }
 
   @override
   void dispose() {
@@ -761,8 +843,10 @@ class _CalculusPaneState extends State<CalculusPane> {
                     ButtonSegment(value: false, label: Text('Integral')),
                   ],
                   selected: {_isDerivative},
-                  onSelectionChanged: (s) =>
-                      setState(() => _isDerivative = s.first),
+                  onSelectionChanged: (s) {
+                    setState(() => _isDerivative = s.first);
+                    _notifyMetadataChanged();
+                  },
                 ),
               ),
             ],
@@ -777,7 +861,10 @@ class _CalculusPaneState extends State<CalculusPane> {
                     ButtonSegment(value: false, label: Text('3D')),
                   ],
                   selected: {_is2D},
-                  onSelectionChanged: (s) => setState(() => _is2D = s.first),
+                  onSelectionChanged: (s) {
+                    setState(() => _is2D = s.first);
+                    _notifyMetadataChanged();
+                  },
                 ),
               ),
             ],
@@ -787,7 +874,7 @@ class _CalculusPaneState extends State<CalculusPane> {
             controller: _exprCtrl,
             decoration: InputDecoration(
               labelText: _is2D ? 'f(x)' : 'f(x,y)',
-              hintText: _is2D ? 'e.g. x^2*sin(x)' : 'e.g. x^2+y^2',
+              hintText: _is2D ? 'Enter f(x)' : 'Enter f(x,y)',
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
@@ -912,10 +999,13 @@ class _CalculusPaneState extends State<CalculusPane> {
               items: DerivativeMethod.values,
               label: 'Method',
               itemLabel: (m) => m.label,
-              onChanged: (v) => setState(() => _derivMethod = v),
+              onChanged: (v) {
+                setState(() => _derivMethod = v);
+                _notifyMetadataChanged();
+              },
               isExpanded: _isDerivMethodExpanded,
-              onExpandChanged:
-                  (v) => setState(() => _isDerivMethodExpanded = v),
+              onExpandChanged: (v) =>
+                  setState(() => _isDerivMethodExpanded = v),
             ),
           ] else ...[
             if (_is2D) ...[
@@ -1056,29 +1146,44 @@ class _CalculusPaneState extends State<CalculusPane> {
                 items: IntegrationMethod.values,
                 label: 'Method',
                 itemLabel: (m) => m.label,
-                onChanged: (v) => setState(() => _integMethod = v),
+                onChanged: (v) {
+                  setState(() => _integMethod = v);
+                  _notifyMetadataChanged();
+                },
                 isExpanded: _isIntegMethodExpanded,
-                onExpandChanged:
-                    (v) => setState(() => _isIntegMethodExpanded = v),
+                onExpandChanged: (v) =>
+                    setState(() => _isIntegMethodExpanded = v),
               ),
           ],
           const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: _isComputing ? null : _compute,
-            icon: _isComputing
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.calculate),
-            label: Text(_isComputing ? 'Computing...' : 'Compute'),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _isComputing ? null : _compute,
+                  icon: _isComputing
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.calculate),
+                  label: Text(_isComputing ? 'Computing...' : 'Compute'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 8),
+              FilledButton.tonalIcon(
+                onPressed: resetPane,
+                icon: const Icon(Icons.restart_alt),
+                label: const Text('Reset'),
+              ),
+            ],
           ),
           if (_resultText.isNotEmpty) ...[
             const SizedBox(height: 16),

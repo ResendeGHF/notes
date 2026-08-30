@@ -65,7 +65,7 @@ Clears internal state so eraser works correctly after undo/redo (no stale stroke
 - `dart:math`
 - `dart:typed_data`
 - `dart:ui`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/canvas/_circle_stroke.dart`
 - `package:saber/components/canvas/_rectangle_stroke.dart`
 - `package:saber/components/canvas/_shape_stroke.dart`

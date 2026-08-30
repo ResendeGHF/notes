@@ -13,9 +13,23 @@ void main() {
       expect(ToolId.values, contains(ToolId.ballpointPen));
       expect(ToolId.values, contains(ToolId.calligraphyPen));
       expect(ToolId.values, contains(ToolId.shapePen));
-      expect(ToolId.values, contains(ToolId.verticalSpacePen));
-      expect(ToolId.values, contains(ToolId.horizontalSpacePen));
       expect(ToolId.values, contains(ToolId.advancedPen));
+      expect(
+        ToolId.values.any((id) => id.name == 'verticalSpacePen'),
+        isFalse,
+      );
+      expect(
+        ToolId.values.any((id) => id.name == 'horizontalSpacePen'),
+        isFalse,
+      );
+      expect(
+        ToolId.parsePenType('VerticalSpacePen', fallback: ToolId.fountainPen),
+        ToolId.ballpointPen,
+      );
+      expect(
+        ToolId.parsePenType('HorizontalSpacePen', fallback: ToolId.fountainPen),
+        ToolId.ballpointPen,
+      );
       expect(ToolId.values, contains(ToolId.highlighter));
       expect(ToolId.values, contains(ToolId.eraser));
       expect(ToolId.values, contains(ToolId.select));

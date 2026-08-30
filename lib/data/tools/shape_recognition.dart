@@ -9,16 +9,17 @@ import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.
     show
         computeRoundness,
         DefaultUnistrokeNames,
-        fitLineAndProjectExtent,
         isAngleBracketPreferred,
         isBracePreferred,
         isBracketPreferred,
         RecognizedUnistroke;
-import 'package:perfect_freehand/perfect_freehand.dart' show StrokeEndOptions;
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart'
+    show StrokeEndOptions;
 import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/shape_geometry.dart';
 import 'package:saber/data/tools/shape_tool.dart';
 
 class ShapeRecognitionTimer {
@@ -41,195 +42,183 @@ class ShapeRecognitionTimer {
   }
 }
 
-Stroke _shapeStrokeToRealStroke(ShapeStroke shapeStroke, Stroke rawStroke) {
-  final opts = rawStroke.options;
-  final stroke = Stroke(
+/// Highlighter blend modes need ink strokes; straighten to a dense line.
+Stroke _highlighterLineInk(Stroke rawStroke) {
+  final s = rawStroke.copy();
+  s.convertToLine();
+  s.densifyStraightLine();
+  return s;
+}
+
+ShapeStroke _shapeFromConfig(Stroke rawStroke, ShapeConfig config) {
+  return ShapeStroke(
     color: rawStroke.color,
-    pressureEnabled: rawStroke.pressureEnabled,
-    options: opts.copyWith(
+    fillColor: rawStroke.color.withValues(alpha: 0.2),
+    fill: false,
+    pressureEnabled: false,
+    options: rawStroke.options.copyWith(
+      simulatePressure: false,
       isComplete: true,
       start: StrokeEndOptions.start(
         taperEnabled: false,
-        customTaper: opts.start.customTaper,
-        cap: opts.start.cap,
-        easing: opts.start.easing,
+        customTaper: rawStroke.options.start.customTaper,
+        cap: rawStroke.options.start.cap,
+        easing: rawStroke.options.start.easing,
       ),
       end: StrokeEndOptions.end(
         taperEnabled: false,
-        customTaper: opts.end.customTaper,
-        cap: opts.end.cap,
-        easing: opts.end.easing,
+        customTaper: rawStroke.options.end.customTaper,
+        cap: rawStroke.options.end.cap,
+        easing: rawStroke.options.end.easing,
       ),
     ),
     pageIndex: rawStroke.pageIndex,
     page: rawStroke.page,
-    toolId: rawStroke.toolId,
+    toolId: ToolId.shapeTool,
+    config: config.ensuredControlPoints(),
   );
-  stroke.replacePointsFromEraser(shapeStroke.pointsForEraser);
-  stroke.rotationDeg = shapeStroke.rotationDeg;
-  return stroke;
 }
 
+List<Offset> _fitPoints(Stroke rawStroke, RecognizedUnistroke detected) {
+  // Prefer the drawn centerline. highQualityPolygon is a thickened outline and
+  // inflates size / invents sharp corners that break ellipse vs rect decisions.
+  final orig = detected.originalPoints;
+  if (orig.length >= 2) return orig;
+  final hq = rawStroke.highQualityPolygon;
+  if (hq.length >= 3) return hq;
+  return const <Offset>[];
+}
+
+/// Classify with `$1`, then fit a parametric [ShapeStroke] (or ink for highlighter lines).
 Stroke convertStrokeToShapeStroke(
   Stroke rawStroke,
   RecognizedUnistroke detected,
 ) {
-  final List<Offset> rawPoints = rawStroke.highQualityPolygon;
-
-  if (rawPoints.length < 2) return rawStroke;
+  final points = _fitPoints(rawStroke, detected);
+  if (points.length < 2) return rawStroke;
 
   final String name = detected.name?.toString().split('.').last ?? '';
+  final isHighlighter = rawStroke.toolId == ToolId.highlighter;
 
   switch (detected.name) {
     case DefaultUnistrokeNames.line:
-      final s = rawStroke.copy();
-      final orig = detected.originalPoints;
-      if (orig.length >= 2) {
-        final len = (orig.last - orig.first).distance;
-        if (len >= 2.0) {
-          s.convertToLine();
-          if (rawStroke.toolId == ToolId.highlighter) s.densifyStraightLine();
-        }
-      }
-      return s;
+      if (isHighlighter) return _highlighterLineInk(rawStroke);
+      final cfg = ShapeGeometry.fitLine(points);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
 
     case DefaultUnistrokeNames.arrow:
-      final sArrow = rawStroke.copy();
-      final origArrow = detected.originalPoints;
-      if (origArrow.length >= 2) {
-        final len = (origArrow.last - origArrow.first).distance;
-        if (len >= 2.0) {
-          sArrow.convertToLine();
-          if (rawStroke.toolId == ToolId.highlighter) sArrow.densifyStraightLine();
-        }
-      }
-      return sArrow;
+      if (isHighlighter) return _highlighterLineInk(rawStroke);
+      final cfg = ShapeGeometry.fitLine(points, kind: ShapeKind.arrow);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
 
     case DefaultUnistrokeNames.rectangle:
-      final orig = detected.originalPoints;
-      final rect = detected.convertToRect();
-      final aspect = rect.height > 0 ? rect.width / rect.height : 1.0;
+      final roundness = points.length >= 4 ? computeRoundness(points) : 0.5;
+      final oriented = ShapeGeometry.fitOrientedRect(points);
+      final aspect = oriented == null
+          ? 1.0
+          : oriented.width / math.max(oriented.height, 1e-6);
+      final extremeAspect = aspect > 1.75 || aspect < 1 / 1.75;
 
-      final extremeAspect = aspect > 5.0 || aspect < 0.2;
-      final roundness = orig.length >= 4 ? computeRoundness(orig) : 0.5;
-      final isEllipse = extremeAspect
-          ? (roundness > 0.25)
-          : (roundness > 0.55);
-      if (orig.length >= 4 && isEllipse && rect.width > 0 && rect.height > 0) {
-        final oriented = _computeOrientedEllipse(rawStroke, detected, orig);
-        final isCircle = (oriented.bounds.width - oriented.bounds.height).abs() <=
-            math.max(oriented.bounds.width, oriented.bounds.height) * 0.1;
-        return _shapeStrokeToRealStroke(
-          ShapeStroke(
-            color: rawStroke.color,
-            fillColor: rawStroke.color.withValues(alpha: 0.2),
-            fill: false,
-            pressureEnabled: false,
-            options: rawStroke.options.copyWith(simulatePressure: false),
-            pageIndex: rawStroke.pageIndex,
-            page: rawStroke.page,
-            toolId: rawStroke.toolId,
-            config: ShapeConfig(
-              kind: isCircle ? ShapeKind.circle : ShapeKind.ellipse,
-              bounds: oriented.bounds,
-              start: oriented.bounds.topLeft,
-              end: oriented.bounds.bottomRight,
-              rotationDeg: oriented.rotationDeg,
-            ),
-          ),
-          rawStroke,
-        );
-      }
-      final aspectRect = rect.height == 0 ? 1.0 : rect.width / rect.height;
-      final rectBounds = (aspectRect > 0.9 && aspectRect < 1.1)
-          ? Rect.fromCenter(
-              center: rect.center,
-              width: math.max(rect.width, rect.height),
-              height: math.max(rect.width, rect.height),
-            )
-          : rect;
-      return _shapeStrokeToRealStroke(
-        ShapeStroke(
-          color: rawStroke.color,
-          fillColor: rawStroke.color.withValues(alpha: 0.2),
-          fill: false,
-          pressureEnabled: false,
-          options: rawStroke.options.copyWith(simulatePressure: false),
-          pageIndex: rawStroke.pageIndex,
-          page: rawStroke.page,
-          toolId: rawStroke.toolId,
-          config: ShapeConfig(
-            kind: ShapeKind.rectangle,
-            bounds: rectBounds,
-            start: rectBounds.topLeft,
-            end: rectBounds.bottomRight,
-          ),
-        ),
-        rawStroke,
-      );
-
-    case DefaultUnistrokeNames.circle:
-      final orig = detected.originalPoints;
-      final rect = detected.convertToRect();
-
-      if (orig.length >= 4 && computeRoundness(orig) <= 0.55) {
-        final aspect = rect.height > 0 ? rect.width / rect.height : 1.0;
-        if (aspect > 2.0 || aspect < 0.5) {
-          return _shapeStrokeToRealStroke(
-            ShapeStroke(
-              color: rawStroke.color,
-              fillColor: rawStroke.color.withValues(alpha: 0.2),
-              fill: false,
-              pressureEnabled: false,
-              options: rawStroke.options.copyWith(simulatePressure: false),
-              pageIndex: rawStroke.pageIndex,
-              page: rawStroke.page,
-              toolId: rawStroke.toolId,
-              config: ShapeConfig(
-                kind: ShapeKind.rectangle,
-                bounds: rect,
-                start: rect.topLeft,
-                end: rect.bottomRight,
-              ),
-            ),
-            rawStroke,
+      // `$1` often labels elongated ellipses as rectangles (aspect destroyed by
+      // square-normalization). Decide with comparable residuals + roundness.
+      // Clearly angular → keep rectangle.
+      var asEllipse = false;
+      if (roundness <= 0.15) {
+        asEllipse = false;
+      } else {
+        final ellipseFit = points.length >= 5
+            ? ShapeGeometry.fitEllipseAlgebraic(points)
+            : null;
+        if (ellipseFit != null && oriented != null) {
+          final eErr = ShapeGeometry.ellipseFitError(
+            points,
+            center: ellipseFit.center,
+            rx: ellipseFit.rx,
+            ry: ellipseFit.ry,
+            angleRad: ellipseFit.angleRad,
           );
+          final rErr = ShapeGeometry.orientedRectFitError(
+            points,
+            center: oriented.center,
+            width: oriented.width,
+            height: oriented.height,
+            angleRad: oriented.angleRad,
+          );
+          if (eErr < rErr * 0.95) {
+            asEllipse = true;
+          } else if (extremeAspect && eErr <= rErr * 1.2 && roundness >= 0.4) {
+            asEllipse = true;
+          } else if (roundness >= 0.7 && eErr <= rErr * 1.1) {
+            asEllipse = true;
+          }
+        } else if (roundness >= 0.65) {
+          asEllipse = true;
         }
       }
-        final oriented = _computeOrientedEllipse(rawStroke, detected, orig);
-      final isCircle = (oriented.bounds.width - oriented.bounds.height).abs() <=
-          math.max(oriented.bounds.width, oriented.bounds.height) * 0.1;
-      return _shapeStrokeToRealStroke(
-        ShapeStroke(
-          color: rawStroke.color,
-          fillColor: rawStroke.color.withValues(alpha: 0.2),
-          fill: false,
-          pressureEnabled: false,
-          options: rawStroke.options.copyWith(simulatePressure: false),
-          pageIndex: rawStroke.pageIndex,
-          page: rawStroke.page,
-          toolId: rawStroke.toolId,
-          config: ShapeConfig(
-            kind: isCircle ? ShapeKind.circle : ShapeKind.ellipse,
-            bounds: oriented.bounds,
-            start: oriented.bounds.topLeft,
-            end: oriented.bounds.bottomRight,
-            rotationDeg: oriented.rotationDeg,
-          ),
-        ),
-        rawStroke,
-      );
+      if (asEllipse) {
+        final cfg = ShapeGeometry.fitEllipse(points);
+        return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+      }
+      final cfg = ShapeGeometry.fitRectangle(points);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+
+    case DefaultUnistrokeNames.circle:
+      // `$1` has a circle template, not an ellipse — ovals land here too.
+      // A circle is just an ellipse with equal axes, so always fit an ellipse.
+      final roundness = points.length >= 4 ? computeRoundness(points) : 0.7;
+      // Only demote to square when the stroke is clearly angular.
+      if (roundness <= 0.15) {
+        final cfg = ShapeGeometry.fitRectangle(points);
+        return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+      }
+      // Residual tie-break: freehand squares sometimes score as circles in `$1`.
+      if (roundness < 0.45 && points.length >= 5) {
+        final oriented = ShapeGeometry.fitOrientedRect(points);
+        final ellipseFit = ShapeGeometry.fitEllipseAlgebraic(points);
+        if (oriented != null && ellipseFit != null) {
+          final eErr = ShapeGeometry.ellipseFitError(
+            points,
+            center: ellipseFit.center,
+            rx: ellipseFit.rx,
+            ry: ellipseFit.ry,
+            angleRad: ellipseFit.angleRad,
+          );
+          final rErr = ShapeGeometry.orientedRectFitError(
+            points,
+            center: oriented.center,
+            width: oriented.width,
+            height: oriented.height,
+            angleRad: oriented.angleRad,
+          );
+          if (rErr < eErr * 0.75) {
+            final cfg = ShapeGeometry.fitRectangle(points);
+            return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+          }
+        }
+      }
+      final cfg = ShapeGeometry.fitEllipse(points);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
 
     case DefaultUnistrokeNames.triangle:
-      if (detected.originalPoints.length >= 3 &&
-          isAngleBracketPreferred(detected.originalPoints)) {
-        final pts = detected.originalPoints;
-        final angleName = _angleBracketLeftRight(pts);
+      final orig = detected.originalPoints;
+      final box = ShapeGeometry.boundsOf(orig);
+      final closed =
+          orig.length >= 3 &&
+          (orig.first - orig.last).distance <=
+              math.max(8.0, box.shortestSide * 0.25);
+      if (!closed &&
+          orig.length >= 3 &&
+          isAngleBracketPreferred(orig)) {
+        final angleName = _angleBracketLeftRight(orig);
         return _shapeStrokeFromSymbol(rawStroke, detected, angleName);
       }
-      return _shapeStrokeFromTriangle(rawStroke, detected);
+      final cfg = ShapeGeometry.fitTriangle(points);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+
     case DefaultUnistrokeNames.star:
-      return _shapeStrokeFromStar(rawStroke, detected);
+      final cfg = ShapeGeometry.fitStar(points);
+      return cfg != null ? _shapeFromConfig(rawStroke, cfg) : rawStroke;
+
     case DefaultUnistrokeNames.infinity:
       return _shapeStrokeFromSymbol(rawStroke, detected, 'infinity');
 
@@ -245,50 +234,14 @@ Stroke convertStrokeToShapeStroke(
         'rightBrace',
         'infinity',
       }.contains(name)) {
-        return _shapeStrokeFromSymbol(rawStroke, detected, _disambiguateSymbolName(name, detected.originalPoints));
+        return _shapeStrokeFromSymbol(
+          rawStroke,
+          detected,
+          _disambiguateSymbolName(name, detected.originalPoints),
+        );
       }
-
       return rawStroke;
   }
-}
-
-Stroke _shapeStrokeFromTriangle(Stroke rawStroke, RecognizedUnistroke detected) {
-  final bounds = _boundsOf(detected.originalPoints);
-  if (bounds.width <= 0 || bounds.height <= 0) return rawStroke;
-  final upward = _trianglePointsUpward(detected.originalPoints, bounds);
-
-  final kind = upward ? ShapeKind.triangleIsosceles : ShapeKind.nabla;
-  return _shapeStrokeToRealStroke(
-    ShapeStroke(
-      color: rawStroke.color,
-      fillColor: rawStroke.color.withValues(alpha: 0.2),
-      fill: false,
-      pressureEnabled: false,
-      options: rawStroke.options.copyWith(simulatePressure: false),
-      pageIndex: rawStroke.pageIndex,
-      page: rawStroke.page,
-      toolId: rawStroke.toolId,
-      config: ShapeConfig(
-        kind: kind,
-        bounds: bounds,
-        start: bounds.topLeft,
-        end: bounds.bottomRight,
-        data: kind == ShapeKind.triangleIsosceles
-            ? {'equilateral': true, 'upward': true}
-            : {},
-      ),
-    ),
-    rawStroke,
-  );
-}
-
-bool _trianglePointsUpward(List<Offset> points, Rect bounds) {
-  if (points.length < 3) return true;
-  double sumY = 0;
-  for (final p in points) sumY += p.dy;
-  final centroidY = sumY / points.length;
-  final centerY = bounds.center.dy;
-  return centroidY > centerY;
 }
 
 Stroke _shapeStrokeFromSymbol(
@@ -298,27 +251,17 @@ Stroke _shapeStrokeFromSymbol(
 ) {
   final canonical = detected.convertToCanonicalPolygon();
   if (canonical.length < 2) return rawStroke;
-  final bounds = _boundsOf(canonical);
+  final bounds = ShapeGeometry.boundsOf(canonical);
   final kind = _symbolNameToShapeKind(name);
   if (kind == null) return rawStroke;
-  return _shapeStrokeToRealStroke(
-    ShapeStroke(
-      color: rawStroke.color,
-      fillColor: rawStroke.color.withValues(alpha: 0.2),
-      fill: false,
-      pressureEnabled: false,
-      options: rawStroke.options.copyWith(simulatePressure: false),
-      pageIndex: rawStroke.pageIndex,
-      page: rawStroke.page,
-      toolId: rawStroke.toolId,
-      config: ShapeConfig(
-        kind: kind,
-        bounds: bounds,
-        start: bounds.topLeft,
-        end: bounds.bottomRight,
-      ),
-    ),
+  return _shapeFromConfig(
     rawStroke,
+    ShapeConfig(
+      kind: kind,
+      bounds: bounds,
+      start: bounds.topLeft,
+      end: bounds.bottomRight,
+    ),
   );
 }
 
@@ -328,18 +271,17 @@ bool _angleBracketDrawnBottomToTop(List<Offset> points) {
 }
 
 String _angleBracketLeftRight(List<Offset> points) {
-  final box = _boundsOf(points);
+  final box = ShapeGeometry.boundsOf(points);
   final cx = box.center.dx;
   final leftCount = points.where((p) => p.dx < cx).length;
   final moreOnLeft = leftCount >= points.length / 2;
   final drawnBottomToTop = _angleBracketDrawnBottomToTop(points);
-
   final isLeft = drawnBottomToTop ? !moreOnLeft : moreOnLeft;
   return isLeft ? 'leftAngleBracket' : 'rightAngleBracket';
 }
 
 String _disambiguateSymbolName(String name, List<Offset> points) {
-  final box = _boundsOf(points);
+  final box = ShapeGeometry.boundsOf(points);
   final cx = box.center.dx;
   var leftCount = 0;
   for (final p in points) {
@@ -349,7 +291,6 @@ String _disambiguateSymbolName(String name, List<Offset> points) {
 
   if (name == 'leftAngleBracket' || name == 'rightAngleBracket') {
     if (isBracePreferred(points)) {
-
       return rightCount > leftCount ? 'leftBrace' : 'rightBrace';
     }
   }
@@ -364,13 +305,8 @@ String _disambiguateSymbolName(String name, List<Offset> points) {
     if (isAngleBracketPreferred(points)) {
       return _angleBracketLeftRight(points);
     }
-
-    if (rightCount > leftCount) {
-      return 'rightBrace';
-    }
-    if (leftCount > rightCount) {
-      return 'leftBrace';
-    }
+    if (rightCount > leftCount) return 'rightBrace';
+    if (leftCount > rightCount) return 'leftBrace';
   }
 
   if (name == 'productory' || name == 'summatory') {
@@ -413,98 +349,40 @@ ShapeKind? _symbolNameToShapeKind(String name) {
   }
 }
 
-Stroke _shapeStrokeFromStar(Stroke rawStroke, RecognizedUnistroke detected) {
-  final canonical = detected.convertToCanonicalPolygon();
-  if (canonical.length < 2) return rawStroke;
-  final bounds = _boundsOf(canonical);
-  return _shapeStrokeToRealStroke(
-    ShapeStroke(
-      color: rawStroke.color,
-      fillColor: rawStroke.color.withValues(alpha: 0.2),
-      fill: false,
-      pressureEnabled: false,
-      options: rawStroke.options.copyWith(simulatePressure: false),
-      pageIndex: rawStroke.pageIndex,
-      page: rawStroke.page,
-      toolId: rawStroke.toolId,
-      config: ShapeConfig(
-        kind: ShapeKind.star,
-        bounds: bounds,
-        start: bounds.topLeft,
-        end: bounds.bottomRight,
-      ),
-    ),
-    rawStroke,
-  );
+Path? _cachedShapePreviewPath;
+RecognizedUnistroke? _cachedShapePreviewDetected;
+int _cachedShapePreviewStrokeLen = -1;
+int _cachedShapePreviewStrokeId = 0;
+
+/// Clears the cached dashed preview path (call when hold preview ends).
+void clearDetectedShapePreviewCache() {
+  _cachedShapePreviewPath = null;
+  _cachedShapePreviewDetected = null;
+  _cachedShapePreviewStrokeLen = -1;
+  _cachedShapePreviewStrokeId = 0;
 }
 
-Rect _boundsOf(List<Offset> points) {
-  if (points.isEmpty) return Rect.zero;
-  final xs = points.map((p) => p.dx);
-  final ys = points.map((p) => p.dy);
-  return Rect.fromPoints(
-    Offset(xs.reduce(math.min), ys.reduce(math.min)),
-    Offset(xs.reduce(math.max), ys.reduce(math.max)),
-  );
-}
-
-({Rect bounds, double rotationDeg}) _computeOrientedEllipse(
+Path buildDetectedShapePreviewPath(
   Stroke rawStroke,
   RecognizedUnistroke detected,
-  List<Offset> orig,
 ) {
-  final fitPoints = rawStroke.highQualityPolygon.length >= 3
-      ? rawStroke.highQualityPolygon
-      : orig;
-  final box = fitPoints.isEmpty ? Rect.zero : _boundsOf(fitPoints);
-  final center = box.center;
-  if (fitPoints.length < 3) {
-    final rx = box.width > 0 ? box.width / 2 : 1.0;
-    final ry = box.height > 0 ? box.height / 2 : 1.0;
-    return (
-      bounds: Rect.fromCenter(center: center, width: rx * 2, height: ry * 2),
-      rotationDeg: 0,
-    );
+  // Rebuilding ShapeStroke (~2k samples) every 33ms pulse was a major lag/crash
+  // source while a suggestion was visible. Cache until the detection changes.
+  final strokeId = identityHashCode(rawStroke);
+  if (identical(_cachedShapePreviewDetected, detected) &&
+      _cachedShapePreviewStrokeId == strokeId &&
+      _cachedShapePreviewStrokeLen == rawStroke.length &&
+      _cachedShapePreviewPath != null) {
+    return _cachedShapePreviewPath!;
   }
-  final (lineStart, lineEnd) = fitLineAndProjectExtent(fitPoints);
-  final dir = lineEnd - lineStart;
-  final len = dir.distance;
-  if (len < 1e-10) {
-    final rx = box.width > 0 ? box.width / 2 : 1.0;
-    final ry = box.height > 0 ? box.height / 2 : 1.0;
-    return (
-      bounds: Rect.fromCenter(center: center, width: rx * 2, height: ry * 2),
-      rotationDeg: 0,
-    );
-  }
-  final vx = dir.dx / len;
-  final vy = dir.dy / len;
-  final perpX = -vy;
-  final perpY = vx;
-  var tMin = double.infinity, tMax = -double.infinity;
-  var sMin = double.infinity, sMax = -double.infinity;
-  for (final p in fitPoints) {
-    final dx = p.dx - center.dx, dy = p.dy - center.dy;
-    final t = dx * vx + dy * vy;
-    final s = dx * perpX + dy * perpY;
-    if (t < tMin) tMin = t;
-    if (t > tMax) tMax = t;
-    if (s < sMin) sMin = s;
-    if (s > sMax) sMax = s;
-  }
-  final majorHalf = math.max((tMax - tMin) / 2, 2.0);
-  final minorHalf = math.max((sMax - sMin) / 2, 2.0);
-  final (w, h) = majorHalf >= minorHalf
-      ? (majorHalf * 2, minorHalf * 2)
-      : (minorHalf * 2, majorHalf * 2);
-  final bounds = Rect.fromCenter(center: center, width: w, height: h);
-  final rotationDeg = majorHalf >= minorHalf
-      ? math.atan2(vy, vx) * 180 / math.pi
-      : math.atan2(perpY, perpX) * 180 / math.pi;
-  return (bounds: bounds, rotationDeg: rotationDeg);
-}
 
-Path buildDetectedShapePreviewPath(Stroke rawStroke, RecognizedUnistroke detected) {
   final generated = convertStrokeToShapeStroke(rawStroke.copy(), detected);
-  return generated.highQualityPath;
+  final path = generated is ShapeStroke
+      ? generated.shapePath
+      : generated.highQualityPath;
+  _cachedShapePreviewPath = path;
+  _cachedShapePreviewDetected = detected;
+  _cachedShapePreviewStrokeLen = rawStroke.length;
+  _cachedShapePreviewStrokeId = strokeId;
+  return path;
 }

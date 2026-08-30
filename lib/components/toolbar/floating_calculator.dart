@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -20,6 +21,7 @@ import 'package:saber/components/toolbar/extrema_pane.dart';
 import 'package:saber/components/toolbar/ode_isolate.dart';
 import 'package:saber/components/toolbar/ode_visualizer.dart';
 import 'package:saber/components/toolbar/plot_animation_metadata.dart';
+import 'package:saber/components/toolbar/plot_input_parser.dart';
 import 'package:saber/components/toolbar/unit_converter.dart';
 import 'package:saber/services/math_engine/math_engine.dart';
 
@@ -33,26 +35,51 @@ typedef OnInsertImage =
 class FunctionDef {
   TextEditingController controller;
   Color color;
+  bool enabled;
   bool fillArea;
   TextEditingController tMinCtrl;
   TextEditingController tMaxCtrl;
   TextEditingController tDurationCtrl;
+  TextEditingController dMinXCtrl;
+  TextEditingController dMaxXCtrl;
+  TextEditingController dMinYCtrl;
+  TextEditingController dMaxYCtrl;
+  TextEditingController dMinZCtrl;
+  TextEditingController dMaxZCtrl;
+  CoordSystem2D coord2D;
+  CoordSystem3D coord3D;
 
   FunctionDef({
+    this.coord2D = CoordSystem2D.cartesian,
+    this.coord3D = CoordSystem3D.cartesian,
     required String initialText,
     required this.color,
+    this.enabled = true,
     this.fillArea = false,
     String tMin = '',
     String tMax = '',
     String durationMs = '6000',
+    String dMinX = '',
+    String dMaxX = '',
+    String dMinY = '',
+    String dMaxY = '',
+    String dMinZ = '',
+    String dMaxZ = '',
   }) : controller = TextEditingController(text: initialText),
        tMinCtrl = TextEditingController(text: tMin),
        tMaxCtrl = TextEditingController(text: tMax),
-       tDurationCtrl = TextEditingController(text: durationMs);
+       tDurationCtrl = TextEditingController(text: durationMs),
+       dMinXCtrl = TextEditingController(text: dMinX),
+       dMaxXCtrl = TextEditingController(text: dMaxX),
+       dMinYCtrl = TextEditingController(text: dMinY),
+       dMaxYCtrl = TextEditingController(text: dMaxY),
+       dMinZCtrl = TextEditingController(text: dMinZ),
+       dMaxZCtrl = TextEditingController(text: dMaxZ);
 
   bool get hasTimeAnimation {
-    final tMin = double.tryParse(tMinCtrl.text);
-    final tMax = double.tryParse(tMaxCtrl.text);
+    final parser = ComplexParser();
+    final tMin = parsePlotRealExpression(parser, tMinCtrl.text);
+    final tMax = parsePlotRealExpression(parser, tMaxCtrl.text);
     final duration = int.tryParse(tDurationCtrl.text);
     return tMin != null && tMax != null && tMax > tMin && (duration ?? 0) > 0;
   }
@@ -62,28 +89,53 @@ class FunctionDef {
     tMinCtrl.dispose();
     tMaxCtrl.dispose();
     tDurationCtrl.dispose();
+    dMinXCtrl.dispose();
+    dMaxXCtrl.dispose();
+    dMinYCtrl.dispose();
+    dMaxYCtrl.dispose();
+    dMinZCtrl.dispose();
+    dMaxZCtrl.dispose();
   }
 }
 
 class ScalarFuncDef {
   TextEditingController xCtrl, yCtrl, zCtrl, fCtrl;
   TextEditingController tMinCtrl, tMaxCtrl, tDurationCtrl;
+  TextEditingController dMinXCtrl, dMaxXCtrl;
+  TextEditingController dMinYCtrl, dMaxYCtrl;
+  TextEditingController dMinZCtrl, dMaxZCtrl;
+  bool enabled;
+  CoordSystem3D coord3D;
 
   ScalarFuncDef({
-    String x = 'u',
-    String y = 'v',
-    String z = '0',
-    String f = 'z',
+    this.coord3D = CoordSystem3D.cartesian,
+    this.enabled = true,
+    String x = '',
+    String y = '',
+    String z = '',
+    String f = '',
     String tMin = '',
     String tMax = '',
     String durationMs = '6000',
+    String dMinX = '',
+    String dMaxX = '',
+    String dMinY = '',
+    String dMaxY = '',
+    String dMinZ = '',
+    String dMaxZ = '',
   }) : xCtrl = TextEditingController(text: x),
        yCtrl = TextEditingController(text: y),
        zCtrl = TextEditingController(text: z),
        fCtrl = TextEditingController(text: f),
        tMinCtrl = TextEditingController(text: tMin),
        tMaxCtrl = TextEditingController(text: tMax),
-       tDurationCtrl = TextEditingController(text: durationMs);
+       tDurationCtrl = TextEditingController(text: durationMs),
+       dMinXCtrl = TextEditingController(text: dMinX),
+       dMaxXCtrl = TextEditingController(text: dMaxX),
+       dMinYCtrl = TextEditingController(text: dMinY),
+       dMaxYCtrl = TextEditingController(text: dMaxY),
+       dMinZCtrl = TextEditingController(text: dMinZ),
+       dMaxZCtrl = TextEditingController(text: dMaxZ);
 
   void dispose() {
     xCtrl.dispose();
@@ -93,11 +145,18 @@ class ScalarFuncDef {
     tMinCtrl.dispose();
     tMaxCtrl.dispose();
     tDurationCtrl.dispose();
+    dMinXCtrl.dispose();
+    dMaxXCtrl.dispose();
+    dMinYCtrl.dispose();
+    dMaxYCtrl.dispose();
+    dMinZCtrl.dispose();
+    dMaxZCtrl.dispose();
   }
 
   bool get hasTimeAnimation {
-    final tMin = double.tryParse(tMinCtrl.text);
-    final tMax = double.tryParse(tMaxCtrl.text);
+    final parser = ComplexParser();
+    final tMin = parsePlotRealExpression(parser, tMinCtrl.text);
+    final tMax = parsePlotRealExpression(parser, tMaxCtrl.text);
     final duration = int.tryParse(tDurationCtrl.text);
     return tMin != null && tMax != null && tMax > tMin && (duration ?? 0) > 0;
   }
@@ -107,17 +166,30 @@ class VectorFuncDef {
   TextEditingController xCtrl, yCtrl, zCtrl;
   TextEditingController pCtrl, qCtrl, rCtrl;
   TextEditingController tMinCtrl, tMaxCtrl, tDurationCtrl;
+  TextEditingController dMinXCtrl, dMaxXCtrl;
+  TextEditingController dMinYCtrl, dMaxYCtrl;
+  TextEditingController dMinZCtrl, dMaxZCtrl;
+  bool enabled;
+  CoordSystem3D coord3D;
 
   VectorFuncDef({
-    String x = 'u',
-    String y = 'v',
-    String z = '0',
-    String p = '1',
-    String q = '0',
-    String r = '0',
+    this.coord3D = CoordSystem3D.cartesian,
+    this.enabled = true,
+    String x = '',
+    String y = '',
+    String z = '',
+    String p = '',
+    String q = '',
+    String r = '',
     String tMin = '',
     String tMax = '',
     String durationMs = '6000',
+    String dMinX = '',
+    String dMaxX = '',
+    String dMinY = '',
+    String dMaxY = '',
+    String dMinZ = '',
+    String dMaxZ = '',
   }) : xCtrl = TextEditingController(text: x),
        yCtrl = TextEditingController(text: y),
        zCtrl = TextEditingController(text: z),
@@ -126,7 +198,13 @@ class VectorFuncDef {
        rCtrl = TextEditingController(text: r),
        tMinCtrl = TextEditingController(text: tMin),
        tMaxCtrl = TextEditingController(text: tMax),
-       tDurationCtrl = TextEditingController(text: durationMs);
+       tDurationCtrl = TextEditingController(text: durationMs),
+       dMinXCtrl = TextEditingController(text: dMinX),
+       dMaxXCtrl = TextEditingController(text: dMaxX),
+       dMinYCtrl = TextEditingController(text: dMinY),
+       dMaxYCtrl = TextEditingController(text: dMaxY),
+       dMinZCtrl = TextEditingController(text: dMinZ),
+       dMaxZCtrl = TextEditingController(text: dMaxZ);
 
   void dispose() {
     xCtrl.dispose();
@@ -138,11 +216,18 @@ class VectorFuncDef {
     tMinCtrl.dispose();
     tMaxCtrl.dispose();
     tDurationCtrl.dispose();
+    dMinXCtrl.dispose();
+    dMaxXCtrl.dispose();
+    dMinYCtrl.dispose();
+    dMaxYCtrl.dispose();
+    dMinZCtrl.dispose();
+    dMaxZCtrl.dispose();
   }
 
   bool get hasTimeAnimation {
-    final tMin = double.tryParse(tMinCtrl.text);
-    final tMax = double.tryParse(tMaxCtrl.text);
+    final parser = ComplexParser();
+    final tMin = parsePlotRealExpression(parser, tMinCtrl.text);
+    final tMax = parsePlotRealExpression(parser, tMaxCtrl.text);
     final duration = int.tryParse(tDurationCtrl.text);
     return tMin != null && tMax != null && tMax > tMin && (duration ?? 0) > 0;
   }
@@ -241,6 +326,8 @@ class FloatingCalculator extends StatefulWidget {
     required this.onInsertImage,
     this.visualizerMetadata,
     this.readOnlyVisualizer = false,
+    this.initialWorkspaceMetadata,
+    this.onWorkspaceMetadataChanged,
     this.menuOverlayContext,
   });
 
@@ -249,6 +336,8 @@ class FloatingCalculator extends StatefulWidget {
   final OnInsertImage onInsertImage;
   final PlotAnimationMetadata? visualizerMetadata;
   final bool readOnlyVisualizer;
+  final String? initialWorkspaceMetadata;
+  final ValueChanged<String?>? onWorkspaceMetadataChanged;
 
   final BuildContext? menuOverlayContext;
 
@@ -396,6 +485,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   bool _extremaCaptureMode = false;
   final OdeVisualizerController _odeVizController = OdeVisualizerController();
   bool get _isReadOnlyVisualizer => widget.readOnlyVisualizer;
+  bool _restoringWorkspaceMetadata = false;
+  Map<String, dynamic> _calculusMetadata = const {};
+  int _calculusResetNonce = 0;
 
   @override
   void initState() {
@@ -415,26 +507,10 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     _lastAnswer = _CalcCache.lastAnswer;
 
     if (_CalcCache.plotFunctions2D == null) {
-      _CalcCache.plotFunctions2D = [
-        FunctionDef(initialText: 'sin(x)', color: Colors.blue),
-      ];
-      _CalcCache.plotFunctions3D = [
-        FunctionDef(
-          initialText: 'sqrt(-(((sqrt(x^2+y^2)-4)^2))+2^2)',
-          color: Colors.indigo,
-        ),
-      ];
-      _CalcCache.scalarFunctions = [
-        ScalarFuncDef(
-          x: '3*sin(u)*cos(v)',
-          y: '3*sin(u)*sin(v)',
-          z: '3*cos(u)',
-          f: 'z',
-        ),
-      ];
-      _CalcCache.vectorFunctions = [
-        VectorFuncDef(x: 'u', y: 'v', z: '0', p: '-y', q: 'x', r: '0.5'),
-      ];
+      _CalcCache.plotFunctions2D = [];
+      _CalcCache.plotFunctions3D = [];
+      _CalcCache.scalarFunctions = [];
+      _CalcCache.vectorFunctions = [];
     }
 
     _plotFunctions2D = _CalcCache.plotFunctions2D!;
@@ -446,18 +522,19 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     _cYCtrl = TextEditingController(text: '0');
     _cZCtrl = TextEditingController(text: '0');
 
-    _odeDxCtrl = TextEditingController(text: 'y');
-    _odeDyCtrl = TextEditingController(text: '-x');
-    _odeDzCtrl = TextEditingController(text: '0.2*z*(1-z)');
-    _odeX0Ctrl = TextEditingController(text: '1');
-    _odeY0Ctrl = TextEditingController(text: '0');
-    _odeZ0Ctrl = TextEditingController(text: '1');
-    _odeT0Ctrl = TextEditingController(text: '0');
-    _odeStepCtrl = TextEditingController(text: '0.02');
-    _odeToleranceCtrl = TextEditingController(text: '1e-5');
+    _odeDxCtrl = TextEditingController();
+    _odeDyCtrl = TextEditingController();
+    _odeDzCtrl = TextEditingController();
+    _odeX0Ctrl = TextEditingController();
+    _odeY0Ctrl = TextEditingController();
+    _odeZ0Ctrl = TextEditingController();
+    _odeT0Ctrl = TextEditingController();
+    _odeStepCtrl = TextEditingController();
+    _odeToleranceCtrl = TextEditingController();
 
     _tabController = TabController(length: 8, vsync: this);
     _tabController.addListener(_onCalculatorTabChanged);
+    _loadWorkspaceMetadata(widget.initialWorkspaceMetadata);
     _loadVisualizerMetadata();
   }
 
@@ -468,6 +545,12 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
 
       _odeSamples.clear();
     }
+    _markWorkspaceChanged();
+  }
+
+  void _closeCalculator() {
+    _saveWorkspaceMetadataNow();
+    widget.onClose();
   }
 
   @override
@@ -591,6 +674,402 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     }
   }
 
+  void _loadWorkspaceMetadata(String? encoded) {
+    if (encoded == null || encoded.isEmpty || _isReadOnlyVisualizer) return;
+    try {
+      final raw = jsonDecode(encoded);
+      if (raw is! Map) return;
+      final data = raw.map((key, value) => MapEntry(key.toString(), value));
+      _restoringWorkspaceMetadata = true;
+
+      _replaceFunctionList(
+        _plotFunctions2D,
+        _readList(
+          data['plot2d'],
+        ).map((item) => _functionDefFromMetadata(item, is3D: false)).toList(),
+      );
+      _replaceFunctionList(
+        _plotFunctions3D,
+        _readList(
+          data['plot3d'],
+        ).map((item) => _functionDefFromMetadata(item, is3D: true)).toList(),
+      );
+      _replaceFunctionList(
+        _scalarFunctions,
+        _readList(data['scalar']).map(_scalarDefFromMetadata).toList(),
+      );
+      _replaceFunctionList(
+        _vectorFunctions,
+        _readList(data['vector']).map(_vectorDefFromMetadata).toList(),
+      );
+
+      final ode = _readMap(data['ode']);
+      if (ode.isNotEmpty) {
+        _odeDimension = (ode['dimension'] as num?)?.toInt().clamp(2, 3) ?? 2;
+        _odeMethod = OdeIntegrationMethod.values.firstWhere(
+          (m) => m.name == ode['method'],
+          orElse: () => OdeIntegrationMethod.verlet,
+        );
+        _odeSelectedPresetId = ode['preset']?.toString() ?? '';
+        _odeDxCtrl.text = ode['dx']?.toString() ?? '';
+        _odeDyCtrl.text = ode['dy']?.toString() ?? '';
+        _odeDzCtrl.text = ode['dz']?.toString() ?? '';
+        _odeX0Ctrl.text = ode['x0']?.toString() ?? '';
+        _odeY0Ctrl.text = ode['y0']?.toString() ?? '';
+        _odeZ0Ctrl.text = ode['z0']?.toString() ?? '';
+        _odeT0Ctrl.text = ode['t0']?.toString() ?? '';
+        _odeStepCtrl.text = ode['step']?.toString() ?? '';
+        _odeToleranceCtrl.text = ode['tol']?.toString() ?? '';
+        _showOdeGrid = ode['showGrid'] != false;
+      }
+      _calculusMetadata = _readMap(data['calculus']);
+
+      _isComplexMode = data['complex'] == true;
+      _showLabels = data['showLabels'] != false;
+      _autoRotate3D = data['autoRotate3D'] == true;
+      _center3DX = (data['centerX'] as num?)?.toDouble() ?? _center3DX;
+      _center3DY = (data['centerY'] as num?)?.toDouble() ?? _center3DY;
+      _center3DZ = (data['centerZ'] as num?)?.toDouble() ?? _center3DZ;
+      _cXCtrl.text = _center3DX.toString();
+      _cYCtrl.text = _center3DY.toString();
+      _cZCtrl.text = _center3DZ.toString();
+      _yaw = (data['yaw'] as num?)?.toDouble() ?? _yaw;
+      _pitch = (data['pitch'] as num?)?.toDouble() ?? _pitch;
+      _zoom3D = (data['zoom3D'] as num?)?.toDouble() ?? _zoom3D;
+      _offsetX = (data['offsetX'] as num?)?.toDouble() ?? _offsetX;
+      _offsetY = (data['offsetY'] as num?)?.toDouble() ?? _offsetY;
+      _zoom2D = (data['zoom2D'] as num?)?.toDouble() ?? _zoom2D;
+      final activeTab = (data['activeTab'] as num?)?.toInt();
+      if (activeTab != null &&
+          activeTab >= 0 &&
+          activeTab < _tabController.length) {
+        _tabController.index = activeTab;
+      }
+    } catch (_) {
+      // Ignore malformed note metadata from older or manually edited files.
+    } finally {
+      _restoringWorkspaceMetadata = false;
+    }
+  }
+
+  List<Map<String, dynamic>> _readList(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .whereType<Map>()
+        .map(
+          (item) => item.map((key, value) => MapEntry(key.toString(), value)),
+        )
+        .toList();
+  }
+
+  Map<String, dynamic> _readMap(Object? value) {
+    if (value is! Map) return const {};
+    return value.map((key, value) => MapEntry(key.toString(), value));
+  }
+
+  void _replaceFunctionList<T>(List<T> target, List<T> replacement) {
+    for (final item in target) {
+      if (item is FunctionDef) item.dispose();
+      if (item is ScalarFuncDef) item.dispose();
+      if (item is VectorFuncDef) item.dispose();
+    }
+    target
+      ..clear()
+      ..addAll(replacement);
+  }
+
+  FunctionDef _functionDefFromMetadata(
+    Map<String, dynamic> item, {
+    required bool is3D,
+  }) {
+    return FunctionDef(
+      initialText: item['expression']?.toString() ?? '',
+      color: colorFromArgbOrDefault(
+        (item['color'] as num?)?.toInt(),
+        _randomColor(),
+      ),
+      enabled: item['enabled'] != false,
+      fillArea: item['fill'] == true,
+      tMin: item['tMin']?.toString() ?? '',
+      tMax: item['tMax']?.toString() ?? '',
+      durationMs: item['duration']?.toString() ?? '6000',
+      dMinX: item['xMin']?.toString() ?? '',
+      dMaxX: item['xMax']?.toString() ?? '',
+      dMinY: item['yMin']?.toString() ?? '',
+      dMaxY: item['yMax']?.toString() ?? '',
+      dMinZ: item['zMin']?.toString() ?? '',
+      dMaxZ: item['zMax']?.toString() ?? '',
+      coord2D: CoordSystem2D.values.firstWhere(
+        (c) => c.name == item['coord2D'],
+        orElse: () => CoordSystem2D.cartesian,
+      ),
+      coord3D: CoordSystem3D.values.firstWhere(
+        (c) => c.name == item['coord3D'],
+        orElse: () => CoordSystem3D.cartesian,
+      ),
+    );
+  }
+
+  ScalarFuncDef _scalarDefFromMetadata(Map<String, dynamic> item) {
+    return ScalarFuncDef(
+      x: item['x']?.toString() ?? '',
+      y: item['y']?.toString() ?? '',
+      z: item['z']?.toString() ?? '',
+      f: item['f']?.toString() ?? '',
+      enabled: item['enabled'] != false,
+      tMin: item['tMin']?.toString() ?? '',
+      tMax: item['tMax']?.toString() ?? '',
+      durationMs: item['duration']?.toString() ?? '6000',
+      dMinX: item['xMin']?.toString() ?? '',
+      dMaxX: item['xMax']?.toString() ?? '',
+      dMinY: item['yMin']?.toString() ?? '',
+      dMaxY: item['yMax']?.toString() ?? '',
+      dMinZ: item['zMin']?.toString() ?? '',
+      dMaxZ: item['zMax']?.toString() ?? '',
+      coord3D: CoordSystem3D.values.firstWhere(
+        (c) => c.name == item['coord3D'],
+        orElse: () => CoordSystem3D.cartesian,
+      ),
+    );
+  }
+
+  VectorFuncDef _vectorDefFromMetadata(Map<String, dynamic> item) {
+    return VectorFuncDef(
+      x: item['x']?.toString() ?? '',
+      y: item['y']?.toString() ?? '',
+      z: item['z']?.toString() ?? '',
+      p: item['p']?.toString() ?? '',
+      q: item['q']?.toString() ?? '',
+      r: item['r']?.toString() ?? '',
+      enabled: item['enabled'] != false,
+      tMin: item['tMin']?.toString() ?? '',
+      tMax: item['tMax']?.toString() ?? '',
+      durationMs: item['duration']?.toString() ?? '6000',
+      dMinX: item['xMin']?.toString() ?? '',
+      dMaxX: item['xMax']?.toString() ?? '',
+      dMinY: item['yMin']?.toString() ?? '',
+      dMaxY: item['yMax']?.toString() ?? '',
+      dMinZ: item['zMin']?.toString() ?? '',
+      dMaxZ: item['zMax']?.toString() ?? '',
+      coord3D: CoordSystem3D.values.firstWhere(
+        (c) => c.name == item['coord3D'],
+        orElse: () => CoordSystem3D.cartesian,
+      ),
+    );
+  }
+
+  String _buildWorkspaceMetadataJson() {
+    final data = <String, dynamic>{
+      'v': 1,
+      'activeTab': _tabController.index,
+      'complex': _isComplexMode,
+      'showLabels': _showLabels,
+      'autoRotate3D': _autoRotate3D,
+      'yaw': _yaw,
+      'pitch': _pitch,
+      'zoom3D': _zoom3D,
+      'centerX': _center3DX,
+      'centerY': _center3DY,
+      'centerZ': _center3DZ,
+      'offsetX': _offsetX,
+      'offsetY': _offsetY,
+      'zoom2D': _zoom2D,
+      'plot2d': _plotFunctions2D.map(_functionDefToMetadata).toList(),
+      'plot3d': _plotFunctions3D.map(_functionDefToMetadata).toList(),
+      'scalar': _scalarFunctions.map(_scalarDefToMetadata).toList(),
+      'vector': _vectorFunctions.map(_vectorDefToMetadata).toList(),
+      'ode': _odeMetadata(),
+      'calculus': _calculusMetadata,
+    };
+    return jsonEncode(data);
+  }
+
+  Map<String, dynamic> _functionDefToMetadata(FunctionDef f) => {
+    'expression': f.controller.text,
+    'color': f.color.toARGB32(),
+    'enabled': f.enabled,
+    'fill': f.fillArea,
+    'coord2D': f.coord2D.name,
+    'coord3D': f.coord3D.name,
+    'tMin': f.tMinCtrl.text,
+    'tMax': f.tMaxCtrl.text,
+    'duration': f.tDurationCtrl.text,
+    'xMin': f.dMinXCtrl.text,
+    'xMax': f.dMaxXCtrl.text,
+    'yMin': f.dMinYCtrl.text,
+    'yMax': f.dMaxYCtrl.text,
+    'zMin': f.dMinZCtrl.text,
+    'zMax': f.dMaxZCtrl.text,
+  };
+
+  Map<String, dynamic> _scalarDefToMetadata(ScalarFuncDef f) => {
+    'x': f.xCtrl.text,
+    'y': f.yCtrl.text,
+    'z': f.zCtrl.text,
+    'f': f.fCtrl.text,
+    'enabled': f.enabled,
+    'coord3D': f.coord3D.name,
+    'tMin': f.tMinCtrl.text,
+    'tMax': f.tMaxCtrl.text,
+    'duration': f.tDurationCtrl.text,
+    'xMin': f.dMinXCtrl.text,
+    'xMax': f.dMaxXCtrl.text,
+    'yMin': f.dMinYCtrl.text,
+    'yMax': f.dMaxYCtrl.text,
+    'zMin': f.dMinZCtrl.text,
+    'zMax': f.dMaxZCtrl.text,
+  };
+
+  Map<String, dynamic> _vectorDefToMetadata(VectorFuncDef f) => {
+    'x': f.xCtrl.text,
+    'y': f.yCtrl.text,
+    'z': f.zCtrl.text,
+    'p': f.pCtrl.text,
+    'q': f.qCtrl.text,
+    'r': f.rCtrl.text,
+    'enabled': f.enabled,
+    'coord3D': f.coord3D.name,
+    'tMin': f.tMinCtrl.text,
+    'tMax': f.tMaxCtrl.text,
+    'duration': f.tDurationCtrl.text,
+    'xMin': f.dMinXCtrl.text,
+    'xMax': f.dMaxXCtrl.text,
+    'yMin': f.dMinYCtrl.text,
+    'yMax': f.dMaxYCtrl.text,
+    'zMin': f.dMinZCtrl.text,
+    'zMax': f.dMaxZCtrl.text,
+  };
+
+  Map<String, dynamic> _odeMetadata() => {
+    'dimension': _odeDimension,
+    'method': _odeMethod.name,
+    'preset': _odeSelectedPresetId,
+    'dx': _odeDxCtrl.text,
+    'dy': _odeDyCtrl.text,
+    'dz': _odeDzCtrl.text,
+    'x0': _odeX0Ctrl.text,
+    'y0': _odeY0Ctrl.text,
+    'z0': _odeZ0Ctrl.text,
+    't0': _odeT0Ctrl.text,
+    'step': _odeStepCtrl.text,
+    'tol': _odeToleranceCtrl.text,
+    'showGrid': _showOdeGrid,
+  };
+
+  void _saveWorkspaceMetadataNow() {
+    if (_restoringWorkspaceMetadata || _isReadOnlyVisualizer) return;
+    widget.onWorkspaceMetadataChanged?.call(_buildWorkspaceMetadataJson());
+  }
+
+  void _markWorkspaceChanged() {
+    if (_restoringWorkspaceMetadata || _isReadOnlyVisualizer) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _saveWorkspaceMetadataNow();
+    });
+  }
+
+  void _updateWorkspaceState(VoidCallback update) {
+    setState(update);
+    _markWorkspaceChanged();
+  }
+
+  List<FunctionDef> _enabledPlotFunctions(bool is3D) {
+    return (is3D ? _plotFunctions3D : _plotFunctions2D)
+        .where((f) => f.enabled)
+        .toList();
+  }
+
+  List<ScalarFuncDef> get _enabledScalarFunctions {
+    return _scalarFunctions.where((f) => f.enabled).toList();
+  }
+
+  List<VectorFuncDef> get _enabledVectorFunctions {
+    return _vectorFunctions.where((f) => f.enabled).toList();
+  }
+
+  CoordSystem2D _activeCoordSystem2D(List<FunctionDef> enabled) {
+    return enabled.any((f) => f.coord2D == CoordSystem2D.polar)
+        ? CoordSystem2D.polar
+        : CoordSystem2D.cartesian;
+  }
+
+  CoordSystem3D _activeCoordSystem3DFromFunctions(List<FunctionDef> enabled) {
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.spherical)) {
+      return CoordSystem3D.spherical;
+    }
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.cylindrical)) {
+      return CoordSystem3D.cylindrical;
+    }
+    return CoordSystem3D.cartesian;
+  }
+
+  CoordSystem3D _activeCoordSystem3DFromScalar(List<ScalarFuncDef> enabled) {
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.spherical)) {
+      return CoordSystem3D.spherical;
+    }
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.cylindrical)) {
+      return CoordSystem3D.cylindrical;
+    }
+    return CoordSystem3D.cartesian;
+  }
+
+  CoordSystem3D _activeCoordSystem3DFromVector(List<VectorFuncDef> enabled) {
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.spherical)) {
+      return CoordSystem3D.spherical;
+    }
+    if (enabled.any((f) => f.coord3D == CoordSystem3D.cylindrical)) {
+      return CoordSystem3D.cylindrical;
+    }
+    return CoordSystem3D.cartesian;
+  }
+
+  void _resetPane(int index) {
+    _updateWorkspaceState(() {
+      switch (index) {
+        case 1:
+          _plotFunctions2D.forEach((f) => f.dispose());
+          _plotFunctions2D.clear();
+          break;
+        case 2:
+          _plotFunctions3D.forEach((f) => f.dispose());
+          _plotFunctions3D.clear();
+          break;
+        case 3:
+          _scalarFunctions.forEach((f) => f.dispose());
+          _scalarFunctions.clear();
+          break;
+        case 4:
+          _vectorFunctions.forEach((f) => f.dispose());
+          _vectorFunctions.clear();
+          break;
+        case 5:
+          _stopOdeSolver(reason: 'Reset');
+          _odeSamples.clear();
+          _odeDimension = 2;
+          _odeMethod = OdeIntegrationMethod.verlet;
+          _odeSelectedPresetId = '';
+          _odeDxCtrl.clear();
+          _odeDyCtrl.clear();
+          _odeDzCtrl.clear();
+          _odeX0Ctrl.clear();
+          _odeY0Ctrl.clear();
+          _odeZ0Ctrl.clear();
+          _odeT0Ctrl.clear();
+          _odeStepCtrl.clear();
+          _odeToleranceCtrl.clear();
+          _odeStatus = 'Configure equation and press Start';
+          break;
+        case 6:
+          _calculusMetadata = const {};
+          _calculusResetNonce++;
+          break;
+        default:
+          break;
+      }
+    });
+  }
+
   Color _randomColor() {
     final colors = [
       Colors.blue,
@@ -692,7 +1171,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
         .replaceAll('÷', '/')
         .replaceAll('π', 'pi')
         .replaceAll('√', 'sqrt')
-        .replaceAll('e', 'e');
+        .replaceAll('e', 'e')
+        .replaceAll('ln(', 'log(')
+        .replaceAll('log10(', 'log(');
 
     try {
       final result = _complexParser.evaluate(
@@ -822,15 +1303,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
 
       final List<({String text, Color color})> legendItems = [];
       if (idx == 1) {
-        for (var f in _plotFunctions2D) {
+        for (var f in _plotFunctions2D.where((f) => f.enabled)) {
           legendItems.add((text: 'y = ${f.controller.text}', color: f.color));
         }
       } else if (idx == 2) {
-        for (var f in _plotFunctions3D) {
+        for (var f in _plotFunctions3D.where((f) => f.enabled)) {
           legendItems.add((text: 'z = ${f.controller.text}', color: f.color));
         }
       } else if (idx == 3) {
-        for (var f in _scalarFunctions) {
+        for (var f in _scalarFunctions.where((f) => f.enabled)) {
           legendItems.add((
             text:
                 'Surface: r(u,v) = <${f.xCtrl.text}, ${f.yCtrl.text}, ${f.zCtrl.text}>\nScalar Field: f(x,y,z) = ${f.fCtrl.text}',
@@ -838,7 +1319,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
           ));
         }
       } else if (idx == 4) {
-        for (var f in _vectorFunctions) {
+        for (var f in _vectorFunctions.where((f) => f.enabled)) {
           legendItems.add((
             text:
                 'Surface: r(u,v) = <${f.xCtrl.text}, ${f.yCtrl.text}, ${f.zCtrl.text}>\nVector Field: F(x,y,z) = <${f.pCtrl.text}, ${f.qCtrl.text}, ${f.rCtrl.text}>',
@@ -894,7 +1375,6 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
 
       final paint = Paint();
       if (isDark) {
-
         paint.colorFilter = const ColorFilter.matrix(<double>[
           0.5740000009536743,
           -1.4299999475479126,
@@ -1009,10 +1489,14 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
 
   bool _hasTimedAnimationForCurrentTab() {
     final idx = _tabController.index;
-    if (idx == 1) return _plotFunctions2D.any((f) => f.hasTimeAnimation);
-    if (idx == 2) return _plotFunctions3D.any((f) => f.hasTimeAnimation);
-    if (idx == 3) return _scalarFunctions.any((f) => f.hasTimeAnimation);
-    if (idx == 4) return _vectorFunctions.any((f) => f.hasTimeAnimation);
+    if (idx == 1)
+      return _plotFunctions2D.any((f) => f.enabled && f.hasTimeAnimation);
+    if (idx == 2)
+      return _plotFunctions3D.any((f) => f.enabled && f.hasTimeAnimation);
+    if (idx == 3)
+      return _scalarFunctions.any((f) => f.enabled && f.hasTimeAnimation);
+    if (idx == 4)
+      return _vectorFunctions.any((f) => f.enabled && f.hasTimeAnimation);
     if (idx == 5) return true;
     return false;
   }
@@ -1020,9 +1504,17 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   PlotAnimationMetadata? _buildCurrentAnimationMetadata() {
     final idx = _tabController.index;
     if (idx == 1) {
-      final items = _plotFunctions2D.map((f) {
-        final tMin = double.tryParse(f.tMinCtrl.text) ?? 0;
-        final tMax = double.tryParse(f.tMaxCtrl.text) ?? 0;
+      final items = _plotFunctions2D.where((f) => f.enabled).map((f) {
+        final tMin = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMinCtrl.text,
+          0,
+        );
+        final tMax = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMaxCtrl.text,
+          0,
+        );
         final duration = int.tryParse(f.tDurationCtrl.text) ?? 0;
         return PlotAnimationItemMetadata(
           expressions: {'expression': f.controller.text},
@@ -1040,9 +1532,17 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
       return meta.hasAnimation ? meta : null;
     }
     if (idx == 2) {
-      final items = _plotFunctions3D.map((f) {
-        final tMin = double.tryParse(f.tMinCtrl.text) ?? 0;
-        final tMax = double.tryParse(f.tMaxCtrl.text) ?? 0;
+      final items = _plotFunctions3D.where((f) => f.enabled).map((f) {
+        final tMin = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMinCtrl.text,
+          0,
+        );
+        final tMax = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMaxCtrl.text,
+          0,
+        );
         final duration = int.tryParse(f.tDurationCtrl.text) ?? 0;
         return PlotAnimationItemMetadata(
           expressions: {'expression': f.controller.text},
@@ -1060,9 +1560,17 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
       return meta.hasAnimation ? meta : null;
     }
     if (idx == 3) {
-      final items = _scalarFunctions.map((f) {
-        final tMin = double.tryParse(f.tMinCtrl.text) ?? 0;
-        final tMax = double.tryParse(f.tMaxCtrl.text) ?? 0;
+      final items = _scalarFunctions.where((f) => f.enabled).map((f) {
+        final tMin = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMinCtrl.text,
+          0,
+        );
+        final tMax = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMaxCtrl.text,
+          0,
+        );
         final duration = int.tryParse(f.tDurationCtrl.text) ?? 0;
         return PlotAnimationItemMetadata(
           expressions: {
@@ -1083,9 +1591,17 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
       return meta.hasAnimation ? meta : null;
     }
     if (idx == 4) {
-      final items = _vectorFunctions.map((f) {
-        final tMin = double.tryParse(f.tMinCtrl.text) ?? 0;
-        final tMax = double.tryParse(f.tMaxCtrl.text) ?? 0;
+      final items = _vectorFunctions.where((f) => f.enabled).map((f) {
+        final tMin = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMinCtrl.text,
+          0,
+        );
+        final tMax = parsePlotRealExpressionOrFallback(
+          _complexParser,
+          f.tMaxCtrl.text,
+          0,
+        );
         final duration = int.tryParse(f.tDurationCtrl.text) ?? 0;
         return PlotAnimationItemMetadata(
           expressions: {
@@ -1143,10 +1659,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   void _zoomIn() {
-    setState(() {
-
+    _updateWorkspaceState(() {
       if (_tabController.index >= 2) {
-        _zoom3D *= 1.2;
+        _zoom3D = (_zoom3D * 1.2).clamp(0.001, 1000000.0);
       } else {
         _zoom2D *= 1.2;
       }
@@ -1154,10 +1669,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   void _zoomOut() {
-    setState(() {
-
+    _updateWorkspaceState(() {
       if (_tabController.index >= 2) {
-        _zoom3D /= 1.2;
+        _zoom3D = (_zoom3D / 1.2).clamp(0.001, 1000000.0);
       } else {
         _zoom2D /= 1.2;
       }
@@ -1165,7 +1679,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   void _resetView(String type) {
-    setState(() {
+    _updateWorkspaceState(() {
       _zoom3D = 1.0;
 
       switch (type) {
@@ -1186,16 +1700,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   String _normalizeMathInput(String input) {
-    return input
-        .trim()
-        .replaceAll('×', '*')
-        .replaceAll('÷', '/')
-        .replaceAll('π', 'pi')
-        .replaceAll('√', 'sqrt');
+    return normalizePlotMathInput(input);
   }
 
   double _readDouble(TextEditingController controller, double fallback) {
-    return double.tryParse(controller.text.trim()) ?? fallback;
+    return parsePlotRealExpressionOrFallback(
+      _complexParser,
+      controller.text,
+      fallback,
+    );
   }
 
   List<double> _evaluateOdeDerivative(List<double> state, double t) {
@@ -1240,7 +1753,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     _odeTicker = null;
     _odeComputeInFlight = false;
     if (!mounted) return;
-    setState(() {
+    _updateWorkspaceState(() {
       _odeRunning = false;
       if (reason != null && reason.isNotEmpty) {
         _odeStatus = reason;
@@ -1390,7 +1903,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     _odeTicker?.dispose();
     _odeTicker = null;
     _odeComputeInFlight = false;
-    setState(() {
+    _updateWorkspaceState(() {
       _odeSelectedPresetId = preset.id;
       _odeDimension = preset.dimension;
       _odeMethod = preset.method;
@@ -1445,8 +1958,31 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Row(
+          children: [
+            Text(
+              'Saved scalar surface ${i + 1}',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: colors.onSurface,
+              ),
+            ),
+            const Spacer(),
+            Tooltip(
+              message: f.enabled ? 'Hide from plot' : 'Show in plot',
+              child: Switch(
+                value: f.enabled,
+                onChanged: _isReadOnlyVisualizer
+                    ? null
+                    : (value) => _updateWorkspaceState(() => f.enabled = value),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
         Text(
-          'Surface r(u,v):',
+          'Surface position r(u, v)',
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.bold,
@@ -1465,7 +2001,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
         ),
         const SizedBox(height: 8),
         Text(
-          'Scalar Field f(x,y,z):',
+          'Scalar value sampled at that position',
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.bold,
@@ -1480,7 +2016,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
               icon: const Icon(Icons.delete_outline, size: 20),
               onPressed: _isReadOnlyVisualizer
                   ? null
-                  : () => setState(() => list.removeAt(i)),
+                  : () => _updateWorkspaceState(() => list.removeAt(i)),
             ),
           ],
         ),
@@ -1503,6 +2039,24 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
             Expanded(child: _miniField(f.tDurationCtrl, 'duration ms')),
           ],
         ),
+        const SizedBox(height: 8),
+        _coordinateChoice3D(
+          value: f.coord3D,
+          onChanged: (value) => _updateWorkspaceState(() => f.coord3D = value),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            SizedBox(width: 140, child: _miniField(f.dMinXCtrl, 'x min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxXCtrl, 'x max')),
+            SizedBox(width: 140, child: _miniField(f.dMinYCtrl, 'y min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxYCtrl, 'y max')),
+            SizedBox(width: 140, child: _miniField(f.dMinZCtrl, 'z min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxZCtrl, 'z max')),
+          ],
+        ),
       ],
     );
   }
@@ -1512,8 +2066,31 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Row(
+          children: [
+            Text(
+              'Saved vector field ${i + 1}',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: colors.onSurface,
+              ),
+            ),
+            const Spacer(),
+            Tooltip(
+              message: f.enabled ? 'Hide from plot' : 'Show in plot',
+              child: Switch(
+                value: f.enabled,
+                onChanged: _isReadOnlyVisualizer
+                    ? null
+                    : (value) => _updateWorkspaceState(() => f.enabled = value),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
         Text(
-          'Surface r(u,v):',
+          'Surface position r(u, v)',
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.bold,
@@ -1532,7 +2109,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
         ),
         const SizedBox(height: 8),
         Text(
-          'Vector Field <P,Q,R>:',
+          'Vector components sampled at that position',
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.bold,
@@ -1551,7 +2128,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
               icon: const Icon(Icons.delete_outline, size: 20),
               onPressed: _isReadOnlyVisualizer
                   ? null
-                  : () => setState(() => list.removeAt(i)),
+                  : () => _updateWorkspaceState(() => list.removeAt(i)),
             ),
           ],
         ),
@@ -1574,25 +2151,118 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
             Expanded(child: _miniField(f.tDurationCtrl, 'duration ms')),
           ],
         ),
+        const SizedBox(height: 8),
+        _coordinateChoice3D(
+          value: f.coord3D,
+          onChanged: (value) => _updateWorkspaceState(() => f.coord3D = value),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            SizedBox(width: 140, child: _miniField(f.dMinXCtrl, 'x min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxXCtrl, 'x max')),
+            SizedBox(width: 140, child: _miniField(f.dMinYCtrl, 'y min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxYCtrl, 'y max')),
+            SizedBox(width: 140, child: _miniField(f.dMinZCtrl, 'z min')),
+            SizedBox(width: 140, child: _miniField(f.dMaxZCtrl, 'z max')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _coordinateChoice3D({
+    required CoordSystem3D value,
+    required ValueChanged<CoordSystem3D> onChanged,
+  }) {
+    const options = [
+      (value: CoordSystem3D.cartesian, label: 'Cartesian', hint: 'x, y, z'),
+      (value: CoordSystem3D.cylindrical, label: 'Cylindrical', hint: 'r, θ, z'),
+      (value: CoordSystem3D.spherical, label: 'Spherical', hint: 'ρ, θ, φ'),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Coordinate system',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final option in options)
+              ChoiceChip(
+                label: Text('${option.label} (${option.hint})'),
+                selected: value == option.value,
+                onSelected: _isReadOnlyVisualizer
+                    ? null
+                    : (_) => onChanged(option.value),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _coordinateChoice2D({
+    required CoordSystem2D value,
+    required ValueChanged<CoordSystem2D> onChanged,
+  }) {
+    const options = [
+      (value: CoordSystem2D.cartesian, label: 'Cartesian', hint: 'x, y'),
+      (value: CoordSystem2D.polar, label: 'Polar', hint: 'r, θ'),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Coordinate system',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final option in options)
+              ChoiceChip(
+                label: Text('${option.label} (${option.hint})'),
+                selected: value == option.value,
+                onSelected: _isReadOnlyVisualizer
+                    ? null
+                    : (_) => onChanged(option.value),
+              ),
+          ],
+        ),
       ],
     );
   }
 
   Widget _miniField(TextEditingController c, String hint) {
     return SizedBox(
-      height: 30,
+      height: 36,
       child: TextField(
         controller: c,
         readOnly: _isReadOnlyVisualizer,
         decoration: InputDecoration(
-          contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: 8,
+          ),
           hintText: hint,
-          border: const OutlineInputBorder(),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
           filled: true,
           fillColor: Colors.white10,
         ),
         style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-        onChanged: (_) => setState(() {}),
+        onChanged: (_) {
+          setState(() {});
+          _markWorkspaceChanged();
+        },
       ),
     );
   }
@@ -1644,7 +2314,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                         _lastAnswer?.real ?? double.tryParse(_result) ?? 0.0,
                     onBack: _toggleConverter,
                     onDrag: widget.onDrag,
-                    onClose: widget.onClose,
+                    onClose: _closeCalculator,
                   )
                 : Column(
                     children: [
@@ -1687,14 +2357,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   Widget _buildScalarUI(ColorScheme colors, {required bool isDark}) {
+    final enabledFunctions = _enabledScalarFunctions;
     return Stack(
       children: [
         GestureDetector(
           onScaleStart: (d) => _baseZoom3D = _zoom3D,
           onScaleUpdate: (d) => setState(() {
             if (d.scale == 1.0) {
-              _yaw -= d.focalPointDelta.dx * 0.5;
-              _pitch += d.focalPointDelta.dy * 0.5;
+              _yaw += d.focalPointDelta.dx * 0.5;
+              _pitch -= d.focalPointDelta.dy * 0.5;
             } else {
               _zoom3D = _baseZoom3D * d.scale;
             }
@@ -1706,19 +2377,55 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
             child: RepaintBoundary(
               key: _scalarKey,
               child: Scalar3DWidget(
-                surfaces: _scalarFunctions
+                surfaces: enabledFunctions
                     .map(
                       (f) => ScalarSurfaceDef(
                         exprX: f.xCtrl.text,
                         exprY: f.yCtrl.text,
                         exprZ: f.zCtrl.text,
                         scalarField: f.fCtrl.text,
-                        tMin: double.tryParse(f.tMinCtrl.text) ?? 0,
-                        tMax: double.tryParse(f.tMaxCtrl.text) ?? 0,
+                        tMin: parsePlotRealExpressionOrFallback(
+                          _complexParser,
+                          f.tMinCtrl.text,
+                          0,
+                        ),
+                        tMax: parsePlotRealExpressionOrFallback(
+                          _complexParser,
+                          f.tMaxCtrl.text,
+                          0,
+                        ),
                         durationMs: int.tryParse(f.tDurationCtrl.text) ?? 0,
+                        xMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinXCtrl.text,
+                        ),
+                        xMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxXCtrl.text,
+                        ),
+                        yMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinYCtrl.text,
+                        ),
+                        yMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxYCtrl.text,
+                        ),
+                        zMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinZCtrl.text,
+                        ),
+                        zMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxZCtrl.text,
+                        ),
+                        coordSystem: f.coord3D,
                       ),
                     )
                     .toList(),
+                gridCoordSystem: _activeCoordSystem3DFromScalar(
+                  enabledFunctions,
+                ),
                 yaw: _yaw,
                 pitch: _pitch,
                 zoom: _zoom3D,
@@ -1890,8 +2597,14 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                   borderRadius: BorderRadius.circular(24),
                   color: colors.surfaceContainer,
                   child: Container(
-                    width: 450,
-                    height: 400,
+                    width: (MediaQuery.sizeOf(context).width * 0.92).clamp(
+                      520.0,
+                      980.0,
+                    ),
+                    height: (MediaQuery.sizeOf(context).height * 0.8).clamp(
+                      460.0,
+                      760.0,
+                    ),
                     padding: const EdgeInsets.all(24),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1907,6 +2620,13 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                               ),
                             ),
                             const Spacer(),
+                            TextButton.icon(
+                              onPressed: _isReadOnlyVisualizer
+                                  ? null
+                                  : () => _resetPane(3),
+                              icon: const Icon(Icons.restart_alt),
+                              label: const Text('Reset pane'),
+                            ),
                             IconButton(
                               icon: const Icon(Icons.close),
                               onPressed: () =>
@@ -1935,7 +2655,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                             label: const Text('Add New Surface'),
                             onPressed: _isReadOnlyVisualizer
                                 ? null
-                                : () => setState(
+                                : () => _updateWorkspaceState(
                                     () => _scalarFunctions.add(ScalarFuncDef()),
                                   ),
                           ),
@@ -1952,14 +2672,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
   }
 
   Widget _buildVectorUI(ColorScheme colors, {required bool isDark}) {
+    final enabledFunctions = _enabledVectorFunctions;
     return Stack(
       children: [
         GestureDetector(
           onScaleStart: (d) => _baseZoom3D = _zoom3D,
           onScaleUpdate: (d) => setState(() {
             if (d.scale == 1.0) {
-              _yaw -= d.focalPointDelta.dx * 0.5;
-              _pitch += d.focalPointDelta.dy * 0.5;
+              _yaw += d.focalPointDelta.dx * 0.5;
+              _pitch -= d.focalPointDelta.dy * 0.5;
             } else {
               _zoom3D = _baseZoom3D * d.scale;
             }
@@ -1971,7 +2692,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
             child: RepaintBoundary(
               key: _vectorKey,
               child: Vector3DWidget(
-                fields: _vectorFunctions
+                fields: enabledFunctions
                     .map(
                       (f) => VectorFieldDef(
                         exprX: f.xCtrl.text,
@@ -1980,12 +2701,48 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                         funcP: f.pCtrl.text,
                         funcQ: f.qCtrl.text,
                         funcR: f.rCtrl.text,
-                        tMin: double.tryParse(f.tMinCtrl.text) ?? 0,
-                        tMax: double.tryParse(f.tMaxCtrl.text) ?? 0,
+                        tMin: parsePlotRealExpressionOrFallback(
+                          _complexParser,
+                          f.tMinCtrl.text,
+                          0,
+                        ),
+                        tMax: parsePlotRealExpressionOrFallback(
+                          _complexParser,
+                          f.tMaxCtrl.text,
+                          0,
+                        ),
                         durationMs: int.tryParse(f.tDurationCtrl.text) ?? 0,
+                        xMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinXCtrl.text,
+                        ),
+                        xMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxXCtrl.text,
+                        ),
+                        yMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinYCtrl.text,
+                        ),
+                        yMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxYCtrl.text,
+                        ),
+                        zMin: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMinZCtrl.text,
+                        ),
+                        zMax: parsePlotOptionalBound(
+                          _complexParser,
+                          f.dMaxZCtrl.text,
+                        ),
+                        coordSystem: f.coord3D,
                       ),
                     )
                     .toList(),
+                gridCoordSystem: _activeCoordSystem3DFromVector(
+                  enabledFunctions,
+                ),
                 yaw: _yaw,
                 pitch: _pitch,
                 zoom: _zoom3D,
@@ -2157,8 +2914,14 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                   borderRadius: BorderRadius.circular(24),
                   color: colors.surfaceContainer,
                   child: Container(
-                    width: 450,
-                    height: 400,
+                    width: (MediaQuery.sizeOf(context).width * 0.92).clamp(
+                      520.0,
+                      980.0,
+                    ),
+                    height: (MediaQuery.sizeOf(context).height * 0.8).clamp(
+                      460.0,
+                      760.0,
+                    ),
                     padding: const EdgeInsets.all(24),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2174,6 +2937,13 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                               ),
                             ),
                             const Spacer(),
+                            TextButton.icon(
+                              onPressed: _isReadOnlyVisualizer
+                                  ? null
+                                  : () => _resetPane(4),
+                              icon: const Icon(Icons.restart_alt),
+                              label: const Text('Reset pane'),
+                            ),
                             IconButton(
                               icon: const Icon(Icons.close),
                               onPressed: () =>
@@ -2202,7 +2972,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                             label: const Text('Add New Field'),
                             onPressed: _isReadOnlyVisualizer
                                 ? null
-                                : () => setState(
+                                : () => _updateWorkspaceState(
                                     () => _vectorFunctions.add(VectorFuncDef()),
                                   ),
                           ),
@@ -2258,14 +3028,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
 
               _buildFab(
                 _showLabels ? Icons.numbers : Icons.grid_off,
-                () => setState(() => _showLabels = !_showLabels),
+                () => _updateWorkspaceState(() => _showLabels = !_showLabels),
                 colors,
                 small: true,
               ),
               const SizedBox(height: 12),
               _buildFab(
                 _autoRotate3D ? Icons.pause_circle : Icons.play_circle,
-                () => setState(() => _autoRotate3D = !_autoRotate3D),
+                () =>
+                    _updateWorkspaceState(() => _autoRotate3D = !_autoRotate3D),
                 colors,
                 small: true,
               ),
@@ -2324,7 +3095,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                 if (!_isReadOnlyVisualizer) const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.close, size: 20),
-                  onPressed: widget.onClose,
+                  onPressed: _closeCalculator,
                   style: IconButton.styleFrom(
                     backgroundColor: isDark
                         ? Colors.white.withValues(alpha: 0.05)
@@ -2583,7 +3354,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                     ],
                     selected: {_odeDimension},
                     onSelectionChanged: canEdit
-                        ? (value) => setState(() => _odeDimension = value.first)
+                        ? (value) => _updateWorkspaceState(
+                            () => _odeDimension = value.first,
+                          )
                         : null,
                   ),
                   const SizedBox(height: 12),
@@ -2601,7 +3374,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                             label: Text(method.label),
                             selected: _odeMethod == method,
                             onSelected: canEdit
-                                ? (_) => setState(() => _odeMethod = method)
+                                ? (_) => _updateWorkspaceState(
+                                    () => _odeMethod = method,
+                                  )
                                 : null,
                           ),
                         )
@@ -2664,8 +3439,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                           _showLabels ? Icons.numbers : Icons.label_off,
                         ),
                         tooltip: _showLabels ? 'Hide labels' : 'Show labels',
-                        onPressed: () =>
-                            setState(() => _showLabels = !_showLabels),
+                        onPressed: () => _updateWorkspaceState(
+                          () => _showLabels = !_showLabels,
+                        ),
                       ),
                       Text(
                         _showLabels ? 'Labels on' : 'Labels off',
@@ -2677,8 +3453,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                           _showOdeGrid ? Icons.grid_on : Icons.grid_off,
                         ),
                         tooltip: _showOdeGrid ? 'Hide grid' : 'Show grid',
-                        onPressed: () =>
-                            setState(() => _showOdeGrid = !_showOdeGrid),
+                        onPressed: () => _updateWorkspaceState(
+                          () => _showOdeGrid = !_showOdeGrid,
+                        ),
                       ),
                       Text(
                         _showOdeGrid ? 'Grid on' : 'Grid off',
@@ -2707,6 +3484,11 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                         onPressed: canEdit ? _clearOdeSolver : null,
                         icon: const Icon(Icons.clear_all),
                         label: const Text('Clear'),
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: canEdit ? () => _resetPane(5) : null,
+                        icon: const Icon(Icons.restart_alt),
+                        label: const Text('Reset pane'),
                       ),
                       FilledButton.tonalIcon(
                         onPressed: _copyOdeValues,
@@ -2776,9 +3558,15 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     BuildContext? overlayContext,
   }) {
     return CalculusPane(
+      key: ValueKey('calculus-$_calculusResetNonce'),
       colorScheme: colors,
       isDark: isDark,
       overlayContext: overlayContext,
+      initialMetadata: _calculusMetadata,
+      onMetadataChanged: (metadata) {
+        _calculusMetadata = metadata;
+        _markWorkspaceChanged();
+      },
     );
   }
 
@@ -2792,7 +3580,10 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
       child: TextField(
         controller: controller,
         readOnly: _isReadOnlyVisualizer,
-        onChanged: (_) => setState(() {}),
+        onChanged: (_) {
+          setState(() {});
+          _markWorkspaceChanged();
+        },
         decoration: InputDecoration(
           labelText: label,
           hintText: 'Use x,y,z,t and functions like sin(), exp()...',
@@ -3000,26 +3791,21 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
     required bool is3D,
     required bool isDark,
   }) {
-    final activeList = is3D ? _plotFunctions3D : _plotFunctions2D;
+    final activeList = _enabledPlotFunctions(is3D);
 
     return Stack(
       children: [
-
         if (is3D)
-
           GestureDetector(
             onScaleStart: (details) {
               _baseZoom3D = _zoom3D;
             },
             onScaleUpdate: (details) {
               setState(() {
-
                 if (details.scale == 1.0) {
-                  _yaw -= details.focalPointDelta.dx * 0.5;
-                  _pitch += details.focalPointDelta.dy * 0.5;
-                }
-
-                else {
+                  _yaw += details.focalPointDelta.dx * 0.5;
+                  _pitch -= details.focalPointDelta.dy * 0.5;
+                } else {
                   _zoom3D = _baseZoom3D * details.scale;
                 }
               });
@@ -3029,20 +3815,58 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
               width: double.infinity,
               height: double.infinity,
               child: RepaintBoundary(
-
                 key: _plot3dKey,
                 child: Plot3DWidget(
+                  key: ValueKey(
+                    'plot3d-center:${_center3DX}_${_center3DY}_${_center3DZ}',
+                  ),
                   functions: activeList
                       .map(
                         (f) => PlotLine3D(
                           expression: f.controller.text,
                           color: f.color,
-                          tMin: double.tryParse(f.tMinCtrl.text) ?? 0,
-                          tMax: double.tryParse(f.tMaxCtrl.text) ?? 0,
+                          tMin: parsePlotRealExpressionOrFallback(
+                            _complexParser,
+                            f.tMinCtrl.text,
+                            0,
+                          ),
+                          tMax: parsePlotRealExpressionOrFallback(
+                            _complexParser,
+                            f.tMaxCtrl.text,
+                            0,
+                          ),
                           durationMs: int.tryParse(f.tDurationCtrl.text) ?? 0,
+                          xMin: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMinXCtrl.text,
+                          ),
+                          xMax: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMaxXCtrl.text,
+                          ),
+                          yMin: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMinYCtrl.text,
+                          ),
+                          yMax: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMaxYCtrl.text,
+                          ),
+                          zMin: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMinZCtrl.text,
+                          ),
+                          zMax: parsePlotOptionalBound(
+                            _complexParser,
+                            f.dMaxZCtrl.text,
+                          ),
+                          coordSystem: f.coord3D,
                         ),
                       )
                       .toList(),
+                  gridCoordSystem: _activeCoordSystem3DFromFunctions(
+                    activeList,
+                  ),
                   isDarkMode: isDark,
                   yaw: _yaw,
                   pitch: _pitch,
@@ -3058,7 +3882,6 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
             ),
           )
         else
-
           GestureDetector(
             onScaleUpdate: (details) {
               setState(() {
@@ -3086,12 +3909,38 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                             expression: f.controller.text,
                             color: f.color,
                             fillArea: f.fillArea,
-                            tMin: double.tryParse(f.tMinCtrl.text) ?? 0,
-                            tMax: double.tryParse(f.tMaxCtrl.text) ?? 0,
+                            tMin: parsePlotRealExpressionOrFallback(
+                              _complexParser,
+                              f.tMinCtrl.text,
+                              0,
+                            ),
+                            tMax: parsePlotRealExpressionOrFallback(
+                              _complexParser,
+                              f.tMaxCtrl.text,
+                              0,
+                            ),
                             durationMs: int.tryParse(f.tDurationCtrl.text) ?? 0,
+                            xMin: parsePlotOptionalBound(
+                              _complexParser,
+                              f.dMinXCtrl.text,
+                            ),
+                            xMax: parsePlotOptionalBound(
+                              _complexParser,
+                              f.dMaxXCtrl.text,
+                            ),
+                            yMin: parsePlotOptionalBound(
+                              _complexParser,
+                              f.dMinYCtrl.text,
+                            ),
+                            yMax: parsePlotOptionalBound(
+                              _complexParser,
+                              f.dMaxYCtrl.text,
+                            ),
+                            coordSystem: f.coord2D,
                           ),
                         )
                         .toList(),
+                    gridCoordSystem: _activeCoordSystem2D(activeList),
                     offsetX: _offsetX,
                     offsetY: _offsetY,
                     zoom2D: _zoom2D,
@@ -3159,15 +4008,12 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                       height: 40,
                       child: Text(
                         (is3D ? _plotFunctions3D : _plotFunctions2D).isEmpty
-                            ? "Tap to add functions..."
-                            : (is3D ? _plotFunctions3D : _plotFunctions2D)
-                                      .length ==
-                                  1
-                            ? (is3D ? _plotFunctions3D : _plotFunctions2D)
-                                  .first
-                                  .controller
-                                  .text
-                            : "${(is3D ? _plotFunctions3D : _plotFunctions2D).length} active functions",
+                            ? 'Tap to add functions...'
+                            : activeList.isEmpty
+                            ? '${(is3D ? _plotFunctions3D : _plotFunctions2D).length} saved, none visible'
+                            : activeList.length == 1
+                            ? activeList.first.controller.text
+                            : '${activeList.length} visible / ${(is3D ? _plotFunctions3D : _plotFunctions2D).length} saved',
                         style: TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 18,
@@ -3185,7 +4031,8 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                     color: colors.primary,
                   ),
                   tooltip: _showLabels ? 'Hide Labels' : 'Show Labels',
-                  onPressed: () => setState(() => _showLabels = !_showLabels),
+                  onPressed: () =>
+                      _updateWorkspaceState(() => _showLabels = !_showLabels),
                 ),
                 if (is3D)
                   IconButton(
@@ -3196,7 +4043,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                     tooltip: _autoRotate3D ? 'Stop Rotation' : 'Start Rotation',
                     onPressed: _isReadOnlyVisualizer
                         ? null
-                        : () => setState(() => _autoRotate3D = !_autoRotate3D),
+                        : () => _updateWorkspaceState(
+                            () => _autoRotate3D = !_autoRotate3D,
+                          ),
                   ),
                 IconButton(
                   icon: Icon(
@@ -3206,40 +4055,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                   tooltip: _isComplexMode ? 'Complex Mode On' : 'Real Mode',
                   onPressed: _isReadOnlyVisualizer
                       ? null
-                      : () {
-                          setState(() {
-                            _isComplexMode = !_isComplexMode;
-
-                            if (_isComplexMode && is3D) {
-                              _plotFunctions3D.clear();
-                              _plotFunctions3D.add(
-                                FunctionDef(
-                                  initialText: 'gamma(z)',
-                                  color: Colors.teal,
-                                ),
-                              );
-
-                              _center3DX =
-                                  -2.0;
-                              _center3DY = 0.0;
-                              _center3DZ = 0.0;
-                              _zoom3D = 3.5;
-                            } else if (!_isComplexMode && is3D) {
-                              _plotFunctions3D.clear();
-                              _plotFunctions3D.add(
-                                FunctionDef(
-                                  initialText:
-                                      'sqrt(-(((sqrt(x^2+y^2)-4)^2))+2^2)',
-                                  color: Colors.teal,
-                                ),
-                              );
-                              _center3DX = 0.0;
-                              _center3DY = 0.0;
-                              _center3DZ = 0.0;
-                              _zoom3D = 1.0;
-                            }
-                          });
-                        },
+                      : () => _updateWorkspaceState(
+                          () => _isComplexMode = !_isComplexMode,
+                        ),
                 ),
                 const SizedBox(width: 4),
                 IconButton.filled(
@@ -3388,7 +4206,6 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
         if (_showFunctionMenu)
           Stack(
             children: [
-
               GestureDetector(
                 onTap: () => setState(() => _showFunctionMenu = false),
                 child: Container(color: Colors.black.withValues(alpha: 0.4)),
@@ -3399,8 +4216,14 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                   borderRadius: BorderRadius.circular(24),
                   color: colors.surfaceContainer,
                   child: Container(
-                    width: 450,
-                    height: 350,
+                    width: (MediaQuery.sizeOf(context).width * 0.92).clamp(
+                      520.0,
+                      980.0,
+                    ),
+                    height: (MediaQuery.sizeOf(context).height * 0.78).clamp(
+                      460.0,
+                      740.0,
+                    ),
                     padding: const EdgeInsets.all(24),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3416,6 +4239,13 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                               ),
                             ),
                             const Spacer(),
+                            TextButton.icon(
+                              onPressed: _isReadOnlyVisualizer
+                                  ? null
+                                  : () => _resetPane(is3D ? 2 : 1),
+                              icon: const Icon(Icons.restart_alt),
+                              label: const Text('Reset pane'),
+                            ),
                             IconButton(
                               icon: const Icon(Icons.close),
                               onPressed: () =>
@@ -3443,7 +4273,7 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                       GestureDetector(
                                         onTap: _isReadOnlyVisualizer
                                             ? null
-                                            : () => setState(
+                                            : () => _updateWorkspaceState(
                                                 () =>
                                                     func.color = _randomColor(),
                                               ),
@@ -3453,6 +4283,25 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                         ),
                                       ),
                                       const SizedBox(width: 12),
+                                      Tooltip(
+                                        message: func.enabled
+                                            ? 'Hide from plot'
+                                            : 'Show in plot',
+                                        child: IconButton(
+                                          icon: Icon(
+                                            func.enabled
+                                                ? Icons.visibility
+                                                : Icons.visibility_off,
+                                          ),
+                                          onPressed: _isReadOnlyVisualizer
+                                              ? null
+                                              : () => _updateWorkspaceState(
+                                                  () => func.enabled =
+                                                      !func.enabled,
+                                                ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
                                       Expanded(
                                         child: TextField(
                                           controller: func.controller,
@@ -3476,7 +4325,10 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                             fontFamily: 'monospace',
                                             fontSize: 16,
                                           ),
-                                          onChanged: (_) => setState(() {}),
+                                          onChanged: (_) {
+                                            setState(() {});
+                                            _markWorkspaceChanged();
+                                          },
                                         ),
                                       ),
                                       const SizedBox(width: 12),
@@ -3495,10 +4347,12 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                                 value: func.fillArea,
                                                 onChanged: _isReadOnlyVisualizer
                                                     ? null
-                                                    : (v) => setState(
-                                                        () => func.fillArea =
-                                                            v ?? false,
-                                                      ),
+                                                    : (v) =>
+                                                          _updateWorkspaceState(
+                                                            () =>
+                                                                func.fillArea =
+                                                                    v ?? false,
+                                                          ),
                                               ),
                                             ),
                                           ],
@@ -3511,13 +4365,9 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                         ),
                                         onPressed: _isReadOnlyVisualizer
                                             ? null
-                                            : () {
-                                                if (list.length > 1) {
-                                                  setState(
-                                                    () => list.removeAt(i),
-                                                  );
-                                                }
-                                              },
+                                            : () => _updateWorkspaceState(
+                                                () => list.removeAt(i),
+                                              ),
                                       ),
                                     ],
                                   ),
@@ -3546,6 +4396,74 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                                       ),
                                     ],
                                   ),
+                                  const SizedBox(height: 8),
+                                  if (!is3D)
+                                    _coordinateChoice2D(
+                                      value: func.coord2D,
+                                      onChanged: (value) =>
+                                          _updateWorkspaceState(
+                                            () => func.coord2D = value,
+                                          ),
+                                    )
+                                  else
+                                    _coordinateChoice3D(
+                                      value: func.coord3D,
+                                      onChanged: (value) =>
+                                          _updateWorkspaceState(
+                                            () => func.coord3D = value,
+                                          ),
+                                    ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      SizedBox(
+                                        width: 140,
+                                        child: _miniField(
+                                          func.dMinXCtrl,
+                                          'x min',
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 140,
+                                        child: _miniField(
+                                          func.dMaxXCtrl,
+                                          'x max',
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 140,
+                                        child: _miniField(
+                                          func.dMinYCtrl,
+                                          'y min',
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 140,
+                                        child: _miniField(
+                                          func.dMaxYCtrl,
+                                          'y max',
+                                        ),
+                                      ),
+                                      if (is3D)
+                                        SizedBox(
+                                          width: 140,
+                                          child: _miniField(
+                                            func.dMinZCtrl,
+                                            'z min',
+                                          ),
+                                        ),
+                                      if (is3D)
+                                        SizedBox(
+                                          width: 140,
+                                          child: _miniField(
+                                            func.dMaxZCtrl,
+                                            'z max',
+                                          ),
+                                        ),
+                                    ],
+                                  ),
                                 ],
                               );
                             },
@@ -3556,11 +4474,11 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
                           width: double.infinity,
                           child: FilledButton.tonalIcon(
                             icon: const Icon(Icons.add),
-                            label: const Text("Add New Function"),
+                            label: const Text('Add function'),
                             onPressed: _isReadOnlyVisualizer
                                 ? null
                                 : () {
-                                    setState(() {
+                                    _updateWorkspaceState(() {
                                       (is3D
                                               ? _plotFunctions3D
                                               : _plotFunctions2D)
@@ -3677,8 +4595,18 @@ class _FloatingCalculatorState extends State<FloatingCalculator>
           fillColor: Colors.grey.withValues(alpha: 0.1),
         ),
         onSubmitted: (val) {
-          final d = double.tryParse(val);
-          if (d != null) onChanged(d);
+          final d = parsePlotRealExpression(_complexParser, val);
+          if (d != null) {
+            onChanged(d);
+            _markWorkspaceChanged();
+          }
+        },
+        onChanged: (val) {
+          final d = parsePlotRealExpression(_complexParser, val);
+          if (d != null) {
+            onChanged(d);
+            _markWorkspaceChanged();
+          }
         },
       ),
     );
@@ -3704,4 +4632,3 @@ class _Key {
   }) : label = label ?? val,
        value = value ?? val;
 }
-

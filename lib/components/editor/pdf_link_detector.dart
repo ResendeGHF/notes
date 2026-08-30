@@ -8,16 +8,25 @@ import 'package:pdfrx/pdfrx.dart';
 
 class PdfLink {
   final Rect rect;
+  final List<Rect> rects;
   final int? targetPageIndex;
   final Rect? targetRegion;
   final String? uri;
 
   PdfLink({
     required this.rect,
+    List<Rect>? rects,
     this.targetPageIndex,
     this.targetRegion,
     this.uri,
-  });
+  }) : rects = rects ?? (rect == Rect.zero ? const <Rect>[] : <Rect>[rect]);
+
+  bool contains(Offset position) {
+    if (rects.isNotEmpty) {
+      return rects.any((r) => r.contains(position));
+    }
+    return rect.contains(position);
+  }
 }
 
 class PdfLinkDetector {
@@ -28,7 +37,6 @@ class PdfLinkDetector {
     int pageIndex,
   ) async {
     try {
-
       if (pdfDocument.pages.isEmpty) {
         return [];
       }
@@ -36,7 +44,10 @@ class PdfLinkDetector {
         return [];
       }
 
-      final page = pdfDocument.pages[pageIndex];
+      // Progressive loading: loadLinks() returns [] until the page is fully
+      // loaded. Wait so highlights appear on first open, not only after a
+      // remount (sidebar/scroll).
+      final page = await pdfDocument.pages[pageIndex].ensureLoaded();
       final pdfrxLinks = await page.loadLinks();
       final double pageWidth = page.width;
 
@@ -46,19 +57,14 @@ class PdfLinkDetector {
         String? uri;
 
         if (link.dest != null) {
-
           targetPage = link.dest!.pageNumber - 1;
 
           if (link.dest!.params != null && link.dest!.params!.length >= 2) {
-
             final double? destTop = link.dest!.params![1];
 
             if (destTop != null) {
-
-              const double contextHeight =
-                  150.0;
-              const double contextAbove =
-                  50.0;
+              const double contextHeight = 150.0;
+              const double contextAbove = 50.0;
 
               targetRect = Rect.fromLTRB(
                 0,
@@ -72,19 +78,25 @@ class PdfLinkDetector {
           uri = link.url.toString();
         }
 
-        Rect linkRect = Rect.zero;
-        if (link.rects.isNotEmpty) {
-          final r = link.rects.first;
-          linkRect = Rect.fromLTRB(
-            r.left < r.right ? r.left : r.right,
-            r.top < r.bottom ? r.top : r.bottom,
-            r.left < r.right ? r.right : r.left,
-            r.top < r.bottom ? r.bottom : r.top,
+        final normalizedRects = <Rect>[];
+        for (final r in link.rects) {
+          normalizedRects.add(
+            Rect.fromLTRB(
+              r.left < r.right ? r.left : r.right,
+              r.top < r.bottom ? r.top : r.bottom,
+              r.left < r.right ? r.right : r.left,
+              r.top < r.bottom ? r.bottom : r.top,
+            ),
           );
         }
 
+        final linkRect = normalizedRects.isNotEmpty
+            ? normalizedRects.first
+            : Rect.zero;
+
         return PdfLink(
           rect: linkRect,
+          rects: normalizedRects,
           targetPageIndex: targetPage,
           targetRegion: targetRect,
           uri: uri,
@@ -110,11 +122,31 @@ class PdfLinkDetector {
   ) async {
     final links = await detectLinksOnPage(pdfDocument, pageIndex);
     for (final link in links) {
-      if (link.rect.contains(position)) {
+      if (link.contains(position)) {
         return link;
       }
     }
     return null;
+  }
+
+  /// Maps a PDF-space rect (origin bottom-left) into widget/local space
+  /// (origin top-left) for the rendered page.
+  static Rect pdfRectToWidgetRect(
+    Rect pdfRect,
+    Size widgetSize,
+    Size pdfNaturalSize,
+  ) {
+    if (widgetSize.isEmpty || pdfNaturalSize.isEmpty) return Rect.zero;
+    final scaleX = widgetSize.width / pdfNaturalSize.width;
+    final scaleY = widgetSize.height / pdfNaturalSize.height;
+    final top = (pdfNaturalSize.height - pdfRect.bottom) * scaleY;
+    final bottom = (pdfNaturalSize.height - pdfRect.top) * scaleY;
+    return Rect.fromLTRB(
+      pdfRect.left * scaleX,
+      top,
+      pdfRect.right * scaleX,
+      bottom,
+    );
   }
 
   static Offset widgetToPdfCoordinates(

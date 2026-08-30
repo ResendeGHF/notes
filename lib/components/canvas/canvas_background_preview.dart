@@ -19,7 +19,7 @@ class CanvasBackgroundPreview extends StatelessWidget {
     required this.backgroundPattern,
     required this.backgroundImage,
     this.overrideBoxFit,
-  required this.pageSize,
+    required this.pageSize,
   required this.lineHeight,
   required this.lineThickness,
   this.lineColor,
@@ -28,8 +28,9 @@ class CanvasBackgroundPreview extends StatelessWidget {
   this.marginRight,
   this.marginTop,
   this.marginBottom,
-  this.borderColor,
-});
+    this.borderColor,
+    this.previewContentFit,
+  });
 
   final bool selected;
   final bool invert;
@@ -50,6 +51,10 @@ class CanvasBackgroundPreview extends StatelessWidget {
   final double? marginBottom;
 
   final Color? borderColor;
+
+  /// When set (e.g. [BoxFit.fill]), scales the painted preview to fill the
+  /// preview box without letterboxing. Defaults to [BoxFit.contain].
+  final BoxFit? previewContentFit;
 
   static const double fixedWidth = 150;
 
@@ -79,6 +84,7 @@ class CanvasBackgroundPreview extends StatelessWidget {
         child: Stack(
           children: [
             FittedBox(
+              fit: previewContentFit ?? BoxFit.contain,
               child: CustomPaint(
                 size: canvasSize,
                 painter: CanvasBackgroundPainter(

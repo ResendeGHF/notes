@@ -54,7 +54,7 @@ The outer thicker part of the stroke which is colored with [color].
 
 - `dart:async`
 - `package:flutter/material.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/canvas/_stroke.dart`
 - `package:saber/data/editor/page.dart`
 - `package:saber/data/extensions/list_extensions.dart`

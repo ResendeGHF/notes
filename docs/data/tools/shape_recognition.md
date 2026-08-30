@@ -77,7 +77,7 @@ Computes oriented ellipse parameters. Uses PCA for major/minor dimensions
 - `dart:math`
 - `package:flutter/material.dart`
 - `package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/canvas/_shape_stroke.dart`
 - `package:saber/components/canvas/_stroke.dart`
 - `package:saber/data/prefs.dart`

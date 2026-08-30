@@ -4,13 +4,13 @@
 
 // ignore_for_file: unused_element_parameter
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:archive/archive_io.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -31,9 +31,9 @@ import 'package:saber/components/settings/settings_switch.dart';
 import 'package:saber/components/settings/vault_pdf_load_settings.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/components/theming/adaptive_toggle_buttons.dart';
-import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'dart:math';
+import 'package:saber/data/backup/incremental_backup_core.dart';
 import 'package:saber/data/locales.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
@@ -48,25 +48,57 @@ Future<bool> _isolateCheckBackupTypeTask(Map<String, dynamic> args) async {
   final path = args['path'] as String;
   final password = args['password'] as String;
 
-  List<int> bytes = File(path).readAsBytesSync();
-  final byteList = Uint8List.fromList(bytes);
+  final stamp = DateTime.now().microsecondsSinceEpoch;
+  final tmpZip = '$path.check_$stamp.zip';
+  var zipPath = path;
+  var ownsZip = false;
 
-  if (SbaEncryption.isEncrypted(byteList)) {
-    if (password.isEmpty)
-      throw StateError('Backup is encrypted but no password was provided.');
-    bytes = SbaEncryption.decrypt(byteList, password);
+  try {
+    final header = File(path).openSync(mode: FileMode.read);
+    late final Uint8List peek;
+    try {
+      peek = Uint8List.fromList(header.readSync(32));
+    } finally {
+      header.closeSync();
+    }
+
+    if (SbaEncryption.isEncrypted(peek)) {
+      if (password.isEmpty) {
+        throw StateError('Backup is encrypted but no password was provided.');
+      }
+      SbaEncryption.decryptFile(path, tmpZip, password);
+      zipPath = tmpZip;
+      ownsZip = true;
+    }
+
+    final input = InputFileStream(zipPath);
+    final archive = ZipDecoder().decodeStream(input);
+    final manifestFiles = archive.files
+        .where((f) => f.name == '_backup_manifest.json')
+        .toList();
+    input.closeSync();
+    if (manifestFiles.isEmpty) return false;
+
+    final content = manifestFiles.first.content;
+    final List<int> manifestBytes;
+    if (content is List<int>) {
+      manifestBytes = content;
+    } else {
+      final output = OutputMemoryStream();
+      manifestFiles.first.writeContent(output);
+      manifestBytes = output.getBytes();
+    }
+    final manifestJson =
+        jsonDecode(utf8.decode(manifestBytes)) as Map<String, dynamic>;
+    return manifestJson['type'] == 'data';
+  } finally {
+    if (ownsZip) {
+      try {
+        final f = File(tmpZip);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+    }
   }
-
-  final archive = ZipDecoder().decodeBytes(bytes);
-  final manifestFiles = archive.files
-      .where((f) => f.name == '_backup_manifest.json')
-      .toList();
-  if (manifestFiles.isEmpty) return false;
-
-  final manifestJson =
-      jsonDecode(utf8.decode(manifestFiles.first.content as List<int>))
-          as Map<String, dynamic>;
-  return manifestJson['type'] == 'data';
 }
 
 class SettingsPage extends StatefulWidget {
@@ -125,12 +157,6 @@ abstract class _SettingsStows {
     (AxisDirection value) => value.index,
     (int value) => AxisDirection.values[value],
   );
-
-  static final defaultBackgroundPattern = TransformedStow(
-    stows.lastBackgroundPattern,
-    (CanvasBackgroundPattern value) => value.index,
-    (int value) => CanvasBackgroundPattern.values[value],
-  );
 }
 
 class _SettingsPageState extends State<SettingsPage> {
@@ -142,6 +168,173 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void onChanged() {
     setState(() {});
+  }
+
+  bool _incrementalBackupReady(BuildContext context) {
+    if (stows.backupFilePath.value.isEmpty ||
+        stows.backupPassword.value.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Please select a target file and generate a key first.',
+          ),
+        ),
+      );
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _runIncrementalBackupNow(BuildContext context) async {
+    if (!_incrementalBackupReady(context)) return;
+
+    BackupManager.status.value = const BackupStatus(
+      isRunning: true,
+      progress: 0.01,
+      currentFile: 'Preparing backup file...',
+    );
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      transitionDuration: Duration.zero,
+      transitionBuilder: (context, animation, secondaryAnimation, child) =>
+          child,
+      pageBuilder: (dialogContext, _, __) {
+        return const _BackupProgressDialog();
+      },
+    );
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(Duration.zero);
+
+    try {
+      WakelockPlus.enable();
+      await BackupManager.performIncrementalBackupForeground();
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Backup Complete!')));
+    } catch (e) {
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      WakelockPlus.disable();
+    }
+  }
+
+  void _runIncrementalBackupBackground(BuildContext context) {
+    if (!_incrementalBackupReady(context)) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Backup running in background.')),
+    );
+    unawaited(
+      BackupManager.performIncrementalBackupBackground()
+          .then((_) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('Backup Complete!')));
+          })
+          .catchError((Object e) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text('Error: $e')));
+          }),
+    );
+  }
+
+  String _formatBackupBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  Future<void> _verifyIncrementalBackup(BuildContext context) async {
+    if (!_incrementalBackupReady(context)) return;
+
+    BackupManager.status.value = const BackupStatus(
+      isRunning: true,
+      progress: 0.02,
+      currentFile: 'Verifying backup...',
+    );
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      transitionDuration: Duration.zero,
+      transitionBuilder: (context, animation, secondaryAnimation, child) =>
+          child,
+      pageBuilder: (dialogContext, _, __) {
+        return const _BackupProgressDialog();
+      },
+    );
+    await WidgetsBinding.instance.endOfFrame;
+
+    try {
+      WakelockPlus.enable();
+      final result = await BackupManager.verifyIncrementalBackup(
+        stows.backupFilePath.value,
+        stows.backupPassword.value,
+      );
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      final sample = result.samplePaths.isEmpty
+          ? '(none)'
+          : result.samplePaths.take(8).join('\n');
+      final errorBlock = result.errors.isEmpty
+          ? ''
+          : '\n\nIssues:\n${result.errors.take(12).join('\n')}';
+
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AdaptiveAlertDialog(
+          title: Text(result.ok ? 'Backup looks consistent' : 'Backup check failed'),
+          content: SingleChildScrollView(
+            child: SelectableText(
+              'Archive: ${_formatBackupBytes(result.archiveBytes)}\n'
+              'Indexed files checked: ${result.checkedFileCount} / ${result.indexedFileCount}\n'
+              'Folders in index: ${result.indexedFolderCount}\n'
+              'Note bodies (.sbn / .sbn2): ${result.noteBodyCount}\n'
+              'Payload size (uncompressed index): ${_formatBackupBytes(result.indexedPayloadBytes)}\n'
+              'Sidecars: .idxoff=${result.hasIdxoff ? 'yes' : 'NO'}, '
+              '.inc_state.json=${result.hasIncState ? 'yes' : 'no'}\n'
+              'Mode: ${result.sourceMode}\n\n'
+              'Sample paths:\n$sample'
+              '$errorBlock\n\n'
+              'Note: App storage is often much larger than the backup because '
+              'thumbnails (.p), caches, and SQLite journals are not included. '
+              'Seeing only the .nba plus .idxoff and .inc_state.json next to it '
+              'is expected — all notes live inside the single archive.',
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(t.common.done),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Verify failed: $e')));
+    } finally {
+      WakelockPlus.disable();
+    }
   }
 
   Future<void> _showBackupKeyDialog() async {
@@ -232,45 +425,6 @@ class _SettingsPageState extends State<SettingsPage> {
     Icons.west,
   ];
 
-  Widget _defaultMarginSlider(
-    String label,
-    double value,
-    ValueChanged<double> onChanged,
-  ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                label,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-              ),
-              Text(
-                value.toInt().toString(),
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-        ),
-        Slider(
-          value: value.clamp(0.0, 50.0),
-          min: 0,
-          max: 50,
-          divisions: 50,
-          onChanged: (v) => onChanged(v),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final colorScheme = ColorScheme.of(context);
@@ -331,6 +485,7 @@ class _SettingsPageState extends State<SettingsPage> {
           SliverPadding(
             padding: const EdgeInsets.only(bottom: 8),
             sliver: SliverAppBar(
+              primary: false,
               collapsedHeight: kToolbarHeight,
               expandedHeight: 120,
               pinned: true,
@@ -510,10 +665,24 @@ class _SettingsPageState extends State<SettingsPage> {
                                     dialogTitle: 'Select Backup Folder',
                                   );
                               if (selectedDirectory != null) {
-                                stows.backupFilePath.value = p.join(
+                                final archivePath = p.join(
                                   selectedDirectory,
                                   'notes_backup_archive.nba',
                                 );
+                                try {
+                                  prepareIncrementalBackupTarget(archivePath);
+                                  stows.backupFilePath.value = archivePath;
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          'Cannot create backup file there: $e',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                }
                               }
                             } else {
                               String? selectedPath = await FilePicker.platform
@@ -522,7 +691,20 @@ class _SettingsPageState extends State<SettingsPage> {
                                     fileName: 'notes_backup_archive.nba',
                                   );
                               if (selectedPath != null) {
-                                stows.backupFilePath.value = selectedPath;
+                                try {
+                                  prepareIncrementalBackupTarget(selectedPath);
+                                  stows.backupFilePath.value = selectedPath;
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          'Cannot create backup file there: $e',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                }
                               }
                             }
                           } finally {
@@ -590,47 +772,60 @@ class _SettingsPageState extends State<SettingsPage> {
                               DateTime.fromMillisecondsSinceEpoch(timestamp),
                             )
                           : 'Never';
-                      return ListTile(
-                        title: const Text(
-                          'Run Incremental Backup Now',
-                          style: TextStyle(color: Colors.blue),
-                        ),
-                        subtitle: Text('Last backup: $lastBackup'),
-                        leading: const Icon(
-                          Icons.cloud_upload,
-                          color: Colors.blue,
-                        ),
-                        onTap: () async {
-                          if (stows.backupFilePath.value.isEmpty ||
-                              stows.backupPassword.value.isEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Please select a target file and generate a key first.',
-                                ),
-                              ),
-                            );
-                            return;
-                          }
-                          try {
-                            await BackupManager.performIncrementalBackup();
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Backup Complete!'),
-                                ),
-                              );
-                            }
-                          } catch (e) {
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Error: $e')),
-                              );
-                            }
-                          }
-                        },
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          ListTile(
+                            leading: const Icon(Icons.history),
+                            title: const Text('Last incremental backup'),
+                            subtitle: Text(lastBackup),
+                          ),
+                          ListTile(
+                            title: const Text(
+                              'Backup now',
+                              style: TextStyle(color: Colors.blue),
+                            ),
+                            subtitle: const Text(
+                              'Runs immediately on this screen. Please wait until it finishes.',
+                            ),
+                            leading: const Icon(
+                              Icons.backup,
+                              color: Colors.blue,
+                            ),
+                            onTap: () => _runIncrementalBackupNow(context),
+                          ),
+                          ListTile(
+                            title: const Text(
+                              'Run in background',
+                              style: TextStyle(color: Colors.blue),
+                            ),
+                            subtitle: const Text(
+                              'Keep using the app while backup runs.',
+                            ),
+                            leading: const Icon(
+                              Icons.schedule_send,
+                              color: Colors.blue,
+                            ),
+                            onTap: () =>
+                                _runIncrementalBackupBackground(context),
+                          ),
+                        ],
                       );
                     },
+                  ),
+                  ListTile(
+                    title: const Text(
+                      'Verify backup',
+                      style: TextStyle(color: Colors.teal),
+                    ),
+                    subtitle: const Text(
+                      'Decrypt the index and sample every file block without restoring.',
+                    ),
+                    leading: const Icon(
+                      Icons.verified_user_outlined,
+                      color: Colors.teal,
+                    ),
+                    onTap: () => _verifyIncrementalBackup(context),
                   ),
                   ListTile(
                     title: const Text(
@@ -794,348 +989,22 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ]),
 
-                buildSection('New Note Defaults', [
-                  SettingsSelection(
-                    title: 'Default Pattern',
-                    icon: Icons.grid_on,
-                    pref: _SettingsStows.defaultBackgroundPattern,
-                    optionsWidth: 100,
-                    options: [
-                      for (final pattern in CanvasBackgroundPattern.values)
-                        ToggleButtonsOption(
-                          pattern.index,
-                          Text(
-                            CanvasBackgroundPattern.localizedName(pattern),
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ),
-                    ],
+                buildSection(t.settings.noteInkDefaults.sectionTitle, [
+                  SettingsButton(
+                    title: t.settings.noteInkDefaults.changeNoteDefaults,
+                    subtitle:
+                        t.settings.noteInkDefaults.changeNoteDefaultsSubtitle,
+                    icon: Icons.note_alt_outlined,
+                    onPressed: () =>
+                        context.push(RoutePaths.settingsNoteDefaults),
                   ),
-                  ValueListenableBuilder(
-                    valueListenable: stows.defaultPageColor,
-                    builder: (context, colorValue, _) {
-                      final color = Color(colorValue);
-                      return ListTile(
-                        leading: const Icon(Icons.format_paint),
-                        title: Text(t.settings.defaultPageColor),
-                        trailing: ColorIndicator(
-                          width: 40,
-                          height: 40,
-                          borderRadius: 20,
-                          color: color,
-                          onSelectFocus: false,
-                        ),
-                        onTap: () async {
-                          final newColor = await showColorPickerDialog(
-                            context,
-                            color,
-                            title: Text(t.settings.pageColor),
-                            pickersEnabled: {
-                              ColorPickerType.wheel: true,
-                              ColorPickerType.primary: true,
-                              ColorPickerType.accent: false,
-                            },
-                            enableShadesSelection: false,
-                            showColorCode: true,
-                            colorCodeHasColor: true,
-                          );
-                          if (newColor != color) {
-                            stows.defaultPageColor.value = newColor.toARGB32();
-                          }
-                        },
-                      );
-                    },
-                  ),
-                  ValueListenableBuilder(
-                    valueListenable: stows.lastBackgroundPattern,
-                    builder: (context, pattern, _) {
-                      if (pattern == CanvasBackgroundPattern.none) {
-                        return const SizedBox.shrink();
-                      }
-                      return Column(
-                        children: [
-                          Divider(
-                            height: 1,
-                            indent: 56,
-                            endIndent: 16,
-                            color: colorScheme.outlineVariant.withValues(
-                              alpha: 0.3,
-                            ),
-                          ),
-                          ValueListenableBuilder(
-                            valueListenable: stows.defaultLineColor,
-                            builder: (context, colorValue, _) {
-                              final color = Color(colorValue);
-                              return ListTile(
-                                leading: const Icon(Icons.line_style),
-                                title: Text(t.settings.defaultLineColor),
-                                trailing: ColorIndicator(
-                                  width: 40,
-                                  height: 40,
-                                  borderRadius: 20,
-                                  color: color,
-                                  onSelectFocus: false,
-                                ),
-                                onTap: () async {
-                                  final newColor = await showColorPickerDialog(
-                                    context,
-                                    color,
-                                    title: Text(t.settings.lineColor),
-                                    pickersEnabled: {
-                                      ColorPickerType.wheel: true,
-                                    },
-                                    showColorCode: true,
-                                    colorCodeHasColor: true,
-                                  );
-                                  if (newColor != color) {
-                                    stows.defaultLineColor.value = newColor
-                                        .toARGB32();
-                                  }
-                                },
-                              );
-                            },
-                          ),
-                          Divider(
-                            height: 1,
-                            indent: 56,
-                            endIndent: 16,
-                            color: colorScheme.outlineVariant.withValues(
-                              alpha: 0.3,
-                            ),
-                          ),
-                          ValueListenableBuilder(
-                            valueListenable: stows.lastLineHeight,
-                            builder: (context, height, _) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 8,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        const SizedBox(width: 16),
-                                        const Icon(
-                                          Icons.format_line_spacing,
-                                          color: Colors.grey,
-                                        ),
-                                        const SizedBox(width: 16),
-                                        Expanded(
-                                          child: Text(
-                                            t.settings.defaultLineHeight(
-                                              height: height,
-                                            ),
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Slider(
-                                    value: height.toDouble(),
-                                    min: 20,
-                                    max: 100,
-                                    divisions: 80,
-                                    label: height.toString(),
-                                    onChanged: (value) {
-                                      stows.lastLineHeight.value = value
-                                          .toInt();
-                                    },
-                                  ),
-                                ],
-                              );
-                            },
-                          ),
-                          Divider(
-                            height: 1,
-                            indent: 56,
-                            endIndent: 16,
-                            color: colorScheme.outlineVariant.withValues(
-                              alpha: 0.3,
-                            ),
-                          ),
-                          ValueListenableBuilder(
-                            valueListenable: stows.lastLineThickness,
-                            builder: (context, thickness, _) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 8,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        const SizedBox(width: 16),
-                                        const Icon(
-                                          Icons.line_weight,
-                                          color: Colors.grey,
-                                        ),
-                                        const SizedBox(width: 16),
-                                        Expanded(
-                                          child: Text(
-                                            'Default Line Thickness: $thickness',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Slider(
-                                    value: thickness.toDouble(),
-                                    min: 1,
-                                    max: 5,
-                                    divisions: 4,
-                                    label: thickness.toString(),
-                                    onChanged: (value) {
-                                      stows.lastLineThickness.value = value
-                                          .toInt();
-                                    },
-                                  ),
-                                ],
-                              );
-                            },
-                          ),
-                          Divider(
-                            height: 1,
-                            indent: 56,
-                            endIndent: 16,
-                            color: colorScheme.outlineVariant.withValues(
-                              alpha: 0.3,
-                            ),
-                          ),
-                          ListenableBuilder(
-                            listenable: Listenable.merge([
-                              stows.defaultMarginLeft,
-                              stows.defaultMarginRight,
-                              stows.defaultMarginTop,
-                              stows.defaultMarginBottom,
-                            ]),
-                            builder: (context, _) {
-                              final ml = stows.defaultMarginLeft.value;
-                              final mr = stows.defaultMarginRight.value;
-                              final mt = stows.defaultMarginTop.value;
-                              final mb = stows.defaultMarginBottom.value;
-                              final hasMargins =
-                                  ml > 0 || mr > 0 || mt > 0 || mb > 0;
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 8,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        const SizedBox(width: 16),
-                                        const Icon(
-                                          Icons.margin,
-                                          color: Colors.grey,
-                                        ),
-                                        const SizedBox(width: 16),
-                                        Expanded(
-                                          child: Text(
-                                            t.settings.defaultMargins,
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  _defaultMarginSlider(
-                                    'Left',
-                                    ml,
-                                    (v) => stows.defaultMarginLeft.value = v,
-                                  ),
-                                  _defaultMarginSlider(
-                                    'Right',
-                                    mr,
-                                    (v) => stows.defaultMarginRight.value = v,
-                                  ),
-                                  _defaultMarginSlider(
-                                    'Top',
-                                    mt,
-                                    (v) => stows.defaultMarginTop.value = v,
-                                  ),
-                                  _defaultMarginSlider(
-                                    'Bottom',
-                                    mb,
-                                    (v) => stows.defaultMarginBottom.value = v,
-                                  ),
-                                  if (hasMargins) ...[
-                                    Divider(
-                                      height: 1,
-                                      indent: 56,
-                                      endIndent: 16,
-                                      color: colorScheme.outlineVariant
-                                          .withValues(alpha: 0.3),
-                                    ),
-                                    ValueListenableBuilder(
-                                      valueListenable: stows.defaultMarginColor,
-                                      builder: (context, colorValue, __) {
-                                        final color = Color(colorValue);
-                                        return ListTile(
-                                          leading: const Icon(
-                                            Icons.format_paint_outlined,
-                                          ),
-                                          title: Text(
-                                            t.settings.defaultMarginColor,
-                                          ),
-                                          trailing: ColorIndicator(
-                                            width: 40,
-                                            height: 40,
-                                            borderRadius: 20,
-                                            color: color,
-                                            onSelectFocus: false,
-                                          ),
-                                          onTap: () async {
-                                            final newColor =
-                                                await showColorPickerDialog(
-                                                  context,
-                                                  color,
-                                                  title: Text(
-                                                    t
-                                                        .settings
-                                                        .defaultMarginColor,
-                                                  ),
-                                                  pickersEnabled: {
-                                                    ColorPickerType.wheel: true,
-                                                    ColorPickerType.primary:
-                                                        true,
-                                                    ColorPickerType.accent:
-                                                        false,
-                                                  },
-                                                  enableShadesSelection: false,
-                                                  showColorCode: true,
-                                                  colorCodeHasColor: true,
-                                                );
-                                            if (newColor != color) {
-                                              stows.defaultMarginColor.value =
-                                                  newColor.toARGB32();
-                                            }
-                                          },
-                                        );
-                                      },
-                                    ),
-                                  ],
-                                ],
-                              );
-                            },
-                          ),
-                        ],
-                      );
-                    },
+                  SettingsButton(
+                    title: t.settings.noteInkDefaults.changeInkDefaults,
+                    subtitle:
+                        t.settings.noteInkDefaults.changeInkDefaultsSubtitle,
+                    icon: Icons.brush_outlined,
+                    onPressed: () =>
+                        context.push(RoutePaths.settingsInkDefaults),
                   ),
                 ]),
 
@@ -1163,13 +1032,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     afterChange: (_) => setState(() {}),
                   ),
                   SettingsSwitch(
-                    title: 'Editor in Full Screen',
-                    subtitle:
-                        'Hide the system status bar and navigation bar in the editor',
-                    icon: Icons.fullscreen,
-                    pref: stows.editorFullScreen,
-                  ),
-                  SettingsSwitch(
                     title: t.settings.prefLabels.editorAutoInvert,
                     iconBuilder: (b) =>
                         b ? Icons.invert_colors_on : Icons.invert_colors_off,
@@ -1181,19 +1043,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     iconBuilder: (b) =>
                         b ? Icons.keyboard : Icons.keyboard_hide,
                     pref: stows.editorPromptRename,
-                  ),
-                  SettingsSelection(
-                    title: 'Auto-save Delay',
-                    subtitle: 'Time to wait before saving changes',
-                    icon: Icons.timer,
-                    pref: stows.autosaveDelay,
-                    options: const [
-                      ToggleButtonsOption(0300, Text('0.3s')),
-                      ToggleButtonsOption(1000, Text('1s')),
-                      ToggleButtonsOption(3000, Text('3s')),
-                      ToggleButtonsOption(5000, Text('5s')),
-                      ToggleButtonsOption(-1, Text('Off')),
-                    ],
                   ),
                   SettingsSwitch(
                     title: 'Thumbnail on autosave',
@@ -1214,17 +1063,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     options: const [
                       ToggleButtonsOption(5, Text('5')),
                       ToggleButtonsOption(10, Text('10')),
-                    ],
-                  ),
-                  SettingsSelection(
-                    title: t.settings.prefLabels.toolbarColorSlotsCount,
-                    subtitle:
-                        t.settings.prefDescriptions.toolbarColorSlotsCount,
-                    icon: Icons.color_lens,
-                    pref: stows.toolbarColorSlotsCount,
-                    options: [
-                      for (int i = 3; i <= 15; i++)
-                        ToggleButtonsOption(i, Text('$i')),
                     ],
                   ),
                   SettingsSwitch(
@@ -1253,8 +1091,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     icon: FontAwesomeIcons.shapes,
                     pref: stows.shapeRecognitionDelay,
                     options: [
-                      const ToggleButtonsOption(300, Text('0.3s')),
-                      const ToggleButtonsOption(500, Text('0.5s')),
+                      const ToggleButtonsOption(500, Text('500ms')),
+                      const ToggleButtonsOption(850, Text('850ms')),
                       const ToggleButtonsOption(1000, Text('1s')),
                       ToggleButtonsOption(
                         -1,
@@ -1670,9 +1508,10 @@ class _VaultEncryptionSwitchState extends State<_VaultEncryptionSwitch> {
       );
       final docDir = await FileManager.getDocumentsDirectory();
       for (final folder in folders) {
-        if (folder.isNotEmpty && folder != '/') {
-          Directory(p.join(docDir, folder)).createSync(recursive: true);
-        }
+        if (folder.isEmpty || folder == '/') continue;
+        final relFolder = folder.startsWith('/') ? folder.substring(1) : folder;
+        final dir = Directory(p.join(docDir, relFolder));
+        if (!dir.existsSync()) dir.createSync(recursive: true);
       }
 
       final success = await VaultAdapter.instance.migrateToDisk(allFiles);
@@ -2194,11 +2033,21 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
     if (password == null) return;
 
     setState(() => _isLoading = true);
+    BackupManager.status.value = const BackupStatus(isRunning: true);
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const _MigrationProgressDialog(),
+      builder: (context) => const _BackupProgressDialog(),
     );
+
+    void reportMonolith(double progress, String message, {int totalNotes = 0}) {
+      BackupManager.status.value = BackupStatus(
+        isRunning: true,
+        progress: progress,
+        currentFile: message,
+        totalNotes: totalNotes,
+      );
+    }
 
     WakelockPlus.enable();
     try {
@@ -2207,11 +2056,13 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
         backupFile = await VaultAdapter.instance.createBackupArchive(
           destination,
           password,
+          onProgress: reportMonolith,
         );
       } else {
         backupFile = await FileManager.createDataBackupArchive(
           destination,
           password,
+          onProgress: reportMonolith,
         );
       }
 
@@ -2251,6 +2102,7 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
       if (mounted) _showError(context, t.vault.backupFailed(error: e));
     } finally {
       WakelockPlus.disable();
+      BackupManager.status.value = const BackupStatus(isRunning: false);
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -2271,7 +2123,7 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
     final backupPath = result.files.single.path!;
 
     final password = await _askForBackupPassword(context, isRestore: true);
-    if (password == null || password.isEmpty) return;
+    if (password == null) return;
 
     bool isDataBackup = false;
     try {
@@ -2362,6 +2214,7 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
       if (mounted) _showError(context, 'Restore Failed: $e');
     } finally {
       WakelockPlus.disable();
+      BackupManager.status.value = const BackupStatus(isRunning: false);
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -2552,6 +2405,80 @@ class _VaultSecurityStatus extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _BackupProgressDialog extends StatelessWidget {
+  const _BackupProgressDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return PopScope(
+      canPop: false,
+      child: Center(
+        child: Material(
+          color: Colors.transparent,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: theme.colorScheme.outlineVariant),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+                  child: ValueListenableBuilder<BackupStatus>(
+                    valueListenable: BackupManager.status,
+                    builder: (context, status, _) {
+                      final percent = (status.progress * 100)
+                          .clamp(0, 100)
+                          .round();
+                      final file = status.currentFile.trim().isEmpty
+                          ? 'Preparing...'
+                          : status.currentFile;
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Content is being backed up. Please wait.',
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (status.totalNotes > 0) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              '${status.totalNotes} notes in this backup',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 16),
+                          Text(
+                            '$percent%',
+                            style: theme.textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(file, style: theme.textTheme.bodyMedium),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

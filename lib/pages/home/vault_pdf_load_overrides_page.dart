@@ -4,6 +4,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/theming/adaptive_icon.dart';
 import 'package:saber/data/home_data_cache.dart';
 import 'package:saber/data/prefs.dart';
@@ -137,6 +138,7 @@ class _VaultPdfLoadOverridesPageState extends State<VaultPdfLoadOverridesPage> {
 
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: homeAppBarBackgroundColor(context),
         leading: IconButton(
           icon: const AdaptiveIcon(
             icon: Icons.arrow_back,

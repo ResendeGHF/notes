@@ -52,6 +52,12 @@ home:
   invalidFormat: O arquivo que você selecionou não é suportado. Por favor selecione um arquivo .sbn, .sbn2, .sba ou .pdf.
   noFiles: Nenhum arquivo encontrado
   noPreviewAvailable: Nenhuma visualização disponível
+  fileList:
+    metaSize: Tamanho
+    metaModified: Modificado
+    metaAccessed: Acesso
+    metaNotesInside: Notas na pasta
+    accessedUnavailableVault: Ainda não aberto no aplicativo
   createNewNote: Toque no botão + para criar uma nova nota
   backFolder: Retornar para a pasta anterior
   newFolder:
@@ -144,6 +150,8 @@ settings:
     strokePrediction: Predição de traço
     strokePredictionAmount: Intensidade da predição
     toolbarColorSlotsCount: Slots de cor na barra
+    penSizePresetCount: Presets de espessura da caneta
+    penSizePresetSlot: Preset
     themeVariant: Variante do tema
     locale: Idioma do aplicativo
     appTheme: Tema do aplicativo
@@ -178,6 +186,7 @@ settings:
     strokePrediction: Mostra uma ponta de tinta ligeiramente à frente da caneta enquanto você desenha (não é salva na nota; reduz a sensação de atraso)
     strokePredictionAmount: Quão longe extrapolar enquanto desenha
     toolbarColorSlotsCount: Número de cores para mostrar na barra de ferramentas
+    penSizePresetCount: Quantidade de espessuras pré-definidas na barra do editor
     themeVariant: Variante do esquema de cores
     hyperlegibleFont: Aumenta a legibilidade para usuários com baixa visão
     allowInsecureConnections: (Não recomendado) Permitir que o Saber conecte a servidores com certificados autoassinados/não confiáveis
@@ -211,6 +220,29 @@ settings:
     editor: Editor
     performance: Desempenho
     advanced: Avançado
+  noteInkDefaults:
+    sectionTitle: Padrões de nota e tinta
+    changeNoteDefaults: Alterar padrões da nota
+    changeNoteDefaultsSubtitle: Padrão, espaçamento, cores e margens para notas novas
+    changeInkDefaults: Alterar padrões da tinta
+    changeInkDefaultsSubtitle: Cores na barra, espessuras e paletas
+    noteDefaultsTitle: Padrões da nota
+    noteDefaultsSubtitle: Pré-visualização ao vivo — usada ao criar uma nota
+    inkDefaultsTitle: Padrões da tinta
+    inkDefaultsSubtitle: Paletas e cores da barra
+    activePalette: Paleta
+    palettePickerLabel: Paleta
+    savePaletteAsNew: Nova paleta a partir da atual
+    savePaletteAsNewShort: Nova paleta
+    savePaletteAsNewTitle: Salvar paleta
+    toolbarSlotsHint: Toque para alterar cada cor da barra.
+    renamePalette: Renomear paleta
+    renamePaletteTitle: Renomear paleta
+    paletteNameHint: Nome
+    deletePaletteConfirm: Remover esta paleta? As cores na barra permanecem até você escolher outra paleta.
+    toolbarSlotsDropdownLabel: Cores na barra
+    toolbarSlotColor: Slot de cor $index
+    penSizePresetCountLabel: Presets de espessura do traço
   themeModes:
     system: Sistema
     light: Claro
@@ -349,7 +381,14 @@ update:
 editor:
   navigation:
     title: Notes
-    pdfOutlines: Tópicos do PDF
+    pdfOutlines: Tópicos
+    noPdfOutlineEntries: Sem entradas de tópicos
+    noOutlineEntriesHint: Adicione tópicos para marcar páginas nesta nota. Eles são incluídos ao exportar como PDF.
+    addOutlineForPage: Adicionar tópico para a página atual
+    renameOutline: Renomear tópico
+    deleteOutline: Excluir tópico
+    outlineTitle: Título
+    outlineActions: Ações do tópico
     firstPage: Primeira página
     lastPage: Última página
     goToPage: Ir para página
@@ -359,6 +398,8 @@ editor:
     calligraphyPen: Caneta de caligrafia
     fountainPen: Caneta tinteiro
     ballpointPen: Caneta esferográfica
+    advancedPen: Caneta avançada
+    advancedPencil: Lápis avançado
     highlighter: Marcador
     shapePen: Caneta de forma
     laserPointer: Apontador laser
@@ -371,6 +412,10 @@ editor:
     duplicate: Duplicar
     share: Compartilhar
     shareAsSvg: Compartilhar como SVG
+    changeColor: Alterar cor
+    changeStrokeType: Alterar tipo de traço
+    changeStrokeTypeTitle: Alterar tipo de traço
+    changeStrokeTypeHint: Converter os traços selecionados para outra caneta.
   toolbar:
     toggleColors: Alternar cores
     select: Selecionar
@@ -383,9 +428,47 @@ editor:
     export: Exportar
     exportAs: "Exportar como:"
     fullscreen: Tela cheia (F11)
+    regionScreenshot: Captura de região
+    regionScreenshotHint: Arraste para selecionar uma área
+    regionScreenshotTitle: Compartilhar ou copiar a captura?
+    regionScreenshotBody: Compartilhe com outro app, ou copie a imagem para a área de transferência.
+    regionScreenshotShare: Compartilhar
+    regionScreenshotCopy: Copiar para a área de transferência
+    regionScreenshotTooSmall: Seleção muito pequena
+    regionScreenshotFailed: Falha ao capturar a tela
   penOptions:
     size: Tamanho
     opacity: Opacidade
+    thinning: Afinação
+    smoothing: Suavização
+    streamline: Streamline
+    pressureSensitivity: Sensibilidade à pressão
+    velocityThinning: Afinação por velocidade
+    minSizeRatio: Razão mín. de largura
+    maxSizeRatio: Razão máx. de largura
+    startTaper: Afinação inicial
+    endTaper: Afinação final
+    easing: Easing da largura
+    startEasing: Easing do início
+    endEasing: Easing do fim
+    neonStroke: Traço neon
+    presetNameHint: Nome do preset
+    pencilNoise: Grão do lápis
+    pencilNoiseHint: Ruído procedural rápido (sem imagens). Os padrões são otimizados para desenho fluido.
+    noiseGrainScale: Tamanho do grão
+    noiseThreshold: Cobertura
+    noiseContrast: Contraste
+    noiseFineMix: Mistura de pontilhado fino
+    resetNoiseDefaults: Redefinir grão
+    pressureMapsTo: Pressão da caneta
+    pressureToThickness: Espessura
+    pressureToCoverage: Cobertura
+    pencilShadow: Sombra
+  penSizePresets:
+    editTitle(n): Preset de caneta $n
+    editSubtitle: Ajuste dentro do editor tocando duas vezes no chip de preset quando estiver nesta nota.
+    sameAsPenSlider: Igual ao controle da caneta (valores como 1,0 a 10,0 nos nomes iguais ao modal da caneta).
+    tooltip: Toque rápido aplica espessura; toque duplo com o editor aberto permite editar o preset só desta nota.
   colors:
     colorPicker: Seletor de cores
     customBrightnessHue: Personalizado $b $h
@@ -491,7 +574,6 @@ editor:
   copyToClipboard: Copiado para a área de transferência
   copy: Copiar
   goBack: Voltar
-  areaEraserMemorySafeQueue: Borracha limitada para evitar falta de memória — finalizando em segundo plano
   add: Adicionar
   close: Fechar
   imageSetAsBackground: Imagem definida como fundo

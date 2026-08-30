@@ -4,16 +4,16 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:collection/collection.dart';
-import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:material_symbols_icons/symbols.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
-import 'package:saber/components/theming/adaptive_alert_dialog.dart';
+import 'package:saber/components/toolbar/advanced_pen_panel.dart';
+import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/color_toolbar.dart';
+import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
+import 'package:saber/components/toolbar/pen_size_preset_toolbar.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/color_extensions.dart';
@@ -23,6 +23,7 @@ import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/laser_pointer.dart';
 import 'package:saber/data/tools/pen.dart';
+import 'package:saber/data/tools/pen_size_preset_support.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/data/tools/shape_tool.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -37,6 +38,7 @@ class EnhancedToolbar extends StatefulWidget {
     required this.invert,
     required this.axis,
     this.onColorChanged,
+    this.onToolbarSlotsChanged,
     required this.undo,
     required this.isUndoPossible,
     required this.redo,
@@ -53,7 +55,11 @@ class EnhancedToolbar extends StatefulWidget {
     this.onToggleCalculator,
     this.onOpenMatrixCalculator,
     this.onManageTagsAndLinks,
+    this.onRegionScreenshot,
+    this.regionScreenshotActive = false,
     required this.quillFocus,
+    required this.applyPenPresetStrokeWidth,
+    required this.onPenPresetNoteDirty,
   });
 
   final bool readOnly;
@@ -63,6 +69,8 @@ class EnhancedToolbar extends StatefulWidget {
   final bool invert;
   final Axis axis;
   final ValueChanged<Color>? onColorChanged;
+  /// Note-local toolbar slot edits (must not mutate ink presets).
+  final VoidCallback? onToolbarSlotsChanged;
   final VoidCallback undo;
   final bool isUndoPossible;
   final VoidCallback redo;
@@ -79,7 +87,12 @@ class EnhancedToolbar extends StatefulWidget {
   final VoidCallback? onToggleCalculator;
   final VoidCallback? onOpenMatrixCalculator;
   final VoidCallback? onManageTagsAndLinks;
+  /// Starts (or cancels) drag-to-select region screenshot mode.
+  final VoidCallback? onRegionScreenshot;
+  final bool regionScreenshotActive;
   final ValueNotifier<QuillStruct?> quillFocus;
+  final ValueChanged<double> applyPenPresetStrokeWidth;
+  final VoidCallback onPenPresetNoteDirty;
 
   @override
   State<EnhancedToolbar> createState() => EnhancedToolbarState();
@@ -91,8 +104,9 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
   OverlayEntry? _eraserCardOverlay;
   OverlayEntry? _shapeCardOverlay;
   OverlayEntry? _exportCardOverlay;
-  OverlayEntry? _textCardOverlay;
   OverlayEntry? _laserCardOverlay;
+
+  final ValueNotifier<int?> _penPresetSelectionIndex = ValueNotifier(null);
 
   final GlobalKey _penButtonKey = GlobalKey();
   final GlobalKey _highlighterButtonKey = GlobalKey();
@@ -102,15 +116,14 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
   final GlobalKey _textButtonKey = GlobalKey();
   final GlobalKey _laserButtonKey = GlobalKey();
 
-  void hideAllCards() {
+  void hideAllCards({bool notify = true}) {
     _hidePenCard();
     _hideHighlighterCard();
     _hideEraserCard();
     _hideShapeCard();
     _hideExportCard();
-    _hideTextCard();
     _hideLaserCard();
-    if (mounted) setState(() {});
+    if (notify && mounted) setState(() {});
   }
 
   OverlayEntry _buildPopover({
@@ -138,13 +151,22 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
   @override
   void didUpdateWidget(covariant EnhancedToolbar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final oldT = oldWidget.currentTool;
+    final newT = widget.currentTool;
+    if (!_sameDrawingToolIdentity(oldT, newT)) {
+      final keepPenPresetSelection =
+          newT is Eraser ||
+          (oldT is Eraser && toolSupportsPenSizePresets(newT));
+      if (!keepPenPresetSelection) {
+        _penPresetSelectionIndex.value = null;
+      }
+    }
     for (final overlay in [
       _penCardOverlay,
       _highlighterCardOverlay,
       _eraserCardOverlay,
       _shapeCardOverlay,
       _exportCardOverlay,
-      _textCardOverlay,
       _laserCardOverlay,
     ]) {
       overlay?.markNeedsBuild();
@@ -162,12 +184,17 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
   bool get _isPenTool =>
       widget.currentTool is Pen && widget.currentTool is! Highlighter;
 
+  bool _sameDrawingToolIdentity(Tool a, Tool b) {
+    if (identical(a, b)) return true;
+    return a.toolId == b.toolId;
+  }
+
   void _showPenCard() {
     if (_penCardOverlay != null) return;
     _penCardOverlay = _buildPopover(
       buttonKey: _penButtonKey,
       maxWidth: 480,
-      maxHeight: 560,
+      maxHeight: 720,
       title: 'Pens',
       onClose: _hidePenCard,
       childBuilder: () => _PenSelectionCard(
@@ -196,7 +223,7 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
     _highlighterCardOverlay = _buildPopover(
       buttonKey: _highlighterButtonKey,
       maxWidth: 360,
-      maxHeight: 520,
+      maxHeight: 560,
       title: t.editor.pens.highlighter,
       onClose: _hideHighlighterCard,
       childBuilder: () => _HighlighterSelectionCard(
@@ -320,27 +347,6 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
     _exportCardOverlay = null;
   }
 
-  void _showTextCard() {
-    if (_textCardOverlay != null) return;
-    _textCardOverlay = _buildPopover(
-      buttonKey: _textButtonKey,
-      maxWidth: 400,
-      maxHeight: 500,
-      title: t.editor.toolbar.text,
-      onClose: _hideTextCard,
-      childBuilder: () => _TextFormattingCard(
-        quillFocus: widget.quillFocus,
-        onClose: _hideTextCard,
-      ),
-    );
-    Overlay.of(context).insert(_textCardOverlay!);
-  }
-
-  void _hideTextCard() {
-    _textCardOverlay?.remove();
-    _textCardOverlay = null;
-  }
-
   void _showLaserCard() {
     if (_laserCardOverlay != null) return;
     _laserCardOverlay = _buildPopover(
@@ -361,7 +367,8 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
 
   @override
   void dispose() {
-    hideAllCards();
+    hideAllCards(notify: false);
+    _penPresetSelectionIndex.dispose();
     super.dispose();
   }
 
@@ -374,277 +381,290 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
 
     final isHorizontal = widget.axis == Axis.horizontal;
 
-    return Container(
+    Widget mainToolbar = Container(
       width: widget.axis == Axis.vertical ? 56 : double.infinity,
       height: widget.axis == Axis.horizontal ? 56 : double.infinity,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: isHorizontal ? Alignment.topCenter : Alignment.centerLeft,
-          end: isHorizontal ? Alignment.bottomCenter : Alignment.centerRight,
-          colors: [
-            (isDark ? const Color(0xFF1A1A1A) : colorScheme.surface).withValues(
-              alpha: 0.95,
-            ),
-            (isDark ? const Color(0xFF111111) : colorScheme.surface),
-          ],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: colorScheme.shadow.withValues(alpha: 0.05),
-            blurRadius: 8,
-            offset: isHorizontal ? const Offset(0, 2) : const Offset(2, 0),
-          ),
-        ],
+        color: isDark ? const Color(0xFF1E1E1E) : colorScheme.surfaceContainerHigh,
         border: Border(
           top: axisDir == AxisDirection.down
-              ? BorderSide(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
-                )
+              ? BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.3), width: 1)
               : BorderSide.none,
           bottom: axisDir == AxisDirection.up
-              ? BorderSide(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
-                )
+              ? BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.3), width: 1)
               : BorderSide.none,
           left: axisDir == AxisDirection.right
-              ? BorderSide(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
-                )
+              ? BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.3), width: 1)
               : BorderSide.none,
           right: axisDir == AxisDirection.left
-              ? BorderSide(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
-                )
+              ? BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.3), width: 1)
               : BorderSide.none,
         ),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Center(
         child: ScrollConfiguration(
           behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
           child: SingleChildScrollView(
             scrollDirection: widget.axis,
             physics: const BouncingScrollPhysics(),
-            padding: widget.axis == Axis.horizontal
-                ? const EdgeInsets.symmetric(horizontal: 4)
-                : const EdgeInsets.symmetric(vertical: 4),
-            child: Flex(
-              direction: widget.axis,
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.center,
-              spacing: 4,
-              children: [
+            child: ValueListenableBuilder<int?>(
+              valueListenable: _penPresetSelectionIndex,
+              builder: (context, presetIdx, _) {
+                final presetIndexForUi = widget.currentTool is Eraser ? null : presetIdx;
+                
+                Widget verticalDivider = Container(
+                  width: widget.axis == Axis.horizontal ? 1 : 24,
+                  height: widget.axis == Axis.horizontal ? 24 : 1,
+                  margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.2),
+                );
 
-                _ToolIconButton(
-                  key: _penButtonKey,
-                  icon: _getPenIcon(),
-                  tooltip: _isPenTool
-                      ? (widget.currentTool as Pen).name
-                      : t.editor.pens.ballpointPen,
-                  isSelected: _isPenTool,
-                  onTap: () {
-                    if (_isPenTool) {
-                      if (_penCardOverlay != null) {
-                        _hidePenCard();
-                      } else {
-                        hideAllCards();
-                        _showPenCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(Pen.currentPen);
-                    }
-                  },
-                  readOnly: widget.readOnly,
-                ),
+                return Flex(
+                  direction: widget.axis,
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _ToolIconButton(
+                      key: _penButtonKey,
+                      icon: _getPenIcon(),
+                      tooltip: _isPenTool ? (widget.currentTool as Pen).name : t.editor.pens.ballpointPen,
+                      isSelected: _isPenTool && presetIdx == null,
+                      onTap: () {
+                        if (_isPenTool) {
+                          _penPresetSelectionIndex.value = null;
+                          if (_penCardOverlay != null) {
+                            _hidePenCard();
+                          } else {
+                            hideAllCards();
+                            _showPenCard();
+                          }
+                        } else {
+                          hideAllCards();
+                          _penPresetSelectionIndex.value = null;
+                          widget.setTool(Pen.currentPen);
+                        }
+                      },
+                      readOnly: widget.readOnly,
+                    ),
+                    
+                    _ToolIconButton(
+                      key: _highlighterButtonKey,
+                      icon: const FaIcon(Highlighter.highlighterIcon, size: 18),
+                      tooltip: t.editor.pens.highlighter,
+                      isSelected: widget.currentTool is Highlighter && presetIdx == null,
+                      onTap: () {
+                        if (widget.currentTool is Highlighter) {
+                          _penPresetSelectionIndex.value = null;
+                          if (_highlighterCardOverlay != null) {
+                            _hideHighlighterCard();
+                          } else {
+                            hideAllCards();
+                            _showHighlighterCard();
+                          }
+                        } else {
+                          hideAllCards();
+                          _penPresetSelectionIndex.value = null;
+                          widget.setTool(Highlighter.currentHighlighter);
+                        }
+                      },
+                      readOnly: widget.readOnly,
+                    ),
 
-                _ToolIconButton(
-                  key: _shapeButtonKey,
-                  icon: const FaIcon(FontAwesomeIcons.shapes, size: 18),
-                  tooltip: 'Shape tool',
-                  isSelected: widget.currentTool is ShapeTool,
-                  onTap: () {
-                    if (widget.currentTool is ShapeTool) {
-                      if (_shapeCardOverlay != null) {
-                        _hideShapeCard();
-                      } else {
-                        hideAllCards();
-                        _showShapeCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(ShapeTool.currentShapeTool);
-                    }
-                  },
-                  readOnly: widget.readOnly,
-                ),
-                _ToolIconButton(
-                  key: _highlighterButtonKey,
-                  icon: const FaIcon(Highlighter.highlighterIcon, size: 18),
-                  tooltip: t.editor.pens.highlighter,
-                  isSelected: widget.currentTool is Highlighter,
-                  onTap: () {
-                    if (widget.currentTool is Highlighter) {
-                      if (_highlighterCardOverlay != null) {
-                        _hideHighlighterCard();
-                      } else {
-                        hideAllCards();
-                        _showHighlighterCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(Highlighter.currentHighlighter);
-                    }
-                  },
-                  readOnly: widget.readOnly,
-                ),
-                _ToolIconButton(
-                  key: _eraserButtonKey,
-                  icon: const FaIcon(FontAwesomeIcons.eraser, size: 18),
-                  tooltip: t.editor.toolbar.toggleEraser,
-                  isSelected: widget.currentTool is Eraser,
-                  onTap: () {
-                    if (widget.currentTool is Eraser) {
-                      if (_eraserCardOverlay != null) {
-                        _hideEraserCard();
-                      } else {
-                        hideAllCards();
-                        _showEraserCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(Eraser.currentEraser);
-                    }
-                  },
-                  readOnly: widget.readOnly,
-                ),
-                _ToolIconButton(
-                  icon: const Icon(CupertinoIcons.lasso, size: 20),
-                  tooltip: t.editor.toolbar.select,
-                  isSelected: widget.currentTool is Select,
-                  onTap: () {
-                    hideAllCards();
-                    widget.setTool(Select.currentSelect);
-                  },
-                  readOnly: widget.readOnly,
-                ),
-                _ToolIconButton(
-                  key: _laserButtonKey,
-                  icon: Icon(Symbols.stylus_laser_pointer, size: 20),
-                  tooltip: t.editor.pens.laserPointer,
-                  isSelected:
-                      widget.currentTool == LaserPointer.currentLaserPointer,
-                  onTap: () {
-                    if (widget.currentTool ==
-                        LaserPointer.currentLaserPointer) {
-                      if (_laserCardOverlay != null) {
-                        _hideLaserCard();
-                      } else {
-                        hideAllCards();
-                        _showLaserCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(LaserPointer.currentLaserPointer);
-                    }
-                  },
-                  readOnly: false,
-                ),
-                _ToolIconButton(
-                  key: _textButtonKey,
-                  icon: const Icon(Icons.text_fields, size: 20),
-                  tooltip: t.editor.toolbar.text,
-                  isSelected: widget.currentTool == Tool.textEditing,
-                  onTap: () {
-                    if (widget.currentTool == Tool.textEditing) {
-                      if (_textCardOverlay != null) {
-                        _hideTextCard();
-                      } else {
-                        hideAllCards();
-                        _showTextCard();
-                      }
-                    } else {
-                      hideAllCards();
-                      widget.setTool(Tool.textEditing);
-                    }
-                  },
-                  readOnly: widget.readOnly,
-                ),
-                _ToolIconButton(
-                  icon: const Icon(Icons.undo, size: 18),
-                  tooltip: t.editor.toolbar.undo,
-                  isSelected: false,
-                  onTap: widget.undo,
-                  readOnly: widget.readOnly || !widget.isUndoPossible,
-                ),
-                _ToolIconButton(
-                  icon: const Icon(Icons.redo, size: 18),
-                  tooltip: t.editor.toolbar.redo,
-                  isSelected: false,
-                  onTap: widget.redo,
-                  readOnly: widget.readOnly || !widget.isRedoPossible,
-                ),
+                    _ToolIconButton(
+                      key: _eraserButtonKey,
+                      icon: const FaIcon(FontAwesomeIcons.eraser, size: 18),
+                      tooltip: t.editor.toolbar.toggleEraser,
+                      isSelected: widget.currentTool is Eraser,
+                      onTap: () {
+                        if (widget.currentTool is Eraser) {
+                          if (_eraserCardOverlay != null) {
+                            _hideEraserCard();
+                          } else {
+                            hideAllCards();
+                            _showEraserCard();
+                          }
+                        } else {
+                          hideAllCards();
+                          widget.setTool(Eraser.currentEraser);
+                        }
+                      },
+                      readOnly: widget.readOnly,
+                    ),
+                    
+                    verticalDivider,
 
-                if (widget.onToggleCalculator != null)
-                  _ToolIconButton(
-                    icon: const Icon(Icons.calculate_outlined, size: 20),
-                    tooltip: 'Calculator',
-                    isSelected: false,
-                    onTap: () {
-                      hideAllCards();
-                      widget.onToggleCalculator!();
-                    },
-                    readOnly: false,
-                  ),
-                if (widget.onOpenMatrixCalculator != null)
-                  _ToolIconButton(
-                    icon: const Icon(Icons.data_array, size: 20),
-                    tooltip: 'Matrix Calculator',
-                    isSelected: false,
-                    onTap: () {
-                      hideAllCards();
-                      widget.onOpenMatrixCalculator!();
-                    },
-                    readOnly: false,
-                  ),
-                if (widget.onManageTagsAndLinks != null)
-                  _ToolIconButton(
-                    icon: const Icon(Icons.link_outlined, size: 20),
-                    tooltip: 'Tags & Links',
-                    isSelected: false,
-                    onTap: () {
-                      hideAllCards();
-                      widget.onManageTagsAndLinks?.call();
-                    },
-                    readOnly: false,
-                  ),
-                _ToolIconButton(
-                  key: _exportButtonKey,
-                  icon: const Icon(Icons.share, size: 18),
-                  tooltip: t.editor.toolbar.export,
-                  isSelected: _exportCardOverlay != null,
-                  onTap: _showExportCard,
-                  readOnly: widget.readOnly,
-                ),
-                ColorToolbar(
-                  axis: widget.axis,
-                  setColor: (color) {
-                    widget.setColor(color);
-                    widget.onColorChanged?.call(color);
-                  },
-                  currentColor: currentColor,
-                  invert: widget.invert,
-                ),
-              ],
+                    PenSizePresetToolbar(
+                      axis: widget.axis,
+                      readOnly: widget.readOnly,
+                      selectedPresetIndex: presetIndexForUi,
+                      onPresetSelected: (i) {
+                        _penPresetSelectionIndex.value = i;
+                      },
+                      applyStrokeWidthFromPreset: widget.applyPenPresetStrokeWidth,
+                      onPresetSizesChangedForNote: widget.onPenPresetNoteDirty,
+                    ),
+                    
+                    ColorToolbar(
+                      axis: widget.axis,
+                      setColor: (color) {
+                        widget.setColor(color);
+                        widget.onColorChanged?.call(color);
+                      },
+                      currentColor: currentColor,
+                      invert: widget.invert,
+                      onSlotsChanged: widget.onToolbarSlotsChanged,
+                    ),
+
+                    verticalDivider,
+
+                    _ToolIconButton(
+                      icon: const Icon(CupertinoIcons.lasso, size: 20),
+                      tooltip: t.editor.toolbar.select,
+                      isSelected: widget.currentTool is Select,
+                      onTap: () {
+                        hideAllCards();
+                        widget.setTool(Select.currentSelect);
+                      },
+                      readOnly: widget.readOnly,
+                    ),
+
+                    _ToolIconButton(
+                      key: _textButtonKey,
+                      icon: const Icon(Icons.text_fields, size: 20),
+                      tooltip: t.editor.toolbar.text,
+                      isSelected: widget.currentTool == Tool.textEditing,
+                      onTap: () {
+                        hideAllCards();
+                        if (widget.currentTool != Tool.textEditing) {
+                          widget.setTool(Tool.textEditing);
+                        }
+                      },
+                      readOnly: widget.readOnly,
+                    ),
+
+                    _ToolIconButton(
+                      key: _shapeButtonKey,
+                      icon: const FaIcon(FontAwesomeIcons.shapes, size: 18),
+                      tooltip: 'Shape tool',
+                      isSelected: widget.currentTool is ShapeTool && presetIdx == null,
+                      onTap: () {
+                        if (widget.currentTool is ShapeTool) {
+                          _penPresetSelectionIndex.value = null;
+                          if (_shapeCardOverlay != null) {
+                            _hideShapeCard();
+                          } else {
+                            hideAllCards();
+                            _showShapeCard();
+                          }
+                        } else {
+                          hideAllCards();
+                          _penPresetSelectionIndex.value = null;
+                          widget.setTool(ShapeTool.currentShapeTool);
+                        }
+                      },
+                      readOnly: widget.readOnly,
+                    ),
+                    
+                    verticalDivider,
+
+                    _ToolIconButton(
+                      icon: const Icon(Icons.undo, size: 20),
+                      tooltip: t.editor.toolbar.undo,
+                      isSelected: false,
+                      onTap: widget.undo,
+                      readOnly: widget.readOnly || !widget.isUndoPossible,
+                    ),
+                    _ToolIconButton(
+                      icon: const Icon(Icons.redo, size: 20),
+                      tooltip: t.editor.toolbar.redo,
+                      isSelected: false,
+                      onTap: widget.redo,
+                      readOnly: widget.readOnly || !widget.isRedoPossible,
+                    ),
+
+                    verticalDivider,
+
+                    _ToolIconButton(
+                      key: _exportButtonKey,
+                      icon: const Icon(Icons.ios_share_rounded, size: 20),
+                      tooltip: t.editor.toolbar.export,
+                      isSelected: false,
+                      onTap: () {
+                        if (_exportCardOverlay != null) {
+                          _hideExportCard();
+                        } else {
+                          hideAllCards();
+                          _showExportCard();
+                        }
+                      },
+                      readOnly: false,
+                    ),
+                    
+                    if (widget.onToggleCalculator != null || widget.onOpenMatrixCalculator != null || widget.onRegionScreenshot != null) ...[
+                       verticalDivider,
+                       if (widget.onToggleCalculator != null)
+                        _ToolIconButton(
+                          icon: const Icon(Icons.calculate_outlined, size: 20),
+                          tooltip: 'Calculator',
+                          isSelected: false,
+                          onTap: () {
+                            hideAllCards();
+                            widget.onToggleCalculator!();
+                          },
+                          readOnly: false,
+                        ),
+                      if (widget.onOpenMatrixCalculator != null)
+                        _ToolIconButton(
+                          icon: const Icon(Icons.data_array, size: 20),
+                          tooltip: 'Matrix Calculator',
+                          isSelected: false,
+                          onTap: () {
+                            hideAllCards();
+                            widget.onOpenMatrixCalculator!();
+                          },
+                          readOnly: false,
+                        ),
+                      if (widget.onRegionScreenshot != null)
+                        _ToolIconButton(
+                          icon: const Icon(Icons.crop_free, size: 20),
+                          tooltip: t.editor.toolbar.regionScreenshot,
+                          isSelected: widget.regionScreenshotActive,
+                          onTap: () {
+                            hideAllCards();
+                            widget.onRegionScreenshot!();
+                          },
+                          readOnly: false,
+                        ),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
         ),
       ),
     );
+
+    if (widget.currentTool == Tool.textEditing) {
+      return Flex(
+        direction: isHorizontal ? Axis.vertical : Axis.horizontal,
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          mainToolbar,
+          Container(
+            height: isHorizontal ? 1 : null,
+            width: isHorizontal ? null : 1,
+            color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+          ),
+          _InlineTextToolbar(quillFocus: widget.quillFocus, axis: widget.axis),
+        ],
+      );
+    }
+
+    return mainToolbar;
   }
 
   Widget _getPenIcon() {
@@ -653,12 +673,7 @@ class EnhancedToolbarState extends State<EnhancedToolbar> {
         ? widget.currentTool as Pen
         : Pen.currentPen;
 
-    if (pen.toolId == ToolId.verticalSpacePen) {
-      return const FaIcon(Pen.verticalSpacePenIcon, size: 18);
-    }
-    if (pen.toolId == ToolId.horizontalSpacePen) {
-      return const FaIcon(Pen.horizontalSpacePenIcon, size: 18);
-    } else if (pen.toolId == ToolId.fountainPen) {
+    if (pen.toolId == ToolId.fountainPen) {
       return const FaIcon(FontAwesomeIcons.penFancy, size: 18);
     } else if (pen.toolId == ToolId.calligraphyPen) {
       return const FaIcon(FontAwesomeIcons.penNib, size: 18);
@@ -686,7 +701,8 @@ class _ToolIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    ColorScheme.of(context);
+    final colorScheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Tooltip(
       message: tooltip,
@@ -694,20 +710,28 @@ class _ToolIconButton extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           onTap: readOnly ? null : onTap,
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(24), // Circular/Pílula
           child: Opacity(
-            opacity: readOnly ? 0.5 : 1.0,
+            opacity: readOnly ? 0.4 : 1.0,
             child: Container(
-              width: 40,
-              height: 40,
+              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
               decoration: BoxDecoration(
                 color: isSelected
-                    ? Theme.of(context).colorScheme.surfaceContainerHighest
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(6),
+                    ? (isDark ? colorScheme.primary.withOpacity(0.15) : colorScheme.primaryContainer)
+                    : Colors.transparent, // Fundo invisível se não selecionado
+                borderRadius: BorderRadius.circular(24),
               ),
-              padding: const EdgeInsets.all(8),
-              child: icon,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Center(
+                child: IconTheme(
+                  data: IconThemeData(
+                    color: isSelected 
+                      ? colorScheme.primary 
+                      : colorScheme.onSurfaceVariant,
+                  ),
+                  child: icon,
+                ),
+              ),
             ),
           ),
         ),
@@ -715,7 +739,6 @@ class _ToolIconButton extends StatelessWidget {
     );
   }
 }
-
 class _PenSelectionCard extends StatefulWidget {
   const _PenSelectionCard({
     required this.axis,
@@ -762,14 +785,12 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
         case ToolId.shapePen:
           _selectedPen = Pen.ballpointPen();
           break;
-        case ToolId.verticalSpacePen:
-          _selectedPen = Pen.verticalSpacePen();
-          break;
-        case ToolId.horizontalSpacePen:
-          _selectedPen = Pen.horizontalSpacePen();
-          break;
         case ToolId.advancedPen:
-          _selectedPen = AdvancedPen();
+        case ToolId.experimentalPen:
+          _selectedPen = Pen.advancedPen();
+          break;
+        case ToolId.advancedPencil:
+          _selectedPen = Pen.advancedPencil();
           break;
         default:
           _selectedPen = Pen.ballpointPen();
@@ -793,247 +814,185 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
     final activePen = _selectedPen ?? Pen.currentPen;
+
+    Widget sectionTitle(String title) => Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Text(
+        title,
+        style: theme.textTheme.labelMedium?.copyWith(
+          color: colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        sectionTitle("Pen Style"),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
-            _buildPenCard(
-              Pen.ballpointPen(),
-              const Icon(Symbols.ink_pen, size: 18),
-              t.editor.pens.ballpointPen,
-            ),
-            _buildPenCard(
-              Pen.calligraphyPen(),
-              const Icon(Symbols.brush, size: 18),
-              t.editor.pens.calligraphyPen,
-            ),
-            _buildPenCard(
-              Pen.fountainPen(),
-              const Icon(Symbols.stylus_note, size: 18),
-              t.editor.pens.fountainPen,
-            ),
-            _buildPenCard(
-              AdvancedPen(),
-              const Icon(AdvancedPen.advancedPenIcon, size: 18),
-              'Advanced',
-            ),
-            _buildPenCard(
-              Pen.verticalSpacePen(),
-              const Icon(FontAwesomeIcons.arrowsUpDown, size: 16),
-              'V-Space',
-            ),
-            _buildPenCard(
-              Pen.horizontalSpacePen(),
-              const Icon(FontAwesomeIcons.arrowsLeftRight, size: 16),
-              'H-Space',
-            ),
+            _buildPenCard(Pen.ballpointPen(), const Icon(Symbols.ink_pen, size: 18), t.editor.pens.ballpointPen),
+            _buildPenCard(Pen.calligraphyPen(), const Icon(Symbols.brush, size: 18), t.editor.pens.calligraphyPen),
+            _buildPenCard(Pen.fountainPen(), const Icon(Symbols.stylus_note, size: 18), t.editor.pens.fountainPen),
+            _buildPenCard(Pen.advancedPencil(), const FaIcon(FontAwesomeIcons.pencil, size: 16), t.editor.pens.advancedPencil),
+            _buildPenCard(Pen.advancedPen(), const FaIcon(FontAwesomeIcons.sliders, size: 16), t.editor.pens.advancedPen),
           ],
         ),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Divider(
-            height: 1,
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.05)
-                : colorScheme.outlineVariant.withValues(alpha: 0.2),
+        const Divider(height: 32),
+
+        if (_penHasFavoriteColors(activePen)) ...[
+          sectionTitle("Color"),
+          _buildPenColorSwatches(context, activePen, colorScheme),
+          const Divider(height: 32),
+        ],
+
+        sectionTitle("Size"),
+        SizePicker(axis: Axis.horizontal, pen: activePen),
+        const Divider(height: 32),
+
+        if (activePen.toolId == ToolId.advancedPen) ...[
+          AdvancedPenPresets(
+            pen: activePen,
+            onChanged: () {
+              stows.lastAdvancedPenOptions.value = activePen.options.copyWith();
+              setState(() {});
+            },
           ),
+          const Divider(height: 32),
+        ],
+        if (activePen.toolId == ToolId.advancedPencil) ...[
+          AdvancedPencilPresets(
+            pen: activePen,
+            onChanged: () {
+              stows.lastAdvancedPencilOptions.value = activePen.options.copyWith();
+              stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(activePen.paint.toJson(embedBytes: false));
+              setState(() {});
+            },
+          ),
+          const Divider(height: 32),
+        ],
+
+        sectionTitle("Drawing Assist"),
+        ValueListenableBuilder(
+          valueListenable: stows.strokeStabilization,
+          builder: (context, enabled, _) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(t.settings.prefLabels.strokeStabilization, style: theme.textTheme.bodyMedium),
+                  value: enabled,
+                  onChanged: (v) => stows.strokeStabilization.value = v,
+                ),
+                if (enabled)
+                  ValueListenableBuilder(
+                    valueListenable: stows.strokeStabilizationAmount,
+                    builder: (context, amount, _) => Slider(
+                      value: amount,
+                      onChanged: (v) => stows.strokeStabilizationAmount.value = v,
+                    ),
+                  ),
+              ],
+            );
+          },
         ),
-        if (activePen.toolId == ToolId.advancedPen)
-          _AdvancedPenOptionsPanel(
-            pen: activePen as AdvancedPen,
-            setTool: widget.setTool,
-            setColor: widget.setColor,
-            invert: widget.invert,
-            onClose: widget.onClose,
-            colorSwatches: _buildPenColorSwatches(
-              context,
-              activePen,
-              colorScheme,
-            ),
-          )
-        else ...[
-          SizePicker(axis: Axis.horizontal, pen: activePen),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      t.settings.prefLabels.strokeStabilization,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    ValueListenableBuilder(
-                      valueListenable: stows.strokeStabilizationAmount,
-                      builder: (context, amount, _) {
-                        return SizedBox(
-                          height: 24,
-                          child: Slider(
-                            value: amount,
-                            min: 0.0,
-                            max: 1.0,
-                            divisions: 20,
-                            onChanged: (value) {
-                              stows.strokeStabilizationAmount.value = value;
-                              if (value > 0 &&
-                                  !stows.strokeStabilization.value) {
-                                stows.strokeStabilization.value = true;
-                              } else if (value == 0 &&
-                                  stows.strokeStabilization.value) {
-                                stows.strokeStabilization.value = false;
-                              }
-                            },
-                          ),
-                        );
-                      },
-                    ),
-                  ],
+
+        ValueListenableBuilder(
+          valueListenable: stows.strokePrediction,
+          builder: (context, enabled, _) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(t.settings.prefLabels.strokePrediction, style: theme.textTheme.bodyMedium),
+                  value: enabled,
+                  onChanged: (v) => stows.strokePrediction.value = v,
                 ),
-              ),
-              ValueListenableBuilder(
-                valueListenable: stows.strokeStabilization,
-                builder: (context, enabled, _) {
-                  return Switch(
-                    value: enabled,
-                    onChanged: (value) =>
-                        stows.strokeStabilization.value = value,
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      t.settings.prefLabels.strokePrediction,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
+                if (enabled)
+                  ValueListenableBuilder(
+                    valueListenable: stows.strokePredictionAmount,
+                    builder: (context, amount, _) => Slider(
+                      value: amount,
+                      onChanged: (v) => stows.strokePredictionAmount.value = v,
                     ),
-                    ValueListenableBuilder(
-                      valueListenable: stows.strokePredictionAmount,
-                      builder: (context, amount, _) {
-                        return SizedBox(
-                          height: 24,
-                          child: Slider(
-                            value: amount,
-                            min: 0.0,
-                            max: 1.0,
-                            divisions: 20,
-                            onChanged: (value) {
-                              stows.strokePredictionAmount.value = value;
-                              if (value > 0 &&
-                                  !stows.strokePrediction.value) {
-                                stows.strokePrediction.value = true;
-                              } else if (value == 0 &&
-                                  stows.strokePrediction.value) {
-                                stows.strokePrediction.value = false;
-                              }
-                            },
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              ValueListenableBuilder(
-                valueListenable: stows.strokePrediction,
-                builder: (context, enabled, _) {
-                  return Switch(
-                    value: enabled,
-                    onChanged: (value) =>
-                        stows.strokePrediction.value = value,
-                  );
-                },
-              ),
-            ],
+                  ),
+              ],
+            );
+          },
+        ),
+
+        if (_supportsNeonInk(activePen.toolId))
+          ValueListenableBuilder(
+            valueListenable: _neonStowFor(activePen.toolId),
+            builder: (context, enabled, _) {
+              return SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(t.editor.penOptions.neonStroke, style: theme.textTheme.bodyMedium),
+                value: enabled,
+                onChanged: (val) {
+                  Pen.setNeonEnabledForTool(activePen.toolId, val);
+                  setState((){});
+                }
+              );
+            },
           ),
-          if (_penHasFavoriteColors(activePen)) ...[
-            const SizedBox(height: 16),
-            _buildPenColorSwatches(context, activePen, colorScheme),
-          ],
+
+        if (activePen.toolId == ToolId.advancedPen) ...[
+          const Divider(height: 32),
+          AdvancedPenSettings(
+            pen: activePen,
+            onChanged: () {
+              stows.lastAdvancedPenOptions.value = activePen.options.copyWith();
+              setState(() {});
+            },
+          ),
+        ],
+        if (activePen.toolId == ToolId.advancedPencil) ...[
+          const Divider(height: 32),
+          AdvancedPencilSettings(
+            pen: activePen,
+            onChanged: () {
+              stows.lastAdvancedPencilOptions.value = activePen.options.copyWith();
+              stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(activePen.paint.toJson(embedBytes: false));
+              setState(() {});
+            },
+          ),
         ],
       ],
     );
   }
 
+  static bool _supportsNeonInk(ToolId id) => id == ToolId.ballpointPen;
+
+  static ValueNotifier<bool> _neonStowFor(ToolId id) =>
+      stows.lastBallpointPenNeon;
+
   Widget _buildPenCard(Pen pen, Widget icon, String label) {
     final isActive = _selectedPen?.toolId == pen.toolId;
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final colorScheme = theme.colorScheme;
-
-    return InkWell(
-      onTap: () {
-        setState(() {
-          _selectedPen = pen;
-          widget.setTool(pen);
-        });
+    return ChoiceChip(
+      label: Text(label),
+      avatar: isActive ? null : icon,
+      selected: isActive,
+      onSelected: (selected) {
+        if (selected) {
+          setState(() {
+            _selectedPen = pen;
+            Pen.currentPen = pen;
+            widget.setTool(pen);
+          });
+        }
       },
-      borderRadius: BorderRadius.circular(10),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        decoration: BoxDecoration(
-          color: isActive
-              ? (isDark
-                    ? Colors.white.withValues(alpha: 0.1)
-                    : colorScheme.surfaceContainerHighest)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: isActive
-                ? (isDark
-                      ? Colors.white.withValues(alpha: 0.2)
-                      : colorScheme.outlineVariant)
-                : (isDark
-                      ? Colors.white.withValues(alpha: 0.05)
-                      : colorScheme.outlineVariant.withValues(alpha: 0.3)),
-            width: 1,
-          ),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconTheme(
-              data: IconThemeData(
-                color: isActive
-                    ? colorScheme.onSurface
-                    : colorScheme.onSurfaceVariant,
-                size: 16,
-              ),
-              child: icon,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-                color: isActive
-                    ? colorScheme.onSurface
-                    : colorScheme.onSurfaceVariant,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      ),
+      showCheckmark: true,
     );
   }
 
@@ -1042,11 +1001,24 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       case ToolId.ballpointPen:
       case ToolId.calligraphyPen:
       case ToolId.fountainPen:
-      case ToolId.shapePen:
       case ToolId.advancedPen:
+      case ToolId.advancedPencil:
+      case ToolId.shapePen:
         return true;
       default:
         return false;
+    }
+  }
+
+  /// Advanced Pen/Pencil share Ballpoint's ink row so suggestions follow
+  /// the selected color preset.
+  static String _favoriteColorsKey(ToolId id) {
+    switch (id) {
+      case ToolId.advancedPen:
+      case ToolId.advancedPencil:
+        return ToolId.ballpointPen.id;
+      default:
+        return id.id;
     }
   }
 
@@ -1055,14 +1027,17 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     Pen activePen,
     ColorScheme colorScheme,
   ) {
-    final favorites = stows.penFavoriteColors.value[activePen.toolId.id];
+    final favKey = _favoriteColorsKey(activePen.toolId);
+    final favorites =
+        stows.penFavoriteColors.value[favKey] ??
+        stows.penFavoriteColors.value[ToolId.ballpointPen.id];
     final list = favorites ?? <int>[];
     final defaultBorderColor = colorScheme.onSurface.withValues(alpha: 0.5);
-    final selectedBorderColor = colorScheme.primary;
     return ValueListenableBuilder<Map<String, List<int>>>(
       valueListenable: stows.penFavoriteColors,
       builder: (context, value, child) {
-        final fav = value[activePen.toolId.id] ?? list;
+        final fav =
+            value[favKey] ?? value[ToolId.ballpointPen.id] ?? list;
         final currentArgb = activePen.color.toARGB32();
 
         int selectedIndex = 0;
@@ -1079,7 +1054,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
               activePen.color.withInversion(widget.invert),
               onTap: () => _openColorPickerForCurrent(context, activePen),
               borderColor: selectedIndex == 0
-                  ? selectedBorderColor
+                  ? activePen.color.withInversion(widget.invert)
                   : defaultBorderColor,
             ),
             ...List.generate(10, (i) {
@@ -1094,9 +1069,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
                   onTap: () => _applyFavoriteColor(activePen, colorValue),
                   onDoubleTap: () =>
                       _openColorPickerForFavoriteSlot(context, activePen, i),
-                  borderColor: isSelected
-                      ? selectedBorderColor
-                      : defaultBorderColor,
+                  borderColor: isSelected ? color : defaultBorderColor,
                 ),
               );
             }),
@@ -1152,6 +1125,10 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
         stows.lastCalligraphyPenColor.value = colorValue;
       case ToolId.fountainPen:
         stows.lastFountainPenColor.value = colorValue;
+      case ToolId.advancedPen:
+        stows.lastAdvancedPenColor.value = colorValue;
+      case ToolId.advancedPencil:
+        stows.lastAdvancedPencilColor.value = colorValue;
       default:
     }
   }
@@ -1160,36 +1137,17 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     BuildContext context,
     Pen activePen,
   ) async {
-    Color pickedColor = activePen.color;
     widget.onClose();
-    final bool? confirmChange = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color color) {
-            pickedColor = color;
-          },
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-            onPressed: () => Navigator.of(context).pop(false),
-          ),
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-            onPressed: () => Navigator.of(context).pop(true),
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: activePen.color,
     );
-    if (confirmChange ?? false) {
-      activePen.color = pickedColor;
-      widget.setColor(pickedColor);
-      widget.setTool(activePen);
-      _persistPenColor(activePen.toolId, pickedColor.toARGB32());
-    }
+    if (pickedColor == null) return;
+    activePen.color = pickedColor;
+    widget.setColor(pickedColor);
+    Pen.currentPen = activePen;
+    widget.setTool(activePen);
+    _persistPenColor(activePen.toolId, pickedColor.toARGB32());
   }
 
   Future<void> _openColorPickerForFavoriteSlot(
@@ -1197,728 +1155,31 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     Pen activePen,
     int slotIndex,
   ) async {
+    final favKey = _favoriteColorsKey(activePen.toolId);
     final favorites = List<int>.from(
-      stows.penFavoriteColors.value[activePen.toolId.id] ??
+      stows.penFavoriteColors.value[favKey] ??
           stows.penFavoriteColors.value[ToolId.ballpointPen.id]!,
     );
     while (favorites.length < 10) {
       favorites.add(0xFF000000);
     }
-    Color pickedColor = Color(
+    final initial = Color(
       slotIndex < favorites.length ? favorites[slotIndex] : 0xFF000000,
     );
     widget.onClose();
-    final bool? confirmChange = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color color) {
-            pickedColor = color;
-          },
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-            onPressed: () => Navigator.of(context).pop(false),
-          ),
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-            onPressed: () => Navigator.of(context).pop(true),
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: initial,
     );
-    if ((confirmChange ?? false) && slotIndex < 10) {
-      favorites[slotIndex] = pickedColor.toARGB32();
-      final updated = Map<String, List<int>>.from(
-        stows.penFavoriteColors.value,
-      );
-      updated[activePen.toolId.id] = favorites;
-      stows.penFavoriteColors.value = updated;
+    if (pickedColor == null || slotIndex >= 10) return;
+    favorites[slotIndex] = pickedColor.toARGB32();
+    final updated = Map<String, List<int>>.from(stows.penFavoriteColors.value);
+    updated[favKey] = favorites;
+    if (activePen.toolId == ToolId.advancedPen ||
+        activePen.toolId == ToolId.advancedPencil) {
+      updated[activePen.toolId.id] = List<int>.from(favorites);
     }
-  }
-}
-
-double Function(double) _easingFromId(String id) {
-  switch (id) {
-    case 'easeInOut':
-      return StrokeEasings.easeInOut;
-    case 'easeOutCubic':
-      return StrokeEasings.easeOutCubic;
-    default:
-      return StrokeEasings.identity;
-  }
-}
-
-class _AdvancedPenOptionsPanel extends StatefulWidget {
-  const _AdvancedPenOptionsPanel({
-    required this.pen,
-    required this.setTool,
-    required this.setColor,
-    required this.invert,
-    required this.onClose,
-    this.colorSwatches,
-  });
-
-  final AdvancedPen pen;
-  final ValueChanged<Tool> setTool;
-  final ValueChanged<Color> setColor;
-  final bool invert;
-  final VoidCallback onClose;
-  final Widget? colorSwatches;
-
-  @override
-  State<_AdvancedPenOptionsPanel> createState() =>
-      _AdvancedPenOptionsPanelState();
-}
-
-class _AdvancedPenOptionsPanelState extends State<_AdvancedPenOptionsPanel> {
-  int _selectedPresetIndex = -1;
-  late String _mainEasingId;
-  late String _startEasingId;
-  late String _endEasingId;
-  bool _isPresetListExpanded = false;
-  bool _isCreatingPreset = false;
-  final TextEditingController _newPresetNameController =
-      TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    _mainEasingId = stows.lastAdvancedPenMainEasingId.value;
-    _startEasingId = stows.lastAdvancedPenStartEasingId.value;
-    _endEasingId = stows.lastAdvancedPenEndEasingId.value;
-    _applyEasingToPen();
-  }
-
-  @override
-  void dispose() {
-    _newPresetNameController.dispose();
-    super.dispose();
-  }
-
-  @override
-  void didUpdateWidget(covariant _AdvancedPenOptionsPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.pen, widget.pen)) {
-      _mainEasingId = stows.lastAdvancedPenMainEasingId.value;
-      _startEasingId = stows.lastAdvancedPenStartEasingId.value;
-      _endEasingId = stows.lastAdvancedPenEndEasingId.value;
-      _selectedPresetIndex = -1;
-      _applyEasingToPen();
-    }
-  }
-
-  void _applyEasingToPen() {
-    final opts = widget.pen.options;
-    opts.easing = _easingFromId(_mainEasingId);
-    opts.start = StrokeEndOptions.start(
-      taperEnabled: opts.start.taperEnabled,
-      customTaper: opts.start.customTaper,
-      cap: opts.start.cap,
-      easing: _easingFromId(_startEasingId),
-    );
-    opts.end = StrokeEndOptions.end(
-      taperEnabled: opts.end.taperEnabled,
-      customTaper: opts.end.customTaper,
-      cap: opts.end.cap,
-      easing: _easingFromId(_endEasingId),
-    );
-    widget.setTool(widget.pen);
-  }
-
-  void _syncOptionsToStow() {
-    stows.lastAdvancedPenOptions.value = widget.pen.options;
-    stows.lastAdvancedPenColor.value = widget.pen.color.toARGB32();
-  }
-
-  int _indexOfMatchingPreset(List<Map<String, dynamic>> presets) {
-    final optsJson = widget.pen.options.toJson();
-    final colorArgb = widget.pen.color.toARGB32();
-    const eq = DeepCollectionEquality();
-    for (int i = 0; i < presets.length; i++) {
-      final p = presets[i];
-      final presetOpts = p['options'] as Map<String, dynamic>? ?? {};
-      if (!eq.equals(presetOpts, optsJson)) continue;
-      if ((p['colorArgb'] as int?) != colorArgb) continue;
-      if ((p['easingId'] as String?) != _mainEasingId) continue;
-      if ((p['startEasingId'] as String?) != _startEasingId) continue;
-      if ((p['endEasingId'] as String?) != _endEasingId) continue;
-      return i;
-    }
-    return -1;
-  }
-
-  void _saveNewPreset(String name, List<Map<String, dynamic>> presets) {
-    final preset = {
-      'name': name,
-      'options': widget.pen.options.toJson(),
-      'colorArgb': widget.pen.color.toARGB32(),
-      'easingId': _mainEasingId,
-      'startEasingId': _startEasingId,
-      'endEasingId': _endEasingId,
-    };
-    setState(() {
-      stows.advancedPenPresets.value = [...presets, preset];
-      _selectedPresetIndex = stows.advancedPenPresets.value.length - 1;
-      _isCreatingPreset = false;
-      _newPresetNameController.clear();
-    });
-  }
-
-  void _applyOptionsFromPreset(Map<String, dynamic> preset) {
-    final optionsJson = preset['options'] as Map<String, dynamic>? ?? {};
-    final easing = _easingFromId(preset['easingId'] as String? ?? 'identity');
-    final startEasing = _easingFromId(
-      preset['startEasingId'] as String? ?? 'easeInOut',
-    );
-    final endEasing = _easingFromId(
-      preset['endEasingId'] as String? ?? 'easeOutCubic',
-    );
-    widget.pen.options = StrokeOptions.fromJson(
-      optionsJson,
-      easing: easing,
-      startEasing: startEasing,
-      endEasing: endEasing,
-    );
-    final colorArgb = preset['colorArgb'] as int? ?? 0xFF000000;
-    widget.pen.color = Color(colorArgb);
-    widget.setColor(widget.pen.color);
-    widget.setTool(widget.pen);
-    setState(() {
-      _mainEasingId = preset['easingId'] as String? ?? 'identity';
-      _startEasingId = preset['startEasingId'] as String? ?? 'easeInOut';
-      _endEasingId = preset['endEasingId'] as String? ?? 'easeOutCubic';
-    });
-    _syncOptionsToStow();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final opts = widget.pen.options;
-
-    return ValueListenableBuilder<List<Map<String, dynamic>>>(
-      valueListenable: stows.advancedPenPresets,
-      builder: (context, presets, _) {
-        return SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildPresetSelector(presets),
-              const SizedBox(height: 12),
-
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          t.settings.prefLabels.strokeStabilization,
-                          style: Theme.of(context).textTheme.labelSmall,
-                        ),
-                        ValueListenableBuilder(
-                          valueListenable: stows.strokeStabilizationAmount,
-                          builder: (context, amount, _) {
-                            return SizedBox(
-                              height: 24,
-                              child: Slider(
-                                value: amount,
-                                min: 0.0,
-                                max: 1.0,
-                                divisions: 20,
-                                onChanged: (value) {
-                                  stows.strokeStabilizationAmount.value = value;
-                                  if (value > 0 &&
-                                      !stows.strokeStabilization.value) {
-                                    stows.strokeStabilization.value = true;
-                                  } else if (value == 0 &&
-                                      stows.strokeStabilization.value) {
-                                    stows.strokeStabilization.value = false;
-                                  }
-                                  setState(() {});
-                                },
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  ValueListenableBuilder(
-                    valueListenable: stows.strokeStabilization,
-                    builder: (context, enabled, _) {
-                      return Switch(
-                        value: enabled,
-                        onChanged: (value) {
-                          stows.strokeStabilization.value = value;
-                          setState(() {});
-                        },
-                      );
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          t.settings.prefLabels.strokePrediction,
-                          style: Theme.of(context).textTheme.labelSmall,
-                        ),
-                        ValueListenableBuilder(
-                          valueListenable: stows.strokePredictionAmount,
-                          builder: (context, amount, _) {
-                            return SizedBox(
-                              height: 24,
-                              child: Slider(
-                                value: amount,
-                                min: 0.0,
-                                max: 1.0,
-                                divisions: 20,
-                                onChanged: (value) {
-                                  stows.strokePredictionAmount.value = value;
-                                  if (value > 0 &&
-                                      !stows.strokePrediction.value) {
-                                    stows.strokePrediction.value = true;
-                                  } else if (value == 0 &&
-                                      stows.strokePrediction.value) {
-                                    stows.strokePrediction.value = false;
-                                  }
-                                  setState(() {});
-                                },
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  ValueListenableBuilder(
-                    valueListenable: stows.strokePrediction,
-                    builder: (context, enabled, _) {
-                      return Switch(
-                        value: enabled,
-                        onChanged: (value) {
-                          stows.strokePrediction.value = value;
-                          setState(() {});
-                        },
-                      );
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-
-              if (widget.colorSwatches != null) ...[
-                widget.colorSwatches!,
-                const SizedBox(height: 12),
-              ],
-
-              _labelSlider('Size', opts.size * 2, 1, 10, (v) {
-                opts.size = v / 2;
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              _labelSlider('Thinning', opts.thinning, 0, 1, (v) {
-                opts.thinning = v;
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              _labelSlider('Streamline', opts.streamline, 0, 1, (v) {
-                opts.streamline = v;
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              _labelSlider('Smoothing', opts.smoothing, 0, 1, (v) {
-                opts.smoothing = v;
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-
-              _buildEasingSelector('Main easing', _mainEasingId, (v) {
-                setState(() => _mainEasingId = v);
-                stows.lastAdvancedPenMainEasingId.value = v;
-                opts.easing = _easingFromId(v);
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              const SizedBox(height: 8),
-              Text('Start', style: Theme.of(context).textTheme.labelMedium),
-              _labelSlider('Start taper', opts.start.customTaper ?? 0, 0, 30, (
-                v,
-              ) {
-                opts.start = StrokeEndOptions.start(
-                  taperEnabled: v > 0,
-                  customTaper: v > 0 ? v : null,
-                  cap: opts.start.cap,
-                  easing: _easingFromId(_startEasingId),
-                );
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              CheckboxListTile(
-                title: const Text('Start cap'),
-                value: opts.start.cap,
-                onChanged: (v) {
-                  opts.start = StrokeEndOptions.start(
-                    taperEnabled: opts.start.taperEnabled,
-                    customTaper: opts.start.customTaper,
-                    cap: v ?? true,
-                    easing: _easingFromId(_startEasingId),
-                  );
-                  _syncOptionsToStow();
-                  widget.setTool(widget.pen);
-                  setState(() {});
-                },
-              ),
-              _buildEasingSelector('Start easing', _startEasingId, (v) {
-                setState(() => _startEasingId = v);
-                stows.lastAdvancedPenStartEasingId.value = v;
-                opts.start = StrokeEndOptions.start(
-                  taperEnabled: opts.start.taperEnabled,
-                  customTaper: opts.start.customTaper,
-                  cap: opts.start.cap,
-                  easing: _easingFromId(v),
-                );
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              const SizedBox(height: 8),
-              Text('End', style: Theme.of(context).textTheme.labelMedium),
-              _labelSlider('End taper', opts.end.customTaper ?? 0, 0, 30, (v) {
-                opts.end = StrokeEndOptions.end(
-                  taperEnabled: v > 0,
-                  customTaper: v > 0 ? v : null,
-                  cap: opts.end.cap,
-                  easing: _easingFromId(_endEasingId),
-                );
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              CheckboxListTile(
-                title: const Text('End cap'),
-                value: opts.end.cap,
-                onChanged: (v) {
-                  opts.end = StrokeEndOptions.end(
-                    taperEnabled: opts.end.taperEnabled,
-                    customTaper: opts.end.customTaper,
-                    cap: v ?? true,
-                    easing: _easingFromId(_endEasingId),
-                  );
-                  _syncOptionsToStow();
-                  widget.setTool(widget.pen);
-                  setState(() {});
-                },
-              ),
-              _buildEasingSelector('End easing', _endEasingId, (v) {
-                setState(() => _endEasingId = v);
-                stows.lastAdvancedPenEndEasingId.value = v;
-                opts.end = StrokeEndOptions.end(
-                  taperEnabled: opts.end.taperEnabled,
-                  customTaper: opts.end.customTaper,
-                  cap: opts.end.cap,
-                  easing: _easingFromId(v),
-                );
-                _syncOptionsToStow();
-                widget.setTool(widget.pen);
-              }),
-              CheckboxListTile(
-                title: const Text('Simulate pressure'),
-                value: opts.simulatePressure,
-                onChanged: (v) {
-                  opts.simulatePressure = v ?? false;
-                  _syncOptionsToStow();
-                  widget.setTool(widget.pen);
-                  setState(() {});
-                },
-              ),
-              CheckboxListTile(
-                title: const Text('Complete'),
-                value: opts.isComplete,
-                onChanged: (v) {
-                  opts.isComplete = v ?? true;
-                  _syncOptionsToStow();
-                  widget.setTool(widget.pen);
-                  setState(() {});
-                },
-              ),
-              const SizedBox(height: 12),
-              if (_isCreatingPreset) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _newPresetNameController,
-                        autofocus: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Preset name',
-                          border: OutlineInputBorder(),
-                          isDense: true,
-                        ),
-                        onSubmitted: (name) {
-                          final n = name.trim();
-                          if (n.isNotEmpty) _saveNewPreset(n, presets);
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: () {
-                        final n = _newPresetNameController.text.trim();
-                        if (n.isNotEmpty) _saveNewPreset(n, presets);
-                      },
-                      child: Text(
-                        MaterialLocalizations.of(context).saveButtonLabel,
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        setState(() {
-                          _isCreatingPreset = false;
-                          _newPresetNameController.clear();
-                        });
-                      },
-                      child: Text(
-                        MaterialLocalizations.of(context).cancelButtonLabel,
-                      ),
-                    ),
-                  ],
-                ),
-              ] else ...[
-                Row(
-                  children: [
-                    TextButton.icon(
-                      onPressed: () {
-                        setState(() => _isCreatingPreset = true);
-                      },
-                      icon: const Icon(Icons.save, size: 18),
-                      label: const Text('Save preset'),
-                    ),
-                    if (_selectedPresetIndex >= 0 &&
-                        _selectedPresetIndex < presets.length) ...[
-                      const SizedBox(width: 8),
-                      TextButton.icon(
-                        onPressed: () {
-                          final list = List<Map<String, dynamic>>.from(presets);
-                          list.removeAt(_selectedPresetIndex);
-                          stows.advancedPenPresets.value = list;
-                          setState(() => _selectedPresetIndex = -1);
-                        },
-                        icon: const Icon(Icons.delete, size: 18),
-                        label: const Text('Delete preset'),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _labelSlider(
-    String label,
-    double value,
-    double min,
-    double max,
-    ValueChanged<double> onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(label, style: Theme.of(context).textTheme.bodySmall),
-          ),
-          Expanded(
-            child: Slider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              onChanged: (v) {
-                onChanged(v);
-                setState(() {});
-              },
-            ),
-          ),
-          SizedBox(
-            width: 42,
-            child: Text(
-              value.toStringAsFixed(1),
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                fontFeatures: [ui.FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPresetSelector(List<Map<String, dynamic>> presets) {
-
-    final matchingIndex = _indexOfMatchingPreset(presets);
-    if (matchingIndex != _selectedPresetIndex) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _selectedPresetIndex = matchingIndex);
-      });
-    }
-    final effectiveIndex = matchingIndex;
-
-    final currentName = (effectiveIndex >= 0 && effectiveIndex < presets.length)
-        ? (presets[effectiveIndex]['name'] as String? ?? 'Preset')
-        : 'No preset';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        InkWell(
-          onTap: () =>
-              setState(() => _isPresetListExpanded = !_isPresetListExpanded),
-          borderRadius: BorderRadius.circular(4),
-          child: InputDecorator(
-            decoration: InputDecoration(
-              labelText: 'Preset',
-              border: const OutlineInputBorder(),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 8,
-              ),
-              suffixIcon: Icon(
-                _isPresetListExpanded
-                    ? Icons.arrow_drop_up
-                    : Icons.arrow_drop_down,
-              ),
-            ),
-            child: Text(currentName),
-          ),
-        ),
-        if (_isPresetListExpanded)
-          Container(
-            constraints: const BoxConstraints(maxHeight: 200),
-            decoration: BoxDecoration(
-              border: Border.all(color: Theme.of(context).dividerColor),
-              borderRadius: BorderRadius.circular(4),
-              color: Theme.of(context).cardColor,
-            ),
-            margin: const EdgeInsets.only(top: 4),
-            child: ListView(
-              shrinkWrap: true,
-              padding: EdgeInsets.zero,
-              children: [
-                ListTile(
-                  title: const Text(
-                    'No preset',
-                    style: TextStyle(fontSize: 14),
-                  ),
-                  dense: true,
-                  selected: effectiveIndex == -1,
-                  onTap: () {
-                    setState(() {
-                      _selectedPresetIndex = -1;
-                      _isPresetListExpanded = false;
-                    });
-                  },
-                ),
-                ...List.generate(presets.length, (i) {
-                  final name =
-                      presets[i]['name'] as String? ?? 'Preset ${i + 1}';
-                  return ListTile(
-                    title: Text(name, style: const TextStyle(fontSize: 14)),
-                    dense: true,
-                    selected: effectiveIndex == i,
-                    onTap: () {
-                      setState(() {
-                        _selectedPresetIndex = i;
-                        _isPresetListExpanded = false;
-                        _applyOptionsFromPreset(presets[i]);
-                      });
-                    },
-                  );
-                }),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildEasingSelector(
-    String label,
-    String currentId,
-    ValueChanged<String> onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(label, style: Theme.of(context).textTheme.bodySmall),
-          ),
-          Expanded(
-            child: Wrap(
-              spacing: 4,
-              runSpacing: 4,
-              children: [
-                _easingChip('Identity', 'identity', currentId, onChanged),
-                _easingChip('EaseInOut', 'easeInOut', currentId, onChanged),
-                _easingChip('Cubic', 'easeOutCubic', currentId, onChanged),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _easingChip(
-    String label,
-    String id,
-    String currentId,
-    ValueChanged<String> onChanged,
-  ) {
-    final selected = id == currentId;
-    final colorScheme = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: () => onChanged(id),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected
-              ? colorScheme.primaryContainer
-              : colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? colorScheme.primary : Colors.transparent,
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            color: selected
-                ? Theme.of(context).colorScheme.onSurface
-                : Theme.of(context).colorScheme.onSurfaceVariant,
-            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-          ),
-        ),
-      ),
-    );
+    stows.penFavoriteColors.value = updated;
   }
 }
 
@@ -1992,58 +1253,49 @@ class _HighlighterSelectionCardState extends State<_HighlighterSelectionCard> {
     while (favorites.length < _favoritesCount) {
       favorites.add(0xFFFDE047);
     }
-    Color pickedColor = Color(
+    final initial = Color(
       slotIndex < favorites.length ? favorites[slotIndex] : 0xFFFDE047,
     );
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color c) => pickedColor = c,
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(MaterialLocalizations.of(ctx).cancelButtonLabel),
-          ),
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(MaterialLocalizations.of(ctx).saveButtonLabel),
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: initial,
     );
-    if (confirmed == true && mounted) {
-      final updated = Map<String, List<int>>.from(
-        stows.penFavoriteColors.value,
-      );
-      final list = List<int>.from(
-        updated[ToolId.highlighter.id] ?? updated[ToolId.ballpointPen.id]!,
-      );
-      while (list.length < _favoritesCount) list.add(0xFFFDE047);
-      if (slotIndex < list.length) {
-        list[slotIndex] = pickedColor.toARGB32();
-      } else {
-        list.add(pickedColor.toARGB32());
-      }
-      updated[ToolId.highlighter.id] = list;
-      stows.penFavoriteColors.value = updated;
-      setState(() {});
+    if (pickedColor == null || !mounted) return;
+    final updated = Map<String, List<int>>.from(stows.penFavoriteColors.value);
+    final list = List<int>.from(
+      updated[ToolId.highlighter.id] ?? updated[ToolId.ballpointPen.id]!,
+    );
+    while (list.length < _favoritesCount) list.add(0xFFFDE047);
+    if (slotIndex < list.length) {
+      list[slotIndex] = pickedColor.toARGB32();
+    } else {
+      list.add(pickedColor.toARGB32());
     }
+    updated[ToolId.highlighter.id] = list;
+    stows.penFavoriteColors.value = updated;
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
 
     final highlighter = widget.currentTool is Highlighter
         ? widget.currentTool as Highlighter
         : Highlighter.currentHighlighter;
     final currentRgb = highlighter.color.toARGB32() & 0x00FFFFFF;
+
+    Widget sectionTitle(String title) => Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Text(
+        title,
+        style: theme.textTheme.labelMedium?.copyWith(
+          color: colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
 
     return ValueListenableBuilder(
       valueListenable: stows.penFavoriteColors,
@@ -2058,116 +1310,7 @@ class _HighlighterSelectionCardState extends State<_HighlighterSelectionCard> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizePicker(axis: Axis.horizontal, pen: highlighter),
-            const SizedBox(height: 16),
-            Text(
-              t.editor.penOptions.opacity,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            Slider(
-              value: _currentOpacity,
-              min: 0.1,
-              max: 1.0,
-              divisions: 18,
-              onChanged: _updateOpacity,
-              onChangeEnd: (v) => stows.highlighterOpacity.value = v,
-            ),
-            Text(
-              '${(_currentOpacity * 100).toInt()}%',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              child: Divider(
-                height: 1,
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.05)
-                    : colorScheme.outlineVariant.withValues(alpha: 0.2),
-              ),
-            ),
-            Text(
-              t.settings.prefLabels.flatEdge,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 6),
-            ValueListenableBuilder(
-              valueListenable: stows.highlighterFlatEdge,
-              builder: (context, flat, _) {
-                return Row(
-                  children: [
-                    Expanded(
-                      child: _ChipOption(
-                        label: t.settings.prefLabels.highlighterCapRound,
-                        selected: !flat,
-                        onTap: () => stows.highlighterFlatEdge.value = false,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _ChipOption(
-                        label: t.settings.prefLabels.highlighterCapFlat,
-                        selected: flat,
-                        onTap: () => stows.highlighterFlatEdge.value = true,
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Drawing Assist',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 6),
-            ValueListenableBuilder(
-              valueListenable: Highlighter.straightLine,
-              builder: (context, straight, _) {
-                return Row(
-                  children: [
-                    Expanded(
-                      child: _ChipOption(
-                        label: 'Freehand',
-                        selected: !straight,
-                        onTap: () => Highlighter.straightLine.value = false,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _ChipOption(
-                        label: 'Straight Line',
-                        selected: straight,
-                        onTap: () => Highlighter.straightLine.value = true,
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              child: Divider(
-                height: 1,
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.05)
-                    : colorScheme.outlineVariant.withValues(alpha: 0.2),
-              ),
-            ),
-            Text(
-              t.editor.colors.colorPicker,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 8),
+            sectionTitle("Color"),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -2186,7 +1329,7 @@ class _HighlighterSelectionCardState extends State<_HighlighterSelectionCard> {
                         painter: _SmoothCirclePainter(
                           color: Color(colorValue),
                           borderColor: isSelected
-                              ? colorScheme.primary
+                              ? Color(colorValue)
                               : colorScheme.onSurface.withValues(alpha: 0.5),
                           borderWidth: 2.0,
                           hasShadow: false,
@@ -2196,6 +1339,59 @@ class _HighlighterSelectionCardState extends State<_HighlighterSelectionCard> {
                   ),
                 );
               }),
+            ),
+            const Divider(height: 32),
+
+            sectionTitle("Size & Opacity"),
+            SizePicker(axis: Axis.horizontal, pen: highlighter),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Text(t.editor.penOptions.opacity, style: theme.textTheme.bodyMedium),
+                Expanded(
+                  child: Slider(
+                    value: _currentOpacity,
+                    min: 0.1,
+                    max: 1.0,
+                    divisions: 18,
+                    onChanged: _updateOpacity,
+                    onChangeEnd: (v) => stows.highlighterOpacity.value = v,
+                  ),
+                ),
+                Text('${(_currentOpacity * 100).toInt()}%', style: theme.textTheme.bodySmall),
+              ],
+            ),
+            const Divider(height: 32),
+
+            sectionTitle("Tip Style"),
+            ValueListenableBuilder(
+              valueListenable: stows.highlighterFlatEdge,
+              builder: (context, flat, _) {
+                return SegmentedButton<bool>(
+                  segments: [
+                    ButtonSegment(value: false, label: Text(t.settings.prefLabels.highlighterCapRound)),
+                    ButtonSegment(value: true, label: Text(t.settings.prefLabels.highlighterCapFlat)),
+                  ],
+                  selected: {flat},
+                  onSelectionChanged: (s) => stows.highlighterFlatEdge.value = s.first,
+                );
+              },
+            ),
+            const Divider(height: 32),
+
+            sectionTitle("Drawing Assist"),
+            ValueListenableBuilder(
+              valueListenable: Highlighter.straightLine,
+              builder: (context, straight, _) {
+                return SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: false, label: Text('Freehand')),
+                    ButtonSegment(value: true, label: Text('Straight Line')),
+                  ],
+                  selected: {straight},
+                  onSelectionChanged: (s) => Highlighter.straightLine.value = s.first,
+                );
+              },
             ),
           ],
         );
@@ -2275,34 +1471,14 @@ class _LaserOptionsCardState extends State<_LaserOptionsCard> {
   static const int _laserFavoritesCount = 9;
 
   Future<void> _openColorPickerForCurrent() async {
-    Color pickedColor = stows.laserPointerColor.value;
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color color) {
-            pickedColor = color;
-          },
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-          ),
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: stows.laserPointerColor.value,
     );
-    if (confirmed == true && mounted) {
-      setState(() {
-        stows.laserPointerColor.value = pickedColor;
-      });
-    }
+    if (pickedColor == null || !mounted) return;
+    setState(() {
+      stows.laserPointerColor.value = pickedColor;
+    });
   }
 
   void _applyLaserFavoriteColor(int colorValue) {
@@ -2318,44 +1494,23 @@ class _LaserOptionsCardState extends State<_LaserOptionsCard> {
     while (favorites.length < _laserFavoritesCount) {
       favorites.add(0xFFDC2626);
     }
-    Color pickedColor = Color(
+    final initial = Color(
       slotIndex < favorites.length ? favorites[slotIndex] : 0xFFDC2626,
     );
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color color) {
-            pickedColor = color;
-          },
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-          ),
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: initial,
     );
-    if (confirmed == true && mounted) {
-      if (slotIndex < favorites.length) {
-        favorites[slotIndex] = pickedColor.toARGB32();
-      } else {
-        favorites.add(pickedColor.toARGB32());
-      }
-      final updated = Map<String, List<int>>.from(
-        stows.penFavoriteColors.value,
-      );
-      updated[ToolId.laserPointer.id] = favorites;
-      stows.penFavoriteColors.value = updated;
-      setState(() {});
+    if (pickedColor == null || !mounted) return;
+    if (slotIndex < favorites.length) {
+      favorites[slotIndex] = pickedColor.toARGB32();
+    } else {
+      favorites.add(pickedColor.toARGB32());
     }
+    final updated = Map<String, List<int>>.from(stows.penFavoriteColors.value);
+    updated[ToolId.laserPointer.id] = favorites;
+    stows.penFavoriteColors.value = updated;
+    setState(() {});
   }
 
   Widget _laserColorSwatch(
@@ -2387,7 +1542,6 @@ class _LaserOptionsCardState extends State<_LaserOptionsCard> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final defaultBorderColor = colorScheme.onSurface.withValues(alpha: 0.5);
-    final selectedBorderColor = colorScheme.primary;
 
     return Padding(
       padding: const EdgeInsets.only(top: 4),
@@ -2423,7 +1577,7 @@ class _LaserOptionsCardState extends State<_LaserOptionsCard> {
                         currentColor,
                         onTap: _openColorPickerForCurrent,
                         borderColor: selectedIndex == 0
-                            ? selectedBorderColor
+                            ? currentColor
                             : defaultBorderColor,
                       ),
                       ...List.generate(_laserFavoritesCount, (i) {
@@ -2439,7 +1593,7 @@ class _LaserOptionsCardState extends State<_LaserOptionsCard> {
                             onLongPress: () =>
                                 _openColorPickerForFavoriteSlot(i),
                             borderColor: isSelected
-                                ? selectedBorderColor
+                                ? color
                                 : defaultBorderColor,
                           ),
                         );
@@ -2613,42 +1767,16 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
   }
 
   void _showColorPicker() async {
-    Color pickedColor = _strokeColor;
     widget.onClose();
-
-    final bool? confirmChange = await showDialog(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: _ToolbarColorPickerContent(
-          initialColor: pickedColor,
-          onColorChanged: (Color color) {
-            pickedColor = color;
-          },
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-            onPressed: () {
-              Navigator.of(context).pop(false);
-            },
-          ),
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-            onPressed: () {
-              Navigator.of(context).pop(true);
-            },
-          ),
-        ],
-      ),
+    final pickedColor = await showNotesColorPicker(
+      context,
+      initialColor: _strokeColor,
     );
-
-    if (confirmChange ?? false) {
-      setState(() {
-        _strokeColor = pickedColor;
-        _apply();
-      });
-    }
+    if (pickedColor == null) return;
+    setState(() {
+      _strokeColor = pickedColor;
+      _apply();
+    });
   }
 
   @override
@@ -2666,161 +1794,133 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
     final colorScheme = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
 
+    Widget sectionTitle(String title) => Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Text(
+        title,
+        style: theme.textTheme.labelMedium?.copyWith(
+          color: colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        sectionTitle("Stroke & Fill"),
         Row(
           children: [
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${t.editor.penOptions.size}: ${_config.strokeWidth.toStringAsFixed(1)}px',
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      fontFeatures: const [ui.FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  SizedBox(
-                    height: 24,
-                    child: Slider(
-                      value: _config.strokeWidth,
-                      min: 1,
-                      max: 20,
-                      onChanged: (v) {
-                        setState(() {
-                          _config = _config.copyWith(strokeWidth: v);
-                          _apply();
-                        });
-                      },
-                    ),
-                  ),
-                ],
+              child: Slider(
+                value: _config.strokeWidth,
+                min: 1,
+                max: 20,
+                onChanged: (v) {
+                  setState(() {
+                    _config = _config.copyWith(strokeWidth: v);
+                    _apply();
+                  });
+                },
+              ),
+            ),
+            SizedBox(
+              width: 32,
+              child: Text(
+                '${_config.strokeWidth.toStringAsFixed(1)}px',
+                style: theme.textTheme.bodySmall?.copyWith(fontFeatures: const [ui.FontFeature.tabularFigures()]),
+                textAlign: TextAlign.end,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text('Fill Shape', style: theme.textTheme.bodyMedium),
+                value: _fill,
+                onChanged: (v) {
+                  setState(() {
+                    _fill = v;
+                    _apply();
+                  });
+                },
               ),
             ),
             const SizedBox(width: 16),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  'Color',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
+            GestureDetector(
+              onTap: _showColorPicker,
+              child: SizedBox(
+                width: 28,
+                height: 28,
+                child: CustomPaint(
+                  painter: _SmoothCirclePainter(
+                    color: _strokeColor.withInversion(widget.invert),
+                    borderColor: colorScheme.onSurface.withValues(alpha: 0.5),
+                    borderWidth: 2.0,
+                    hasShadow: false,
                   ),
                 ),
-                const SizedBox(height: 4),
-                GestureDetector(
-                  onTap: _showColorPicker,
-                  child: SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CustomPaint(
-                      painter: _SmoothCirclePainter(
-                        color: _strokeColor.withInversion(widget.invert),
-                        borderColor: colorScheme.onSurface.withValues(
-                          alpha: 0.5,
-                        ),
-                        borderWidth: 2.0,
-                        hasShadow: false,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
-        const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            'Line style',
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        const SizedBox(height: 6),
+        const Divider(height: 32),
+
+        sectionTitle("Line Style"),
         SegmentedButton<ShapeStrokeStyle>(
           segments: const [
-            ButtonSegment<ShapeStrokeStyle>(
-              value: ShapeStrokeStyle.solid,
-              label: Text('Solid'),
-            ),
-            ButtonSegment<ShapeStrokeStyle>(
-              value: ShapeStrokeStyle.dashed,
-              label: Text('Dashed'),
-            ),
-            ButtonSegment<ShapeStrokeStyle>(
-              value: ShapeStrokeStyle.dotted,
-              label: Text('Dotted'),
-            ),
+            ButtonSegment(value: ShapeStrokeStyle.solid, label: Text('Solid')),
+            ButtonSegment(value: ShapeStrokeStyle.dashed, label: Text('Dashed')),
+            ButtonSegment(value: ShapeStrokeStyle.dotted, label: Text('Dotted')),
           ],
           selected: {_config.strokeStyle},
-          onSelectionChanged: (Set<ShapeStrokeStyle> selection) {
-            if (selection.isEmpty) return;
+          onSelectionChanged: (s) {
             setState(() {
-              _config = _config.copyWith(strokeStyle: selection.first);
+              _config = _config.copyWith(strokeStyle: s.first);
               _apply();
             });
           },
         ),
-        const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Fill Shape',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            Switch(
-              value: _fill,
-              onChanged: (v) {
-                setState(() {
-                  _fill = v;
-                  _apply();
-                });
-              },
-            ),
-          ],
-        ),
+        const Divider(height: 32),
+
         if (_config.kind == ShapeKind.polygon) ...[
-          const SizedBox(height: 8),
-          Text(
-            'Sides: ${_config.detail.clamp(3, 12)}',
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-            ),
+          sectionTitle("Polygon Detail"),
+          Row(
+            children: [
+              Expanded(
+                child: Slider(
+                  value: _config.detail.clamp(3, 12).toDouble(),
+                  min: 3,
+                  max: 12,
+                  divisions: 9,
+                  onChanged: (v) {
+                    setState(() {
+                      _config = _config.copyWith(detail: v.round());
+                      _apply();
+                    });
+                  },
+                ),
+              ),
+              SizedBox(
+                width: 32,
+                child: Text(
+                  '${_config.detail.clamp(3, 12)}',
+                  style: theme.textTheme.bodySmall,
+                  textAlign: TextAlign.end,
+                ),
+              ),
+            ],
           ),
-          SizedBox(
-            height: 24,
-            child: Slider(
-              value: _config.detail.clamp(3, 12).toDouble(),
-              min: 3,
-              max: 12,
-              divisions: 9,
-              onChanged: (v) {
-                setState(() {
-                  _config = _config.copyWith(detail: v.round());
-                  _apply();
-                });
-              },
-            ),
-          ),
+          const Divider(height: 32),
         ],
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Divider(
-            height: 1,
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.05)
-                : colorScheme.outlineVariant.withValues(alpha: 0.2),
-          ),
-        ),
+
+        sectionTitle("Shape"),
         TextField(
           controller: _searchController,
           decoration: InputDecoration(
@@ -2828,14 +1928,9 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
             prefixIcon: const Icon(Icons.search, size: 18),
             isDense: true,
             filled: true,
-            fillColor: isDark
-                ? Colors.white.withValues(alpha: 0.05)
-                : colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+            fillColor: isDark ? Colors.white.withValues(alpha: 0.05) : colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
             contentPadding: const EdgeInsets.all(8),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: BorderSide.none,
-            ),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
           ),
         ),
         const SizedBox(height: 12),
@@ -2843,8 +1938,8 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
           height: 240,
           child: GridView.builder(
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 3,
-              childAspectRatio: 1.4,
+              crossAxisCount: 4,
+              childAspectRatio: 1.0,
               crossAxisSpacing: 8,
               mainAxisSpacing: 8,
             ),
@@ -2857,62 +1952,28 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
                 onTap: () => setState(() {
                   _config = _config.copyWith(
                     kind: kind,
-                    detail: kind == ShapeKind.polygon
-                        ? (_config.detail < 3 ? 6 : _config.detail)
-                        : _config.detail,
+                    detail: kind == ShapeKind.polygon ? (_config.detail < 3 ? 6 : _config.detail) : _config.detail,
                   );
                   _apply();
                 }),
-                borderRadius: BorderRadius.circular(10),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
                   decoration: BoxDecoration(
-                    color: isSelected
-                        ? (isDark
-                              ? Colors.white.withValues(alpha: 0.1)
-                              : colorScheme.surfaceContainerHighest)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(10),
+                    color: isSelected ? colorScheme.primaryContainer : Colors.transparent,
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: isSelected
-                          ? (isDark
-                                ? Colors.white.withValues(alpha: 0.2)
-                                : colorScheme.outlineVariant)
-                          : (isDark
-                                ? Colors.white.withValues(alpha: 0.05)
-                                : colorScheme.outlineVariant.withValues(
-                                    alpha: 0.3,
-                                  )),
+                      color: isSelected ? colorScheme.primary : colorScheme.outlineVariant.withValues(alpha: 0.3),
                       width: 1,
                     ),
                   ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        _getIconForShape(kind),
-                        color: isSelected
-                            ? colorScheme.onSurface
-                            : colorScheme.onSurfaceVariant,
-                        size: 20,
+                  child: Tooltip(
+                    message: _shapeLabel(kind),
+                    child: Center(
+                      child: _buildShapeIcon(
+                        kind,
+                        isSelected ? colorScheme.onPrimaryContainer : colorScheme.onSurfaceVariant,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _shapeLabel(kind),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: isSelected
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                          color: isSelected
-                              ? colorScheme.onSurface
-                              : colorScheme.onSurfaceVariant,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               );
@@ -2923,50 +1984,55 @@ class _ShapeSelectionCardState extends State<_ShapeSelectionCard> {
     );
   }
 
-  IconData _getIconForShape(ShapeKind kind) {
+  Widget _buildShapeIcon(ShapeKind kind, Color color) {
     switch (kind) {
-      case ShapeKind.rectangle:
-        return CupertinoIcons.rectangle;
-      case ShapeKind.circle:
-        return CupertinoIcons.circle;
       case ShapeKind.ellipse:
-        return Icons.radio_button_unchecked;
-      case ShapeKind.polygon:
-        return CupertinoIcons.hexagon;
-      case ShapeKind.line:
-        return Icons.horizontal_rule;
-      case ShapeKind.arrow:
-        return CupertinoIcons.arrow_right;
-      case ShapeKind.doubleArrow:
-        return CupertinoIcons.arrow_left_right;
-      case ShapeKind.triangleIsosceles:
+        // Achatamos um circulo horizontalmente para criar uma elipse visual
+        return Transform.scale(
+          scaleX: 1.3,
+          child: Icon(CupertinoIcons.circle, color: color, size: 20),
+        );
       case ShapeKind.triangleRight:
-        return CupertinoIcons.triangle;
+        // O ícone de sinal 0 do celular desenha perfeitamente um triângulo retângulo
+        return Icon(Icons.signal_cellular_0_bar, color: color, size: 24);
+      case ShapeKind.rectangle:
+        return Icon(CupertinoIcons.rectangle, color: color, size: 24);
+      case ShapeKind.circle:
+        return Icon(CupertinoIcons.circle, color: color, size: 24);
+      case ShapeKind.polygon:
+        return Icon(CupertinoIcons.hexagon, color: color, size: 24);
+      case ShapeKind.line:
+        return Icon(Icons.horizontal_rule, color: color, size: 24);
+      case ShapeKind.arrow:
+        return Icon(CupertinoIcons.arrow_right, color: color, size: 24);
+      case ShapeKind.doubleArrow:
+        return Icon(CupertinoIcons.arrow_left_right, color: color, size: 24);
+      case ShapeKind.triangleIsosceles:
+        return Icon(CupertinoIcons.triangle, color: color, size: 24);
       case ShapeKind.cube:
-        return CupertinoIcons.cube_box;
+        return Icon(CupertinoIcons.cube_box, color: color, size: 24);
       case ShapeKind.cylinder:
-        return Icons.inventory_2_outlined;
+        return Icon(Icons.inventory_2_outlined, color: color, size: 24);
       case ShapeKind.sphere:
-        return Symbols.language;
+        return Icon(Symbols.language, color: color, size: 24);
       case ShapeKind.halfSphere:
-        return Icons.wifi_tethering;
+        return Icon(Icons.wifi_tethering, color: color, size: 24);
       case ShapeKind.parabola:
-        return Symbols.trending_up;
+        return Icon(Symbols.trending_up, color: color, size: 24);
       case ShapeKind.pendulum:
-        return Symbols.vibration;
+        return Icon(Symbols.vibration, color: color, size: 24);
       case ShapeKind.spring:
-        return Symbols.water;
+        return Icon(Symbols.water, color: color, size: 24);
       case ShapeKind.fixedEnd:
-        return Symbols.publish;
+        return Icon(Symbols.publish, color: color, size: 24);
       case ShapeKind.harmonicOscillator:
-        return Symbols.graphic_eq;
+        return Icon(Symbols.graphic_eq, color: color, size: 24);
       case ShapeKind.coordinateSystem:
-        return Symbols.polyline;
+        return Icon(Symbols.polyline, color: color, size: 24);
       default:
-        return Icons.category_outlined;
+        return Icon(Icons.category_outlined, color: color, size: 24);
     }
   }
-
   String _shapeLabel(ShapeKind kind) {
     switch (kind) {
       case ShapeKind.infinity:
@@ -3059,101 +2125,64 @@ class _EraserSelectionCardState extends State<_EraserSelectionCard> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
+    Widget sectionTitle(String title) => Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Text(
+        title,
+        style: theme.textTheme.labelMedium?.copyWith(
+          color: colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        sectionTitle("Mode"),
+        SegmentedButton<EraserMode>(
+          segments: const [
+            ButtonSegment(value: EraserMode.stroke, label: Text('Erase Stroke')),
+            ButtonSegment(value: EraserMode.area, label: Text('Erase Area')),
+          ],
+          selected: {_mode},
+          onSelectionChanged: (s) {
+            setState(() {
+              _mode = s.first;
+              Eraser.currentEraser.updateMode = _mode;
+              widget.setTool(Eraser.currentEraser);
+            });
+          },
+        ),
+        const Divider(height: 32),
+
+        sectionTitle("Size"),
         Row(
           children: [
-            Text(
-              '${t.editor.penOptions.size}: ',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
+            Expanded(
+              child: Slider(
+                value: _size.clamp(0.5, 25),
+                min: 0.5,
+                max: 25,
+                divisions: 49,
+                onChanged: (value) {
+                  setState(() {
+                    _size = value;
+                    Eraser.currentEraser.updateSize = value;
+                    widget.setTool(Eraser.currentEraser);
+                  });
+                },
               ),
             ),
             SizedBox(
               width: 42,
               child: Text(
                 _size.toStringAsFixed(1),
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
+                style: theme.textTheme.bodyMedium?.copyWith(
                   fontFeatures: const [ui.FontFeature.tabularFigures()],
                 ),
-              ),
-            ),
-            const Spacer(),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.remove, size: 18),
-              onPressed: () {
-                setState(() {
-                  _size = (_size - 0.5).clamp(0.5, 25);
-                  Eraser.currentEraser.updateSize = _size;
-                  widget.setTool(Eraser.currentEraser);
-                });
-              },
-            ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.add, size: 18),
-              onPressed: () {
-                setState(() {
-                  _size = (_size + 0.5).clamp(0.5, 25);
-                  Eraser.currentEraser.updateSize = _size;
-                  widget.setTool(Eraser.currentEraser);
-                });
-              },
-            ),
-          ],
-        ),
-        Slider(
-          value: _size.clamp(0.5, 25),
-          min: 0.5,
-          max: 25,
-          divisions: 49,
-          onChanged: (value) {
-            setState(() {
-              _size = value;
-              Eraser.currentEraser.updateSize = value;
-              widget.setTool(Eraser.currentEraser);
-            });
-          },
-        ),
-        const SizedBox(height: 12),
-        Text(
-          'Mode',
-          style: theme.textTheme.labelMedium?.copyWith(
-            color: colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: _ChipOption(
-                label: 'Erase stroke',
-                selected: _mode == EraserMode.stroke,
-                onTap: () {
-                  setState(() {
-                    _mode = EraserMode.stroke;
-                    Eraser.currentEraser.updateMode = _mode;
-                    widget.setTool(Eraser.currentEraser);
-                  });
-                },
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _ChipOption(
-                label: 'Erase area',
-                selected: _mode == EraserMode.area,
-                onTap: () {
-                  setState(() {
-                    _mode = EraserMode.area;
-                    Eraser.currentEraser.updateMode = _mode;
-                    widget.setTool(Eraser.currentEraser);
-                  });
-                },
+                textAlign: TextAlign.end,
               ),
             ),
           ],
@@ -3163,11 +2192,11 @@ class _EraserSelectionCardState extends State<_EraserSelectionCard> {
   }
 }
 
-class _TextFormattingCard extends StatelessWidget {
-  const _TextFormattingCard({required this.quillFocus, required this.onClose});
+class _InlineTextToolbar extends StatelessWidget {
+  const _InlineTextToolbar({required this.quillFocus, required this.axis});
 
   final ValueNotifier<QuillStruct?> quillFocus;
-  final VoidCallback onClose;
+  final Axis axis;
 
   @override
   Widget build(BuildContext context) {
@@ -3179,72 +2208,65 @@ class _TextFormattingCard extends StatelessWidget {
       valueListenable: quillFocus,
       builder: (context, quill, _) {
         if (quill == null) {
-          return Center(
-            child: Text(
-              'Select a text box to view formatting options.',
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          );
+          return const SizedBox.shrink();
         }
 
-        final baseButtonStyle =
-            IconButtonTheme.of(context).style ?? const ButtonStyle();
+        final baseButtonStyle = IconButtonTheme.of(context).style ?? const ButtonStyle();
         final iconTheme = QuillIconTheme(
           iconButtonUnselectedData: IconButtonData(
             style: baseButtonStyle.copyWith(
               backgroundColor: WidgetStateProperty.all(Colors.transparent),
-              foregroundColor: WidgetStateProperty.all(
-                colorScheme.onSurfaceVariant,
-              ),
+              foregroundColor: WidgetStateProperty.all(colorScheme.onSurfaceVariant),
             ),
           ),
           iconButtonSelectedData: IconButtonData(
             style: baseButtonStyle.copyWith(
-              backgroundColor: WidgetStateProperty.all(
-                isDark
-                    ? Colors.white.withValues(alpha: 0.12)
-                    : colorScheme.surfaceContainerHighest,
-              ),
+              backgroundColor: WidgetStateProperty.all(isDark ? Colors.white.withValues(alpha: 0.12) : colorScheme.surfaceContainerHighest),
               foregroundColor: WidgetStateProperty.all(colorScheme.onSurface),
             ),
           ),
         );
 
-        return QuillSimpleToolbar(
-          controller: quill.controller,
-          config: QuillSimpleToolbarConfig(
-            multiRowsDisplay: true,
-            axis: Axis.horizontal,
-            buttonOptions: QuillSimpleToolbarButtonOptions(
-              base: QuillToolbarBaseButtonOptions(iconTheme: iconTheme),
+        return Container(
+          width: axis == Axis.vertical ? 56 : double.infinity,
+          height: axis == Axis.horizontal ? 56 : double.infinity,
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E1E1E) : colorScheme.surfaceContainerHigh,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          // Removido o SingleChildScrollView e o Center! O Quill cuidará do Scroll Nativo corretamente.
+          child: QuillSimpleToolbar(
+            controller: quill.controller,
+            config: QuillSimpleToolbarConfig(
+              multiRowsDisplay: false, 
+              axis: axis,
+              buttonOptions: QuillSimpleToolbarButtonOptions(
+                base: QuillToolbarBaseButtonOptions(iconTheme: iconTheme),
+              ),
+              showBoldButton: true,
+              showItalicButton: true,
+              showUnderLineButton: true,
+              showStrikeThrough: true,
+              showInlineCode: false,
+              showSubscript: false,
+              showSuperscript: false,
+              showColorButton: true,
+              showBackgroundColorButton: true,
+              showHeaderStyle: true,
+              showListNumbers: true,
+              showListBullets: true,
+              showListCheck: true,
+              showCodeBlock: false,
+              showQuote: true,
+              showIndent: true,
+              showLink: true,
+              showSearchButton: false,
+              showUndo: false,
+              showRedo: false,
+              showFontSize: false,
+              showFontFamily: false,
+              showClearFormat: true,
             ),
-            showBoldButton: true,
-            showItalicButton: true,
-            showUnderLineButton: true,
-            showStrikeThrough: true,
-            showInlineCode: true,
-            showSubscript: true,
-            showSuperscript: true,
-            showColorButton: true,
-            showBackgroundColorButton: true,
-            showHeaderStyle: true,
-            showListNumbers: true,
-            showListBullets: true,
-            showListCheck: true,
-            showCodeBlock: true,
-            showQuote: true,
-            showIndent: true,
-            showLink: true,
-            showSearchButton: true,
-
-            showUndo: false,
-            showRedo: false,
-            showFontSize: false,
-            showFontFamily: false,
-            showClearFormat: true,
           ),
         );
       },
@@ -3338,26 +2360,19 @@ class _PopoverOverlayState extends State<_PopoverOverlay>
             opacity: _fadeAnimation,
             child: ScaleTransition(
               scale: _scaleAnimation,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(20),
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                  child: Material(
-                    elevation: isDark ? 0 : 8,
-                    color:
-                        (isDark ? const Color(0xFF1E1E1E) : colorScheme.surface)
-                            .withValues(alpha: 0.75),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                      side: BorderSide(
-                        color: isDark
-                            ? Colors.white.withValues(alpha: 0.15)
-                            : colorScheme.outlineVariant.withValues(alpha: 0.4),
-                        width: 1,
-                      ),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: ConstrainedBox(
+              child: Material(
+                elevation: 4,
+                shadowColor: Colors.black.withValues(alpha: 0.2),
+                color: isDark ? const Color(0xFF1E1E22) : colorScheme.surfaceContainerHigh,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(
+                    color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+                    width: 1,
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: ConstrainedBox(
                       constraints: BoxConstraints(
                         maxWidth: widget.maxWidth,
                         maxHeight: widget.maxHeight,
@@ -3418,8 +2433,6 @@ class _PopoverOverlayState extends State<_PopoverOverlay>
                 ),
               ),
             ),
-          ),
-        ),
       ],
     );
   }
@@ -3483,131 +2496,6 @@ class _PopoverLayoutDelegate extends SingleChildLayoutDelegate {
   }
 }
 
-class _ToolbarColorPickerContent extends StatefulWidget {
-  const _ToolbarColorPickerContent({
-    required this.initialColor,
-    required this.onColorChanged,
-  });
-
-  final Color initialColor;
-  final ValueChanged<Color> onColorChanged;
-
-  @override
-  State<_ToolbarColorPickerContent> createState() =>
-      _ToolbarColorPickerContentState();
-}
-
-class _ToolbarColorPickerContentState
-    extends State<_ToolbarColorPickerContent> {
-  late Color _color;
-  late TextEditingController _hexController;
-
-  static String _colorToHex(Color c) {
-    return '#${(c.r * 255).toInt().toRadixString(16).padLeft(2, '0')}'
-            '${(c.g * 255).toInt().toRadixString(16).padLeft(2, '0')}'
-            '${(c.b * 255).toInt().toRadixString(16).padLeft(2, '0')}'
-        .toUpperCase();
-  }
-
-  static Color? _hexToColor(String hex) {
-    hex = hex.trim();
-    if (hex.startsWith('#')) hex = hex.substring(1);
-    if (hex.length != 6) return null;
-    final r = int.tryParse(hex.substring(0, 2), radix: 16);
-    final g = int.tryParse(hex.substring(2, 4), radix: 16);
-    final b = int.tryParse(hex.substring(4, 6), radix: 16);
-    if (r == null || g == null || b == null) return null;
-    return Color.fromARGB(255, r, g, b);
-  }
-
-  void _onHexChanged(String value) {
-    final v = value.trim();
-    if (v.startsWith('#')) {
-      if (v.length == 7) _applyHex(v);
-    } else if (v.length == 6) {
-      _applyHex('#$v');
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _color = widget.initialColor;
-    _hexController = TextEditingController(text: _colorToHex(_color));
-  }
-
-  @override
-  void didUpdateWidget(covariant _ToolbarColorPickerContent oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.initialColor != widget.initialColor) {
-      _color = widget.initialColor;
-      _hexController.text = _colorToHex(_color);
-    }
-  }
-
-  @override
-  void dispose() {
-    _hexController.dispose();
-    super.dispose();
-  }
-
-  void _applyHex(String value) {
-    final c = _hexToColor(value);
-    if (c != null && c != _color) {
-      setState(() => _color = c);
-      _hexController.text = _colorToHex(c);
-      widget.onColorChanged(c);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ColorPicker(
-            color: _color,
-            onColorChanged: (Color c) {
-              setState(() {
-                _color = c;
-                _hexController.text = _colorToHex(c);
-              });
-              widget.onColorChanged(c);
-            },
-            pickersEnabled: const <ColorPickerType, bool>{
-              ColorPickerType.primary: false,
-              ColorPickerType.accent: false,
-              ColorPickerType.bw: false,
-              ColorPickerType.custom: false,
-              ColorPickerType.wheel: true,
-            },
-            showColorCode: false,
-            enableOpacity: false,
-            width: 40,
-            height: 40,
-            borderRadius: 12,
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _hexController,
-            decoration: const InputDecoration(
-              labelText: 'HEX',
-              hintText: '#RRGGBB',
-              border: OutlineInputBorder(),
-              prefixIcon: Icon(Icons.tag, size: 20),
-            ),
-            maxLength: 7,
-            onChanged: _onHexChanged,
-            onSubmitted: _applyHex,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _SmoothCirclePainter extends CustomPainter {
   _SmoothCirclePainter({
     required this.color,
@@ -3633,7 +2521,7 @@ class _SmoothCirclePainter extends CustomPainter {
         center,
         radius,
         Paint()
-          ..color = Colors.black.withOpacity(0.26)
+          ..color = Colors.black.withValues(alpha: 0.26)
           ..style = PaintingStyle.fill
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
       );

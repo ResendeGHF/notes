@@ -1,32 +1,16 @@
 # `lib/components/editor/pdf_outline_navigator.dart`
 
-This file is part of the application library under `lib/`. Long-form comments and `///` documentation were moved here from the Dart source to keep implementation files minimal.
+Outline list for notes that have PDF bookmarks/outlines.
 
-## License (REUSE / SPDX)
+## Role
 
-```text
-(no SPDX header in file)
-```
+- Exposes [`PdfOutlineListView`](../../../lib/components/editor/pdf_outline_navigator.dart): a scrollable flat outline tree.
+- Used as the **Outlines** tab inside [`EditorPageManager`](../toolbar/editor_page_manager.md).
+- The old standalone toolbar **Outlines** `IconButton` / dialog was removed; navigation lives under the Pages side panel.
 
-## Documentation migrated from source
+## Behavior
 
-_No `///` or block comments were present before stripping._
-
-## Imports
-
-- `package:flutter/cupertino.dart`
-- `package:flutter/material.dart`
-- `package:saber/components/theming/adaptive_icon.dart`
-- `package:saber/data/editor/pdf_outline.dart`
-- `package:saber/i18n/strings.g.dart`
-
-## Symbols (heuristic scan)
-
-The following names were detected by a lightweight parse (classes, enums, mixins, extensions, typedefs, and some top-level functions). Private members are mostly omitted.
-
-- `PdfOutlineNavigator`
-- `build()`
-
-## Implementation notes
-
-Read the Dart source at the mirrored path under `lib/` for exact behavior, edge cases, and widget structure. This document stays in sync by path: `docs/...` corresponds to `lib/...` with a `.md` extension instead of `.dart`.
+- Flattens `List<PdfOutlineItem>` via `flattenPdfOutlineTree(expandedKeys: …)`.
+- **Collapsed by default**: only root-level sections are listed; chevron expands Section → SubSection → SubSubSection.
+- Chevron toggles expand/collapse; tapping the title/page badge navigates (`onPageSelected`).
+- Empty tree shows a localized placeholder (`t.editor.navigation.noPdfOutlineEntries`).

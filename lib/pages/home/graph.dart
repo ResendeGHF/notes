@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async';
+import 'dart:math' show max, min;
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:graphview/GraphView.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
-import 'package:saber/data/note_links_database.dart';
-import 'package:saber/data/tags_database.dart';
-import 'package:saber/data/routes.dart';
 import 'package:saber/data/home_data_cache.dart';
+import 'package:saber/data/note_links_database.dart';
+import 'package:saber/data/routes.dart';
+import 'package:saber/data/tags_database.dart';
 import 'package:saber/i18n/strings.g.dart';
-import 'dart:async';
 
 class GraphPage extends StatefulWidget {
   const GraphPage({super.key});
@@ -322,369 +325,442 @@ class _GraphPageState extends State<GraphPage> {
       return Scaffold(body: Center(child: Text(t.home.noNotesToGraph)));
     }
 
-    final colorScheme = Theme.of(context).colorScheme;
-
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     return Scaffold(
       key: const ValueKey('graph-content'),
-      body: Stack(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-
-          Positioned.fill(
-            child: _rootPath == null && !_showFullGraph
-                ? Center(
-                    child: Text(
-                      t.home.graph.selectRoot,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: homeAppBarBackgroundColor(context),
+              border: Border(
+                bottom: BorderSide(
+                  color: colorScheme.outlineVariant.withValues(alpha: 0.15),
+                ),
+              ),
+            ),
+            child: SafeArea(
+              top: false,
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: DecoratedBox(
+                  decoration: homeRuggedPanelDecoration(context),
+                  child: Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(
+                      10,
+                      8,
+                      10,
+                      8,
                     ),
-                  )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final w = constraints.maxWidth;
-                      final h = constraints.maxHeight;
-                      if (w <= 0 || h <= 0) return const SizedBox.shrink();
-                      if (_graph.nodes.isEmpty) {
-                        return Center(
-                          child: Text(
-                            'No notes to show',
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(color: colorScheme.onSurfaceVariant),
-                          ),
-                        );
-                      }
-                      final useTree =
-                          _useTreeView &&
-                          _rootPath != null &&
-                          _notes.contains(_rootPath);
-                      final nodeCount = _graph.nodes.length.clamp(
-                        1,
-                        _maxNodesToShow,
-                      );
-                      final hasEdges = _graph.edges.isNotEmpty;
-
-                      final Algorithm algorithm;
-                      if (useTree) {
-                        algorithm = _treeAlgorithm;
-                      } else if (hasEdges) {
-                        algorithm = FruchtermanReingoldAlgorithm(
-                          FruchtermanReingoldConfiguration(
-                            iterations: (650 - (nodeCount * 0.4).toInt()).clamp(
-                              80,
-                              700,
-                            ),
-                            attractionRate: 0.1,
-                            repulsionRate: 0.32,
-                            repulsionPercentage: 0.7,
-                            clusterPadding: 26,
-                            shuffleNodes: true,
-                          ),
-                        )..setDimensions(w, h);
-                      } else {
-                        algorithm = CircleLayoutAlgorithm(
-                          CircleLayoutConfiguration(),
-                          null,
-                        )..setDimensions(w, h);
-                      }
-                      final paint = Paint()
-                        ..color = const Color(0xFF90A4AE)
-                        ..strokeWidth = 1.1
-                        ..style = PaintingStyle.stroke;
-
-                      return SizedBox(
-                        width: w,
-                        height: h,
-                        child: GraphView.builder(
-                          key: ValueKey('${_rootPath}_$useTree'),
-                          graph: _graph,
-                          algorithm: algorithm,
-                          controller: _graphController,
-                          autoZoomToFit: true,
-                          paint: paint,
-                          builder: (Node node) {
-                            final path = _nodeToPath[node];
-                            final isRoot = path != null && path == _rootPath;
-                            final label = path == null
-                                ? 'note'
-                                : _labelForPath(path);
-                            return RepaintBoundary(
-                              child: GestureDetector(
-                                onTap: path == null
-                                    ? null
-                                    : () => _openNote(path),
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 180),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 6,
+                    child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Expanded(
+                            child: Autocomplete<String>(
+                              key: ValueKey('$_rootPath-$_showFullGraph'),
+                              initialValue: TextEditingValue(
+                                text: _rootPath != null
+                                    ? _labelForPath(_rootPath!)
+                                    : '',
+                              ),
+                              displayStringForOption: _labelForPath,
+                              optionsBuilder: (text) =>
+                                  _rootSearchOptions(text.text),
+                              onSelected: (path) {
+                                setState(() {
+                                  _rootPath = path;
+                                  _rebuildGraph();
+                                });
+                              },
+                              fieldViewBuilder:
+                                  (context, controller, focusNode, onSubmitted) {
+                                return TextField(
+                                  controller: controller,
+                                  focusNode: focusNode,
+                                  style: theme.textTheme.bodyLarge?.copyWith(
+                                    color: colorScheme.onSurface,
+                                    fontSize: 15,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: isRoot
-                                        ? colorScheme.primaryContainer
-                                        : colorScheme.surfaceContainerHighest,
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: isRoot
-                                          ? colorScheme.primary.withValues(
-                                              alpha: 0.5,
-                                            )
-                                          : colorScheme.outlineVariant,
-                                      width: 1,
+                                  decoration: InputDecoration(
+                                    hintText: t.home.graph.rootSearchHint,
+                                    hintStyle: theme.textTheme.bodyLarge
+                                        ?.copyWith(
+                                      color: colorScheme.onSurfaceVariant,
+                                      fontSize: 15,
                                     ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding:
+                                        const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                    ),
+                                    prefixIcon: Icon(
+                                      Icons.search,
+                                      color: colorScheme.onSurfaceVariant,
+                                      size: 22,
+                                    ),
+                                    suffixIcon: _rootPath != null ||
+                                            _showFullGraph
+                                        ? IconButton(
+                                            style:
+                                                homeToolbarCompactIconStyle(
+                                              context,
+                                            ),
+                                            icon: const Icon(
+                                              Icons.clear,
+                                              size: 22,
+                                            ),
+                                            tooltip: _rootPath != null
+                                                ? t.home.graph.clearRoot
+                                                : t.home.graph.selectRoot,
+                                            onPressed: () {
+                                              setState(() {
+                                                _rootPath = null;
+                                                _useTreeView = false;
+                                                _showFullGraph = true;
+                                                _rebuildGraph();
+                                              });
+                                              controller.clear();
+                                            },
+                                          )
+                                        : null,
                                   ),
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 120,
-                                    ),
-                                    child: Text(
-                                      label,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: isRoot
-                                            ? colorScheme.onPrimaryContainer
-                                            : colorScheme.onSurfaceVariant,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                        letterSpacing: -0.3,
+                                );
+                              },
+                              optionsViewBuilder: (context, onSelected, options) {
+                                final mq = MediaQuery.sizeOf(context);
+                                return Align(
+                                  alignment: Alignment.topLeft,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Material(
+                                      color: Colors.transparent,
+                                      elevation: 0,
+                                      child: DecoratedBox(
+                                        decoration:
+                                            homeRuggedPanelDecoration(context),
+                                        child: ConstrainedBox(
+                                          constraints: BoxConstraints(
+                                            maxHeight: 380,
+                                            maxWidth: min(
+                                              520,
+                                              max(240, mq.width - 32),
+                                            ),
+                                          ),
+                                          child: ListView.builder(
+                                            padding: EdgeInsets.zero,
+                                            shrinkWrap: true,
+                                            itemCount: options.length,
+                                            itemBuilder: (context, index) {
+                                              final path =
+                                                  options.elementAt(index);
+                                              return ListTile(
+                                                dense: true,
+                                                title: Text(
+                                                  _labelForPath(path),
+                                                  style: theme.textTheme
+                                                      .titleSmall?.copyWith(
+                                                    color: colorScheme
+                                                        .onSurface,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                subtitle: path.contains('/')
+                                                    ? Text(
+                                                        path,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: theme
+                                                            .textTheme.bodySmall
+                                                            ?.copyWith(
+                                                          color: colorScheme
+                                                              .onSurfaceVariant,
+                                                        ),
+                                                      )
+                                                    : null,
+                                                onTap: () => onSelected(path),
+                                              );
+                                            },
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
+                                );
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          HomeGlassIconStrip(
+                            children: [
+                              IconButton(
+                                style: homeToolbarCompactIconStyle(context)
+                                    .copyWith(
+                                  foregroundColor: WidgetStatePropertyAll(
+                                    _showFullGraph && _rootPath == null
+                                        ? colorScheme.primary
+                                        : colorScheme.onSurfaceVariant,
+                                  ),
                                 ),
+                                tooltip: 'Show All Notes',
+                                icon: Icon(
+                                  _showFullGraph && _rootPath == null
+                                      ? Icons.blur_on
+                                      : Icons.blur_circular,
+                                  size: 22,
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    if (_showFullGraph && _rootPath == null) {
+                                      _showFullGraph = false;
+                                    } else {
+                                      _showFullGraph = true;
+                                      _rootPath = null;
+                                    }
+                                    _rebuildGraph();
+                                  });
+                                },
+                              ),
+                              const HomeToolbarDivider(),
+                              IconButton(
+                                style: homeToolbarCompactIconStyle(context)
+                                    .copyWith(
+                                  foregroundColor: WidgetStateProperty
+                                      .resolveWith((states) {
+                                    if (states
+                                        .contains(WidgetState.disabled)) {
+                                      return colorScheme.onSurface.withValues(
+                                        alpha: 0.38,
+                                      );
+                                    }
+                                    return _useTreeView
+                                        ? colorScheme.primary
+                                        : colorScheme.onSurfaceVariant;
+                                  }),
+                                ),
+                                tooltip: t.home.tooltips.treeView,
+                                icon: Icon(
+                                  _useTreeView
+                                      ? Icons.account_tree
+                                      : Icons.hub,
+                                  size: 22,
+                                ),
+                                onPressed: _rootPath == null
+                                    ? null
+                                    : () {
+                                        setState(() {
+                                          _useTreeView = !_useTreeView;
+                                          _rebuildGraph();
+                                        });
+                                      },
+                              ),
+                              const HomeToolbarDivider(),
+                              IconButton(
+                                style: homeToolbarCompactIconStyle(context),
+                                tooltip: 'Zoom to fit',
+                                onPressed: () => _graphController.zoomToFit(),
+                                icon: const Icon(Icons.fit_screen, size: 22),
+                              ),
+                              const HomeToolbarDivider(),
+                              IconButton(
+                                style: homeToolbarCompactIconStyle(context),
+                                tooltip: 'Refresh',
+                                onPressed: _loadGraph,
+                                icon: const Icon(Icons.refresh, size: 22),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: _rootPath == null && !_showFullGraph
+                      ? Center(
+                          child: Text(
+                            t.home.graph.selectRoot,
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        )
+                      : LayoutBuilder(
+                          builder: (context, constraints) {
+                            final w = constraints.maxWidth;
+                            final h = constraints.maxHeight;
+                            if (w <= 0 || h <= 0) {
+                              return const SizedBox.shrink();
+                            }
+                            if (_graph.nodes.isEmpty) {
+                              return Center(
+                                child: Text(
+                                  'No notes to show',
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              );
+                            }
+                            final useTree = _useTreeView &&
+                                _rootPath != null &&
+                                _notes.contains(_rootPath);
+                            final nodeCount = _graph.nodes.length.clamp(
+                              1,
+                              _maxNodesToShow,
+                            );
+                            final hasEdges = _graph.edges.isNotEmpty;
+
+                            final Algorithm algorithm;
+                            if (useTree) {
+                              algorithm = _treeAlgorithm;
+                            } else if (hasEdges) {
+                              algorithm = FruchtermanReingoldAlgorithm(
+                                FruchtermanReingoldConfiguration(
+                                  iterations:
+                                      (650 - (nodeCount * 0.4).toInt()).clamp(
+                                    80,
+                                    700,
+                                  ),
+                                  attractionRate: 0.1,
+                                  repulsionRate: 0.32,
+                                  repulsionPercentage: 0.7,
+                                  clusterPadding: 26,
+                                  shuffleNodes: true,
+                                ),
+                              )..setDimensions(w, h);
+                            } else {
+                              algorithm = CircleLayoutAlgorithm(
+                                CircleLayoutConfiguration(),
+                                null,
+                              )..setDimensions(w, h);
+                            }
+                            final paint = Paint()
+                              ..color = const Color(0xFF90A4AE)
+                              ..strokeWidth = 1.1
+                              ..style = PaintingStyle.stroke;
+
+                            return SizedBox(
+                              width: w,
+                              height: h,
+                              child: GraphView.builder(
+                                key: ValueKey('${_rootPath}_$useTree'),
+                                graph: _graph,
+                                algorithm: algorithm,
+                                controller: _graphController,
+                                autoZoomToFit: true,
+                                paint: paint,
+                                builder: (Node node) {
+                                  final path = _nodeToPath[node];
+                                  final isRoot =
+                                      path != null && path == _rootPath;
+                                  final label = path == null
+                                      ? 'note'
+                                      : _labelForPath(path);
+                                  return RepaintBoundary(
+                                    child: GestureDetector(
+                                      onTap: path == null
+                                          ? null
+                                          : () => _openNote(path),
+                                      child: AnimatedContainer(
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: isRoot
+                                              ? colorScheme.primaryContainer
+                                              : colorScheme
+                                                  .surfaceContainerHighest,
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                          border: Border.all(
+                                            color: isRoot
+                                                ? colorScheme.primary
+                                                    .withValues(alpha: 0.5)
+                                                : colorScheme.outlineVariant,
+                                            width: 1,
+                                          ),
+                                        ),
+                                        child: ConstrainedBox(
+                                          constraints: const BoxConstraints(
+                                            maxWidth: 120,
+                                          ),
+                                          child: Text(
+                                            label,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: isRoot
+                                                  ? colorScheme
+                                                      .onPrimaryContainer
+                                                  : colorScheme
+                                                      .onSurfaceVariant,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w600,
+                                              letterSpacing: -0.3,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
                             );
                           },
                         ),
-                      );
-                    },
-                  ),
-          ),
-
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 16,
-            left: 16,
-            right: 16,
-            child: Container(
-              height: 56,
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.95),
-                borderRadius: BorderRadius.circular(28),
-                border: Border.all(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.1),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Autocomplete<String>(
-                      key: ValueKey('$_rootPath-$_showFullGraph'),
-                      initialValue: TextEditingValue(
-                        text: _rootPath != null
-                            ? _labelForPath(_rootPath!)
-                            : '',
-                      ),
-                      displayStringForOption: _labelForPath,
-                      optionsBuilder: (text) => _rootSearchOptions(text.text),
-                      onSelected: (path) {
-                        setState(() {
-                          _rootPath = path;
-                          _rebuildGraph();
-                        });
-                      },
-                      fieldViewBuilder:
-                          (context, controller, focusNode, onSubmitted) {
-                            return TextField(
-                              controller: controller,
-                              focusNode: focusNode,
-                              style: const TextStyle(fontSize: 15),
-                              decoration: InputDecoration(
-                                hintText: t.home.graph.rootSearchHint,
-                                border: const OutlineInputBorder(
-                                  borderRadius: BorderRadius.horizontal(
-                                    left: Radius.circular(28),
-                                  ),
-                                  borderSide: BorderSide.none,
-                                ),
-                                isDense: true,
-                                prefixIcon: Icon(
-                                  Icons.search,
-                                  color: colorScheme.onSurfaceVariant,
-                                  size: 20,
-                                ),
-                                suffixIcon: _rootPath != null || _showFullGraph
-                                    ? IconButton(
-                                        icon: const Icon(Icons.clear, size: 20),
-                                        tooltip: _rootPath != null
-                                            ? t.home.graph.clearRoot
-                                            : t.home.graph.selectRoot,
-                                        onPressed: () {
-                                          setState(() {
-                                            _rootPath = null;
-                                            _useTreeView = false;
-                                            _showFullGraph = true;
-                                            _rebuildGraph();
-                                          });
-                                          controller.clear();
-                                        },
-                                      )
-                                    : null,
-                              ),
-                            );
-                          },
-                      optionsViewBuilder: (context, onSelected, options) {
-                        return Align(
-                          alignment: Alignment.topLeft,
-                          child: Material(
-                            color: colorScheme.surfaceContainerHigh,
-                            elevation: 8,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                              side: BorderSide(
-                                color: colorScheme.outlineVariant.withValues(
-                                  alpha: 0.5,
-                                ),
-                                width: 1,
-                              ),
-                            ),
-                            clipBehavior: Clip.antiAlias,
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                maxHeight: 240,
-                                maxWidth: 320,
-                              ),
-                              child: ListView.builder(
-                                padding: EdgeInsets.zero,
-                                shrinkWrap: true,
-                                itemCount: options.length,
-                                itemBuilder: (context, index) {
-                                  final path = options.elementAt(index);
-                                  return ListTile(
-                                    dense: true,
-                                    title: Text(_labelForPath(path)),
-                                    subtitle: path.contains('/')
-                                        ? Text(
-                                            path,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodySmall,
-                                          )
-                                        : null,
-                                    onTap: () => onSelected(path),
-                                  );
-                                },
-                              ),
-                            ),
+                if (_totalVisibleNodeCount > _maxNodesToShow)
+                  Positioned(
+                    bottom: 32,
+                    left: 32,
+                    right: 32,
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colorScheme.errorContainer.withValues(
+                            alpha: 0.95,
                           ),
-                        );
-                      },
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: colorScheme.error.withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Text(
+                          t.home.graph.showingNotes(
+                            shown: _maxNodesToShow.toString(),
+                            total: _totalVisibleNodeCount.toString(),
+                          ),
+                          style: TextStyle(
+                            color: colorScheme.onErrorContainer,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 4),
-
-                  IconButton(
-                    tooltip: 'Show All Notes',
-                    icon: Icon(
-                      _showFullGraph && _rootPath == null
-                          ? Icons.blur_on
-                          : Icons.blur_circular,
-                    ),
-                    color: _showFullGraph && _rootPath == null
-                        ? colorScheme.primary
-                        : colorScheme.onSurfaceVariant,
-                    onPressed: () {
-                      setState(() {
-                        if (_showFullGraph && _rootPath == null) {
-                          _showFullGraph = false;
-                        } else {
-                          _showFullGraph = true;
-                          _rootPath = null;
-                        }
-                        _rebuildGraph();
-                      });
-                    },
-                  ),
-
-                  IconButton(
-                    tooltip: t.home.tooltips.treeView,
-                    icon: Icon(_useTreeView ? Icons.account_tree : Icons.hub),
-                    color: _useTreeView
-                        ? colorScheme.primary
-                        : colorScheme.onSurfaceVariant,
-                    onPressed: _rootPath == null
-                        ? null
-                        : () {
-                            setState(() {
-                              _useTreeView = !_useTreeView;
-                              _rebuildGraph();
-                            });
-                          },
-                  ),
-
-                  IconButton(
-                    tooltip: 'Zoom to fit',
-                    onPressed: () => _graphController.zoomToFit(),
-                    icon: Icon(
-                      Icons.fit_screen,
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-
-                  IconButton(
-                    tooltip: 'Refresh',
-                    onPressed: _loadGraph,
-                    icon: Icon(
-                      Icons.refresh,
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
+              ],
             ),
           ),
-
-          if (_totalVisibleNodeCount > _maxNodesToShow)
-            Positioned(
-              bottom: 32,
-              left: 32,
-              right: 32,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colorScheme.errorContainer.withValues(alpha: 0.95),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: colorScheme.error.withValues(alpha: 0.3),
-                    ),
-                  ),
-                  child: Text(
-                    t.home.graph.showingNotes(
-                      shown: _maxNodesToShow.toString(),
-                      total: _totalVisibleNodeCount.toString(),
-                    ),
-                    style: TextStyle(
-                      color: colorScheme.onErrorContainer,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
     );

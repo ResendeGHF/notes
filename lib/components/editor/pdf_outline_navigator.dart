@@ -1,232 +1,316 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:saber/components/theming/adaptive_icon.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/i18n/strings.g.dart';
 
-class PdfOutlineNavigator extends StatelessWidget {
-  const PdfOutlineNavigator({
+/// Scrollable collapsible PDF outline tree for the editor Pages side panel.
+///
+/// Sections start collapsed so only root-level entries show; expand chevrons
+/// reveal subsection / sub-subsection levels. When [readOnly] is false, users
+/// can add / rename / delete handwritten outline entries.
+class PdfOutlineListView extends StatefulWidget {
+  const PdfOutlineListView({
     super.key,
     required this.outlines,
     required this.onPageSelected,
+    this.readOnly = true,
+    this.onAddOutline,
+    this.onRenameOutline,
+    this.onDeleteOutline,
   });
 
   final List<PdfOutlineItem> outlines;
   final void Function(int pageIndex) onPageSelected;
+  final bool readOnly;
+  final VoidCallback? onAddOutline;
+  final void Function(PdfOutlineItem item, String newTitle)? onRenameOutline;
+  final void Function(PdfOutlineItem item)? onDeleteOutline;
+
+  @override
+  State<PdfOutlineListView> createState() => _PdfOutlineListViewState();
+}
+
+class _PdfOutlineListViewState extends State<PdfOutlineListView> {
+  /// Path keys of expanded nodes. Empty ⇒ only roots visible.
+  final Set<String> _expandedKeys = {};
+
+  void _toggleExpanded(String key) {
+    setState(() {
+      if (!_expandedKeys.remove(key)) {
+        _expandedKeys.add(key);
+      }
+    });
+  }
+
+  Future<void> _promptRename(PdfOutlineItem item) async {
+    final controller = TextEditingController(text: item.title);
+    final newTitle = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(t.editor.navigation.renameOutline),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: t.editor.navigation.outlineTitle,
+            ),
+            onSubmitted: (v) => Navigator.pop(context, v),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(t.common.cancel),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, controller.text),
+              child: Text(t.common.done),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    if (newTitle == null) return;
+    final trimmed = newTitle.trim();
+    if (trimmed.isEmpty) return;
+    widget.onRenameOutline?.call(item, trimmed);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
-      icon: const AdaptiveIcon(
-        icon: Icons
-            .account_tree_outlined,
-        cupertinoIcon: CupertinoIcons.list_bullet_indent,
-      ),
-      tooltip: t.editor.navigation.pdfOutlines,
-      onPressed: () => _showOutlineDialog(context),
-    );
-  }
-
-  void _showOutlineDialog(BuildContext context) {
-    final isMobile = MediaQuery.sizeOf(context).width < 600;
-    final colorScheme = Theme.of(context).colorScheme;
-
-    showGeneralDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Close',
-      barrierColor: Colors.black54,
-      transitionDuration: const Duration(milliseconds: 300),
-      pageBuilder: (context, animation, secondaryAnimation) {
-        return Align(
-          alignment: isMobile ? Alignment.center : Alignment.centerRight,
-          child: Material(
-            color: colorScheme.surface,
-            surfaceTintColor:
-                Colors.transparent,
-            elevation: 16,
-            borderRadius: isMobile
-                ? BorderRadius.zero
-                : const BorderRadius.horizontal(left: Radius.circular(24)),
-            child: SizedBox(
-              width: isMobile ? double.infinity : 400,
-              height: double.infinity,
-              child: SafeArea(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              t.editor.navigation.pdfOutlines,
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () => Navigator.of(context).pop(),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-
-                    Expanded(
-                      child: outlines.isEmpty
-                          ? Center(
-                              child: Text(
-                                'No outline found',
-                                style: TextStyle(
-                                  color: colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            )
-                          : Scrollbar(
-                              thumbVisibility: true,
-                              child: ListView.builder(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                                itemCount: outlines.length,
-                                itemBuilder: (context, index) {
-                                  return _buildOutlineItem(
-                                    context,
-                                    outlines[index],
-                                    0,
-                                  );
-                                },
-                              ),
-                            ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-      transitionBuilder: (context, animation, secondaryAnimation, child) {
-        if (isMobile) {
-          return SlideTransition(
-            position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
-                .animate(
-                  CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                  ),
-                ),
-            child: child,
+    final canEdit = !widget.readOnly;
+    final flatRows = widget.outlines.isEmpty
+        ? const <PdfOutlineFlatRow>[]
+        : flattenPdfOutlineTree(
+            widget.outlines,
+            expandedKeys: _expandedKeys,
           );
-        }
-        return SlideTransition(
-          position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
-              .animate(
-                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-              ),
-          child: child,
-        );
-      },
-    );
-  }
-
-  Widget _buildOutlineItem(
-    BuildContext context,
-    PdfOutlineItem item,
-    int indent,
-  ) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        InkWell(
-          onTap: () {
-            Navigator.of(context).pop();
-            onPageSelected(item.pageIndex);
-          },
-
-          child: Container(
-            padding: EdgeInsets.only(
-              left: 16.0 + (indent * 16.0),
-              right: 16.0,
-              top: 8.0,
-              bottom: 8.0,
-            ),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: colorScheme.outlineVariant.withValues(
-                    alpha: 0.3,
-                  ),
-                  width: 0.5,
-                ),
-              ),
-            ),
-            child: Row(
-              children: [
-
-                if (indent > 0)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8.0),
-                    child: Icon(
-                      Icons.subdirectory_arrow_right,
-                      size: 14,
-                      color: colorScheme.onSurfaceVariant.withValues(
-                        alpha: 0.6,
-                      ),
-                    ),
-                  ),
-
-                Expanded(
-                  child: Text(
-                    item.title,
-                    style: textTheme.bodyMedium?.copyWith(
-                      fontWeight: indent == 0
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                      fontSize: indent == 0 ? 15 : 14,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-
-                const SizedBox(width: 8),
-
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    (item.pageIndex + 1).toString(),
-                    style: textTheme.labelSmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
+        if (canEdit)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: FilledButton.tonalIcon(
+              onPressed: widget.onAddOutline,
+              icon: const Icon(Icons.bookmark_add_outlined, size: 20),
+              label: Text(t.editor.navigation.addOutlineForPage),
             ),
           ),
+        Expanded(
+          child: flatRows.isEmpty
+              ? _EmptyOutlineBody(canEdit: canEdit)
+              : Scrollbar(
+                  thumbVisibility: true,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(12, 6, 12, 16),
+                    itemCount: flatRows.length,
+                    addRepaintBoundaries: true,
+                    addAutomaticKeepAlives: false,
+                    itemBuilder: (context, index) {
+                      final row = flatRows[index];
+                      final item = findPdfOutlineByKey(
+                        widget.outlines,
+                        row.key,
+                      );
+                      return _OutlineTreeRow(
+                        row: row,
+                        onToggleExpand: row.hasChildren
+                            ? () => _toggleExpanded(row.key)
+                            : null,
+                        onSelect: () => widget.onPageSelected(row.pageIndex),
+                        onRename: canEdit && item != null
+                            ? () => _promptRename(item)
+                            : null,
+                        onDelete: canEdit && item != null
+                            ? () => widget.onDeleteOutline?.call(item)
+                            : null,
+                      );
+                    },
+                  ),
+                ),
         ),
-
-        if (item.children != null)
-          for (final child in item.children!)
-            _buildOutlineItem(context, child, indent + 1),
       ],
+    );
+  }
+}
+
+class _EmptyOutlineBody extends StatelessWidget {
+  const _EmptyOutlineBody({required this.canEdit});
+
+  final bool canEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.account_tree_outlined,
+              size: 40,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.45),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              canEdit
+                  ? t.editor.navigation.noOutlineEntriesHint
+                  : t.editor.navigation.noPdfOutlineEntries,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OutlineTreeRow extends StatelessWidget {
+  const _OutlineTreeRow({
+    required this.row,
+    required this.onSelect,
+    this.onToggleExpand,
+    this.onRename,
+    this.onDelete,
+  });
+
+  final PdfOutlineFlatRow row;
+  final VoidCallback onSelect;
+  final VoidCallback? onToggleExpand;
+  final VoidCallback? onRename;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final isRoot = row.depth == 0;
+    final indent = row.depth * 14.0;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Material(
+        color: Colors.transparent,
+        child: Ink(
+          decoration: homeRuggedPanelDecoration(context, borderAlpha: 0.14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(width: 4 + indent),
+              if (row.hasChildren)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 40,
+                  ),
+                  tooltip: row.expanded ? 'Collapse' : 'Expand',
+                  onPressed: onToggleExpand,
+                  icon: Icon(
+                    row.expanded
+                        ? Icons.expand_more_rounded
+                        : Icons.chevron_right_rounded,
+                    size: 22,
+                    color: cs.onSurfaceVariant,
+                  ),
+                )
+              else
+                const SizedBox(width: 36),
+              Expanded(
+                child: InkWell(
+                  onTap: onSelect,
+                  onLongPress: onRename,
+                  borderRadius: BorderRadius.circular(kSaberContainerRadius),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(2, 11, 4, 11),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            row.title,
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              fontWeight:
+                                  isRoot ? FontWeight.w600 : FontWeight.w500,
+                              fontSize: isRoot ? 15 : 14,
+                              height: 1.35,
+                              letterSpacing: -0.12,
+                            ),
+                            maxLines: 4,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainerHighest
+                                .withValues(alpha: 0.45),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color:
+                                  cs.outlineVariant.withValues(alpha: 0.35),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 5,
+                            ),
+                            child: Text(
+                              '${row.pageIndex + 1}',
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: cs.onSurfaceVariant,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.15,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              if (onDelete != null || onRename != null)
+                PopupMenuButton<String>(
+                  tooltip: t.editor.navigation.outlineActions,
+                  padding: EdgeInsets.zero,
+                  onSelected: (value) {
+                    if (value == 'rename') onRename?.call();
+                    if (value == 'delete') onDelete?.call();
+                  },
+                  itemBuilder: (context) => [
+                    if (onRename != null)
+                      PopupMenuItem(
+                        value: 'rename',
+                        child: Text(t.editor.navigation.renameOutline),
+                      ),
+                    if (onDelete != null)
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: Text(t.editor.navigation.deleteOutline),
+                      ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

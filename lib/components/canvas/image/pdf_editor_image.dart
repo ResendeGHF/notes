@@ -5,7 +5,6 @@
 part of 'editor_image.dart';
 
 class PdfEditorImage extends EditorImage {
-
   int assetId;
 
   final int pdfPage;
@@ -78,10 +77,7 @@ class PdfEditorImage extends EditorImage {
         );
       } else {
         final pdfBytes = inlineAssets[assetIndexJson];
-        final tempFile = assetCacheAll.createRuntimeFile(
-          '.pdf',
-          pdfBytes,
-        );
+        final tempFile = assetCacheAll.createRuntimeFile('.pdf', pdfBytes);
         assetIndex = assetCacheAll.addSync(
           tempFile,
           '.pdf',
@@ -106,9 +102,7 @@ class PdfEditorImage extends EditorImage {
     }
 
     final image = PdfEditorImage(
-      id:
-          json['id'] ??
-          -1,
+      id: json['id'] ?? -1,
       assetCacheAll: assetCacheAll,
       assetId: assetIndex,
       pdfFile: pdfFile,
@@ -146,22 +140,14 @@ class PdfEditorImage extends EditorImage {
     assert(!json.containsKey('a'));
     assert(!json.containsKey('b'));
 
-    json['a'] = assetCacheAll.getAssetIdOnSave(
-      assetId,
-    );
+    json['a'] = assetCacheAll.getAssetIdOnSave(assetId);
     json['pdfi'] = pdfPage;
-    json['aph'] = assetCacheAll.getAssetPreviewHash(
-      assetId,
-    );
-    json['afs'] = assetCacheAll.getAssetFileSize(
-      assetId,
-    );
+    json['aph'] = assetCacheAll.getAssetPreviewHash(assetId);
+    json['afs'] = assetCacheAll.getAssetFileSize(assetId);
     if (assetCacheAll.getAssetFileInfo(assetId) != '')
       json['ainf'] = assetCacheAll.getAssetFileInfo(assetId);
     if (assetCacheAll.getAssetHash(assetId) != null)
-      json['ah'] = assetCacheAll.getAssetHash(
-        assetId,
-      );
+      json['ah'] = assetCacheAll.getAssetHash(assetId);
 
     return json;
   }
@@ -180,18 +166,18 @@ class PdfEditorImage extends EditorImage {
     writer.writeInt(ImageBinaryKeys.assetId, assetIdToSave);
     writer.writeInt(ImageBinaryKeys.pdfi, pdfPage);
 
-    writer.writeInt(
+    writer.writeUint32(
       ImageBinaryKeys.previewHash,
       assetCacheAll.getAssetPreviewHash(assetId),
     );
-    writer.writeInt(
+    writer.writeUint32(
       ImageBinaryKeys.fileSize,
       assetCacheAll.getAssetFileSize(assetId),
     );
 
     final fullHash = assetCacheAll.getAssetHash(assetId);
     if (fullHash != null) {
-      writer.writeInt(ImageBinaryKeys.fullHash, fullHash);
+      writer.writeUint32(ImageBinaryKeys.fullHash, fullHash);
     }
 
     final fileInfo = assetCacheAll.getAssetFileInfo(assetId);
@@ -226,23 +212,21 @@ class PdfEditorImage extends EditorImage {
         reader.readKey();
         pdfPage = reader.readIntNoKey();
       } else if (peekKey == 104) {
-
         reader.readKey();
         reader.readDoubleNoKey();
       } else if (peekKey == ImageBinaryKeys.previewHash) {
         reader.readKey();
-        previewHash = reader.readIntNoKey();
+        previewHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileSize) {
         reader.readKey();
-        fileSize = reader.readIntNoKey();
+        fileSize = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fullHash) {
         reader.readKey();
-        fullHash = reader.readIntNoKey();
+        fullHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileInfo) {
         reader.readKey();
         fileInfo = reader.readStringNoKey();
       } else {
-
         break;
       }
     }
@@ -338,7 +322,9 @@ class PdfEditorImage extends EditorImage {
           pageIndex: pdfPage,
           pdfFile: pdfFile,
           naturalSize: naturalSize,
+          renderScale: renderScale,
           invert: invert,
+          isThumbnail: isThumbnail,
           onPdfTap: onPdfTap,
         );
       },
@@ -394,7 +380,9 @@ class _PdfPageRenderer extends StatefulWidget {
   final int pageIndex;
   final File? pdfFile;
   final Size naturalSize;
+  final double renderScale;
   final bool invert;
+  final bool isThumbnail;
   final void Function(Offset, PdfDocument, int, File?)? onPdfTap;
 
   const _PdfPageRenderer({
@@ -402,7 +390,9 @@ class _PdfPageRenderer extends StatefulWidget {
     required this.pageIndex,
     required this.pdfFile,
     required this.naturalSize,
+    required this.renderScale,
     required this.invert,
+    this.isThumbnail = false,
     this.onPdfTap,
   });
 
@@ -411,44 +401,83 @@ class _PdfPageRenderer extends StatefulWidget {
 }
 
 class _PdfPageRendererState extends State<_PdfPageRenderer> {
-  var _links = <link_detector.PdfLink>[];
-  var _linksLoaded = false;
+  List<PdfLink> _links = const [];
+  Object? _linksLoadToken;
+  StreamSubscription? _pageStatusSub;
 
   @override
   void initState() {
     super.initState();
-    _loadLinks();
+    _watchPageAndLoadLinks();
   }
 
   @override
-  void didUpdateWidget(_PdfPageRenderer oldWidget) {
+  void didUpdateWidget(covariant _PdfPageRenderer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.pdfDocument != oldWidget.pdfDocument ||
-        widget.pageIndex != oldWidget.pageIndex) {
-      _linksLoaded = false;
-      _links = [];
-      _loadLinks();
+    if (!identical(oldWidget.pdfDocument, widget.pdfDocument) ||
+        oldWidget.pageIndex != widget.pageIndex ||
+        oldWidget.isThumbnail != widget.isThumbnail) {
+      _watchPageAndLoadLinks();
     }
   }
 
+  @override
+  void dispose() {
+    _pageStatusSub?.cancel();
+    _pageStatusSub = null;
+    _linksLoadToken = null;
+    super.dispose();
+  }
+
+  void _watchPageAndLoadLinks() {
+    _pageStatusSub?.cancel();
+    _pageStatusSub = null;
+
+    if (widget.isThumbnail) {
+      _loadLinks();
+      return;
+    }
+
+    final pages = widget.pdfDocument.pages;
+    if (widget.pageIndex < 0 || widget.pageIndex >= pages.length) {
+      return;
+    }
+
+    // If progressive load finishes after our first attempt (or ensureLoaded
+    // misses a status race), reload highlights when the page becomes ready.
+    _pageStatusSub = pages[widget.pageIndex].events.listen((change) {
+      if (change.page.isLoaded) {
+        _loadLinks();
+      }
+    });
+    _loadLinks();
+  }
+
   Future<void> _loadLinks() async {
-    if (!mounted) return;
-    final links = await link_detector.PdfLinkDetector.detectLinksOnPage(
+    if (widget.isThumbnail) {
+      if (_links.isNotEmpty) {
+        setState(() => _links = const []);
+      }
+      return;
+    }
+    final token = Object();
+    _linksLoadToken = token;
+    final links = await PdfLinkDetector.detectLinksOnPage(
       widget.pdfDocument,
       widget.pageIndex,
     );
-
-    if (mounted) {
-      setState(() {
-        _links = links;
-        _linksLoaded = true;
-      });
-    }
+    if (!mounted || !identical(_linksLoadToken, token)) return;
+    setState(() => _links = links);
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final maximumDpi = (widget.renderScale * 180)
+        .clamp(120.0, 240.0)
+        .toDouble();
+
+    // Black on light / non-inverted pages; white when the PDF is inverted.
+    final outlineColor = widget.invert ? Colors.white : Colors.black;
 
     return Stack(
       fit: StackFit.passthrough,
@@ -458,17 +487,20 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
           child: PdfPageView(
             document: widget.pdfDocument,
             pageNumber: widget.pageIndex + 1,
+            maximumDpi: maximumDpi,
             decoration: const BoxDecoration(),
           ),
         ),
 
-        if (_linksLoaded && _links.isNotEmpty)
+        if (_links.isNotEmpty)
           Positioned.fill(
-            child: CustomPaint(
-              painter: _LinkHighlightPainter(
-                links: _links,
-                pdfNaturalSize: widget.naturalSize,
-                color: colorScheme.primary,
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _PdfLinkHighlightPainter(
+                  links: _links,
+                  pdfNaturalSize: widget.naturalSize,
+                  outlineColor: outlineColor,
+                ),
               ),
             ),
           ),
@@ -492,55 +524,52 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   }
 }
 
-class _LinkHighlightPainter extends CustomPainter {
-  final List<link_detector.PdfLink> links;
-  final Size pdfNaturalSize;
-  final Color color;
-
-  _LinkHighlightPainter({
+class _PdfLinkHighlightPainter extends CustomPainter {
+  _PdfLinkHighlightPainter({
     required this.links,
     required this.pdfNaturalSize,
-    required this.color,
+    required this.outlineColor,
   });
+
+  final List<PdfLink> links;
+  final Size pdfNaturalSize;
+  final Color outlineColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (pdfNaturalSize.width == 0 || pdfNaturalSize.height == 0) return;
+    if (links.isEmpty || size.isEmpty || pdfNaturalSize.isEmpty) return;
 
-    final double scaleX = size.width / pdfNaturalSize.width;
-    final double scaleY = size.height / pdfNaturalSize.height;
-
-    final paint = Paint()
-      ..color = color.withValues(alpha: 0.5)
+    final stroke = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
+      ..strokeWidth = 1.25
+      ..color = outlineColor.withValues(alpha: 0.9);
+
+    final fill = Paint()
+      ..style = PaintingStyle.fill
+      ..color = outlineColor.withValues(alpha: 0.06);
 
     for (final link in links) {
-      final rect = link.rect;
-
-      final double left = rect.left * scaleX;
-      final double right = rect.right * scaleX;
-
-      final double topFlutter = size.height - (rect.top * scaleY);
-      final double bottomFlutter = size.height - (rect.bottom * scaleY);
-
-      final double top = topFlutter < bottomFlutter
-          ? topFlutter
-          : bottomFlutter;
-      final double bottom = topFlutter < bottomFlutter
-          ? bottomFlutter
-          : topFlutter;
-
-      final visualRect = Rect.fromLTRB(left, top, right, bottom);
-
-      canvas.drawRect(visualRect, paint);
+      final pdfRects = link.rects.isNotEmpty ? link.rects : [link.rect];
+      for (final pdfRect in pdfRects) {
+        if (pdfRect == Rect.zero || pdfRect.isEmpty) continue;
+        final widgetRect = PdfLinkDetector.pdfRectToWidgetRect(
+          pdfRect,
+          size,
+          pdfNaturalSize,
+        );
+        if (widgetRect.isEmpty) continue;
+        // Slight inset so the stroke sits clearly around the text.
+        final drawRect = widgetRect.inflate(1.0);
+        canvas.drawRect(drawRect, fill);
+        canvas.drawRect(drawRect, stroke);
+      }
     }
   }
 
   @override
-  bool shouldRepaint(covariant _LinkHighlightPainter oldDelegate) {
-    return oldDelegate.links != links ||
-        oldDelegate.color != color ||
-        oldDelegate.pdfNaturalSize != pdfNaturalSize;
+  bool shouldRepaint(covariant _PdfLinkHighlightPainter oldDelegate) {
+    return !identical(oldDelegate.links, links) ||
+        oldDelegate.pdfNaturalSize != pdfNaturalSize ||
+        oldDelegate.outlineColor != outlineColor;
   }
 }

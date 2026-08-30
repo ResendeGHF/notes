@@ -90,9 +90,12 @@ class _AdaptiveScrollbarState extends State<_AdaptiveScrollbar>
     _lastTickTime = elapsed;
 
     if (_inertiaVelocity.abs() > 5.0) {
-      final double delta = _inertiaVelocity * dt;
+      // Cap per-frame thumb movement so scrollbar flings stay gentle (raw
+      // velocity on the small thumb is huge in document-scroll space).
+      final double delta =
+          (_inertiaVelocity * dt).clamp(-36.0, 36.0);
       _inertiaVelocity *= math
-          .pow(0.40, dt)
+          .pow(0.52, dt)
           .toDouble();
       _applyScrollDelta(delta);
     } else {
@@ -230,11 +233,15 @@ class _AdaptiveScrollbarState extends State<_AdaptiveScrollbar>
                   onPanEnd: (details) {
                     setState(() => _isDragging = false);
 
-                    final double velocity = isVertical
+                    final double raw = isVertical
                         ? details.velocity.pixelsPerSecond.dy
                         : details.velocity.pixelsPerSecond.dx;
+                    // Thumb fling reports screen-space velocity; scale down so
+                    // inertia does not shoot the canvas to either extreme.
+                    final double velocity =
+                        (raw * 0.055).clamp(-420.0, 420.0);
 
-                    if (velocity.abs() > 10.0) {
+                    if (velocity.abs() > 40.0) {
                       _inertiaVelocity = velocity;
                       _startPhysics();
                     }
@@ -280,15 +287,12 @@ class _AdaptiveScrollbarState extends State<_AdaptiveScrollbar>
       return fittedWidth * scale;
     }
 
-    double contentSize = 0;
     if (isVertical) {
-      for (final page in widget.pages) {
-        contentSize += page.size.height;
-      }
-      if (widget.pages.isNotEmpty) {
-        contentSize += (widget.pages.length - 1) * Editor.gapBetweenPages;
-      }
-      return contentSize * scale;
+      return EditorState.totalPagedDocumentHeight(
+            widget.pages,
+            widget.screenWidth,
+          ) *
+          scale;
     }
 
     double maxWidth = widget.screenWidth;

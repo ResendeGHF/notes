@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/shape_geometry.dart';
 
 class ShapeTool extends Tool {
   ShapeTool({ShapeConfig? config, Color? color, Color? fillColor})
@@ -17,7 +17,6 @@ class ShapeTool extends Tool {
   Color color;
   Color fillColor;
 
-  int _currentStep = 0;
   List<Offset> _controlPoints = [];
   ShapeStroke? _preview;
 
@@ -32,19 +31,12 @@ class ShapeTool extends Tool {
   ShapeStroke? get preview => _preview;
 
   void onDragStart(Offset position, EditorPage page, int pageIndex) {
-    if (_currentStep == 0) {
-
-      _controlPoints = [position, position];
-    } else {
-
-      _controlPoints.add(position);
-    }
+    _controlPoints = [position, position];
     _updatePreview(page, pageIndex);
   }
 
   void onDragUpdate(Offset position, EditorPage page, int pageIndex) {
     if (_controlPoints.isEmpty) return;
-
     if (_controlPoints.length == 1) {
       _controlPoints.add(position);
     } else {
@@ -55,7 +47,6 @@ class ShapeTool extends Tool {
 
   ShapeStroke? onDragEnd(EditorPage page, int pageIndex) {
     if (_controlPoints.isEmpty) return null;
-
     if (_preview == null) return null;
 
     final finalStroke = ShapeStroke(
@@ -70,7 +61,6 @@ class ShapeTool extends Tool {
       config: _preview!.config,
     );
 
-    _currentStep = 0;
     _controlPoints = [];
     _preview = null;
 
@@ -78,60 +68,38 @@ class ShapeTool extends Tool {
   }
 
   void _updatePreview(EditorPage page, int pageIndex) {
-    if (_controlPoints.isEmpty) {
+    if (_controlPoints.length < 2) {
       _preview = null;
       return;
     }
 
-    final vertices = List<Offset>.from(_controlPoints);
-
-    if (vertices.isEmpty) {
-      _preview = null;
-      return;
-    }
-
-    double minX = vertices.first.dx;
-    double maxX = vertices.first.dx;
-    double minY = vertices.first.dy;
-    double maxY = vertices.first.dy;
-
-    for (final v in vertices) {
-      minX = math.min(minX, v.dx);
-      maxX = math.max(maxX, v.dx);
-      minY = math.min(minY, v.dy);
-      maxY = math.max(maxY, v.dy);
-    }
-
-    final safeWidth = (maxX - minX) < 1.0 ? 1.0 : (maxX - minX);
-    final safeHeight = (maxY - minY) < 1.0 ? 1.0 : (maxY - minY);
-
-    final bounds = Rect.fromLTWH(minX, minY, safeWidth, safeHeight);
-
-    final shapeConfig = config.copyWith(
-      bounds: bounds,
-      start: vertices.isNotEmpty ? vertices.first : null,
-      end: vertices.length > 1 ? vertices.last : null,
-      vertices: vertices,
+    final shapeConfig = ShapeGeometry.seedFromDrag(
+      config,
+      _controlPoints.first,
+      _controlPoints.last,
     );
 
-    _preview = ShapeStroke(
-      color: color,
-      fillColor: shapeConfig.fill ? fillColor : Colors.transparent,
-      fill: shapeConfig.fill,
-      options: ShapeStroke.defaultOptions.copyWith(
-        isComplete: false,
-        size: config.strokeWidth,
-      ),
-      pressureEnabled: false,
-      pageIndex: pageIndex,
-      page: page,
-      toolId: toolId,
-      config: shapeConfig,
-    );
+    if (_preview == null) {
+      _preview = ShapeStroke(
+        color: color,
+        fillColor: shapeConfig.fill ? fillColor : Colors.transparent,
+        fill: shapeConfig.fill,
+        options: ShapeStroke.defaultOptions.copyWith(
+          isComplete: false,
+          size: config.strokeWidth,
+        ),
+        pressureEnabled: false,
+        pageIndex: pageIndex,
+        page: page,
+        toolId: toolId,
+        config: shapeConfig,
+      );
+    } else {
+      _preview!.config = shapeConfig;
+    }
   }
 
   void cancel() {
-    _currentStep = 0;
     _controlPoints = [];
     _preview = null;
   }
@@ -189,6 +157,21 @@ extension ShapeKindVisibility on ShapeKind {
       ShapeKind.leftBrace,
       ShapeKind.rightBrace,
     ].contains(this);
+  }
+
+  bool get isVertexEditable {
+    return const {
+      ShapeKind.line,
+      ShapeKind.arrow,
+      ShapeKind.doubleArrow,
+      ShapeKind.rectangle,
+      ShapeKind.circle,
+      ShapeKind.ellipse,
+      ShapeKind.triangleIsosceles,
+      ShapeKind.triangleRight,
+      ShapeKind.polygon,
+      ShapeKind.star,
+    }.contains(this);
   }
 }
 
@@ -388,6 +371,15 @@ class ShapeConfig {
       strokeStyle: shapeStrokeStyleFromJson(json['strokeStyle']),
       vertices: loadedVertices,
       data: (json['data'] as Map<String, dynamic>?) ?? {},
+    ).ensuredControlPoints();
+  }
+
+  /// Ensures [vertices] are populated (legacy notes may only have bounds).
+  ShapeConfig ensuredControlPoints() {
+    if (vertices != null && vertices!.isNotEmpty) return this;
+    return ShapeGeometry.withControlPoints(
+      this,
+      ShapeGeometry.ensureControlPoints(this),
     );
   }
 

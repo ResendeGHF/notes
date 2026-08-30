@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' show Offset;
 
 import 'package:bson/bson.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 
 import 'package:saber/data/extensions/dynamic_extensions.dart';
 
@@ -14,11 +14,11 @@ extension PointExtensions on PointVector {
   @Deprecated(
     'Use fromBsonBinary instead; fromJson is only for backward compatibility',
   )
-  static Point fromJson({
+  static PointVector fromJson({
     required Map<String, dynamic> json,
     Offset offset = .zero,
   }) =>
-      Point(
+      PointVector(
         toDoubleSafe(json['x'])! + offset.dx,
         toDoubleSafe(json['y'])! + offset.dy,
         toDoubleSafe(json['p']),

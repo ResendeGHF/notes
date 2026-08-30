@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:saber/components/canvas/hud/canvas_gesture_lock_btn.dart';
 import 'package:saber/components/canvas/hud/canvas_zoom_indicator.dart';
+import 'package:saber/components/theming/throttled_listenable_builder.dart';
 import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/i18n/strings.g.dart';
 
@@ -110,8 +111,8 @@ class _CanvasHudState extends State<CanvasHud> {
             Positioned(
               top: 5,
               right: 5,
-              child: AnimatedBuilder(
-                animation: widget.transformationController,
+              child: ThrottledListenableBuilder(
+                listenable: widget.transformationController,
                 builder: (context, _) => CanvasZoomIndicator(
                   scale: widget.transformationController.value.approxScale,
                   resetZoom: widget.resetZoom,

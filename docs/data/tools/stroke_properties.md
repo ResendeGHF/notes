@@ -14,7 +14,7 @@ _No `///` or block comments were present before stripping._
 
 ## Imports
 
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 
 ## Symbols (heuristic scan)
 

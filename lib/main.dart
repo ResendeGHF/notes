@@ -15,6 +15,7 @@ import 'package:path_to_regexp/path_to_regexp.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:printing/printing.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:saber/components/canvas/pencil_shader.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
 import 'package:saber/components/theming/dynamic_material_app.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
@@ -25,9 +26,11 @@ import 'package:saber/data/tools/stroke_properties.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/pages/home/home.dart';
+import 'package:saber/pages/home/note_and_ink_defaults_pages.dart';
 import 'package:saber/pages/home/vault_pdf_load_overrides_page.dart';
 import 'package:saber/pages/logs.dart';
 import 'package:saber/pages/vault_login.dart';
+import 'package:saber/services/background_operation_queue.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:worker_manager/worker_manager.dart';
@@ -36,7 +39,6 @@ import 'package:workmanager/workmanager.dart';
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
-
     Stows.markAsOnMainIsolate();
     await Future.wait([
       stows.backupDirectoryPath.waitUntilRead(),
@@ -58,7 +60,7 @@ void callbackDispatcher() {
 
     switch (task) {
       case 'incremental_backup':
-        await BackupManager.performIncrementalBackup();
+        await BackupManager.performIncrementalBackupFromWorkManager();
         break;
       default:
         break;
@@ -68,14 +70,24 @@ void callbackDispatcher() {
 }
 
 Future<void> main(List<String> args) async {
-
   FlavorConfig.setupFromEnvironment();
 
   await appRunner(args);
 }
 
+/// Android: hide status + navigation (gesture) bars. iOS: stay edge-to-edge.
+Future<void> _applyMobileSystemChrome() async {
+  if (Platform.isAndroid) {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  } else if (Platform.isIOS) {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+}
+
 Future<void> appRunner(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await _applyMobileSystemChrome();
 
   final parser = ArgParser()..addFlag('verbose', abbr: 'v', negatable: false);
   final parsedArgs = parser.parse(args);
@@ -108,6 +120,9 @@ Future<void> appRunner(List<String> args) async {
 
   StrokeOptionsExtension.setDefaults();
   Stows.markAsOnMainIsolate();
+
+  // Warm Advanced Pencil grain shader (non-blocking).
+  unawaited(PencilShader.init());
 
   pdfrxFlutterInitialize(dismissPdfiumWasmWarnings: true);
 
@@ -179,7 +194,7 @@ class App extends StatefulWidget {
           state.pathParameters['subpage'] == HomePage.settingsSubpage;
 
       if (encryptionEnabled && !isVaultUnlocked) {
-
+        // Settings stays reachable while locked (enable/disable vault, restore).
         if (isGoingToLogin || isSettings) return null;
         return RoutePaths.login;
       }
@@ -231,7 +246,7 @@ class App extends StatefulWidget {
             transitionsBuilder:
                 (context, animation, secondaryAnimation, child) =>
                     FadeTransition(opacity: animation, child: child),
-            transitionDuration: const Duration(milliseconds: 250),
+            transitionDuration: const Duration(milliseconds: 120),
           );
         },
       ),
@@ -247,6 +262,14 @@ class App extends StatefulWidget {
       GoRoute(
         path: RoutePaths.vaultPdfLoadOverrides,
         builder: (context, state) => const VaultPdfLoadOverridesPage(),
+      ),
+      GoRoute(
+        path: RoutePaths.settingsNoteDefaults,
+        builder: (context, state) => const GlobalNoteDefaultsSettingsPage(),
+      ),
+      GoRoute(
+        path: RoutePaths.settingsInkDefaults,
+        builder: (context, state) => const InkDefaultsSettingsPage(),
       ),
     ],
   );
@@ -285,48 +308,59 @@ class App extends StatefulWidget {
 
     if (file.type != SharedMediaType.file) return;
 
-    final String extension;
-    if (file.path.contains('.')) {
-      extension = file.path.split('.').last.toLowerCase();
-    } else {
-      extension = 'sbn2';
-    }
+    final leafName = file.path.split(RegExp(r'[\\/]')).last;
 
-    try {
-      if (extension == 'sbn' || extension == 'sbn2' || extension == 'sba') {
-        final path = await FileManager.importFile(
-          file.path,
-          null,
-          extension: '.$extension',
-          getEncryptionPassword: extension == 'sba'
-              ? () async {
-                  final ctx = App._rootNavigatorKey.currentContext;
-                  if (ctx == null || !ctx.mounted) return null;
-                  return showSbaImportPasswordDialog(ctx);
-                }
-              : null,
-        );
-        if (path == null) return;
+    await BackgroundOperationQueue.instance.enqueue<void>(
+      kind: BackgroundOperationKind.importFile,
+      headline: t.home.create.importNote,
+      initialDetail: leafName,
+      work: (onProgress) async {
+        final String extension;
+        if (file.path.contains('.')) {
+          extension = file.path.split('.').last.toLowerCase();
+        } else {
+          extension = 'sbn2';
+        }
 
-        await Future.delayed(const Duration(milliseconds: 100));
+        try {
+          if (extension == 'sbn' || extension == 'sbn2' || extension == 'sba') {
+            onProgress(0, leafName, indeterminate: true);
+            final path = await FileManager.importFile(
+              file.path,
+              null,
+              extension: '.$extension',
+              getEncryptionPassword: extension == 'sba'
+                  ? () async {
+                      final ctx = App._rootNavigatorKey.currentContext;
+                      if (ctx == null || !ctx.mounted) return null;
+                      return showSbaImportPasswordDialog(ctx);
+                    }
+                  : null,
+            );
+            if (path == null) return;
 
-        _router.push(RoutePaths.editFilePath(path));
-      } else if (extension == 'pdf' && Editor.canRasterPdf) {
-        final fileName = file.path.split(RegExp(r'[\\/]')).last;
-        final fileNameWithoutExtension = fileName.toLowerCase().endsWith('.pdf')
-            ? fileName.substring(0, fileName.length - 4)
-            : fileName;
-        final sbnFilePath = await FileManager.suffixFilePathToMakeItUnique(
-          '/$fileNameWithoutExtension',
-        );
-        _router.push(RoutePaths.editImportPdf(sbnFilePath, file.path));
-      } else {
-        log.warning('openFile: Unsupported file type: $extension');
-      }
-    } catch (e, stack) {
-      log.severe('Error opening file: $e', e, stack);
+            await Future<void>.delayed(const Duration(milliseconds: 100));
 
-    }
+            _router.push(RoutePaths.editFilePath(path));
+          } else if (extension == 'pdf' && Editor.canRasterPdf) {
+            onProgress(0, leafName, indeterminate: true);
+            final fileName = file.path.split(RegExp(r'[\\/]')).last;
+            final fileNameWithoutExtension =
+                fileName.toLowerCase().endsWith('.pdf')
+                ? fileName.substring(0, fileName.length - 4)
+                : fileName;
+            final sbnFilePath = await FileManager.suffixFilePathToMakeItUnique(
+              '/$fileNameWithoutExtension',
+            );
+            _router.push(RoutePaths.editImportPdf(sbnFilePath, file.path));
+          } else {
+            log.warning('openFile: Unsupported file type: $extension');
+          }
+        } catch (e, stack) {
+          log.severe('Error opening file: $e', e, stack);
+        }
+      },
+    );
   }
 
   @override
@@ -343,14 +377,20 @@ class _AppState extends State<App> with WidgetsBindingObserver {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     if (now - last > interval * 60 * 1000) {
-      BackupManager.performIncrementalBackup();
+      BackupManager.performIncrementalBackupBackground();
     }
   }
 
   @override
   void initState() {
     super.initState();
+    VaultAdapter.bindRouter(App._router);
     WidgetsBinding.instance.addObserver(this);
+    if (Platform.isAndroid || Platform.isIOS) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_applyMobileSystemChrome());
+      });
+    }
     setupSharingIntent();
     _checkAutoBackup();
     Timer.periodic(const Duration(minutes: 5), (timer) {
@@ -360,8 +400,16 @@ class _AppState extends State<App> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // SECURITY: Lock vault when app is paused or closed (unless file picker/share is open)
+    // SECURITY: Lock vault when app leaves the foreground (unless file picker/share is open)
+    if (state == AppLifecycleState.resumed) {
+      if (Platform.isAndroid || Platform.isIOS) {
+        unawaited(_applyMobileSystemChrome());
+      }
+      // Redirect may have been skipped while backgrounded; enforce login now.
+      VaultAdapter.ensureLoginRouteIfLocked();
+    }
     if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
       if (VaultAdapter.preventLock) {
         VaultAdapter.log.info(
@@ -370,14 +418,18 @@ class _AppState extends State<App> with WidgetsBindingObserver {
         return;
       }
       if (stows.localEncryptionEnabled.value && VaultAdapter.isUnlocked) {
-        VaultAdapter.instance.lock();
+        unawaited(
+          VaultAdapter.instance.lock().then((_) {
+            // Prefer navigating once locked so editor/home cannot linger.
+            VaultAdapter.ensureLoginRouteIfLocked();
+          }),
+        );
       }
     }
   }
 
   void setupSharingIntent() {
     if (Platform.isAndroid || Platform.isIOS) {
-
       ReceiveSharingIntent.instance.getInitialMedia().then((
         List<SharedMediaFile> files,
       ) {

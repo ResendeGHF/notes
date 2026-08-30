@@ -3,10 +3,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
-import 'package:path/path.dart' as p;
 import 'package:saber/main.dart';
 import 'package:saber/services/vault_adapter.dart';
 
@@ -83,15 +83,22 @@ class _VaultLoginPageState extends State<VaultLoginPage> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
+    final pageBg = theme.scaffoldBackgroundColor;
+
     return Scaffold(
-      body: Center(
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 400),
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+      backgroundColor: pageBg,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Center(
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 400),
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
               Icon(Icons.lock, size: 64, color: colorScheme.primary),
               const SizedBox(height: 32),
               Text(
@@ -168,9 +175,12 @@ class _VaultLoginPageState extends State<VaultLoginPage> {
                 onPressed: _isLoading ? null : _unlock,
                 child: Text(t.vault.unlock),
               ),
-            ],
+                  ],
+                ),
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

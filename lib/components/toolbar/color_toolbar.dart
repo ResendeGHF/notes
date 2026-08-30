@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'package:flex_color_picker/flex_color_picker.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:saber/components/theming/adaptive_alert_dialog.dart';
+import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -16,6 +14,7 @@ class ColorToolbar extends StatefulWidget {
     required this.setColor,
     required this.currentColor,
     required this.invert,
+    this.onSlotsChanged,
   });
 
   final Axis axis;
@@ -23,20 +22,21 @@ class ColorToolbar extends StatefulWidget {
   final Color? currentColor;
   final bool invert;
 
+  /// Fired when a toolbar slot color is edited (note-local; must not upsert
+  /// ink presets).
+  final VoidCallback? onSlotsChanged;
+
   @override
   State<ColorToolbar> createState() => _ColorToolbarState();
 }
 
 class _ColorToolbarState extends State<ColorToolbar> {
-  static var _pickedColor = const Color.fromRGBO(255, 0, 0, 1);
-
   List<Color> get _colorSlots {
     final count = stows.toolbarColorSlotsCount.value;
     final storedStrings = List<String>.from(stows.toolbarColorSlots.value);
     var stored = storedStrings.map((s) => Color(int.parse(s))).toList();
 
     while (stored.length < count) {
-
       final defaultColors = _getDefaultColors();
       stored.add(defaultColors[stored.length % defaultColors.length]);
     }
@@ -79,50 +79,20 @@ class _ColorToolbarState extends State<ColorToolbar> {
       stows.toolbarColorSlots.value = slots
           .map((c) => c.toARGB32().toString())
           .toList();
+      // Note-local only: never write these slots back into the active ink preset.
+      widget.onSlotsChanged?.call();
       setState(() {});
     }
   }
 
-  void _showColorPickerForSlot(BuildContext context, int index) async {
-    final currentSlotColor = _colorSlots[index];
-    _pickedColor = currentSlotColor;
-
-    final bool? confirmChange = await showDialog(
-      context: context,
-      builder: (BuildContext context) => AdaptiveAlertDialog(
-        title: Text(t.editor.colors.colorPicker),
-        content: SingleChildScrollView(
-          child: ColorPicker(
-            color: _pickedColor,
-            pickersEnabled: const {ColorPickerType.wheel: true},
-            showColorCode: true,
-            colorCodeHasColor: true,
-            enableOpacity: false,
-            onColorChanged: (Color color) {
-              _pickedColor = color;
-            },
-          ),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-            onPressed: () {
-              Navigator.of(context).pop(false);
-            },
-          ),
-          CupertinoDialogAction(
-            child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-            onPressed: () {
-              Navigator.of(context).pop(true);
-            },
-          ),
-        ],
-      ),
+  Future<void> _showColorPickerForSlot(BuildContext context, int index) async {
+    final picked = await showNotesColorPicker(
+      context,
+      initialColor: _colorSlots[index],
     );
-
-    if (confirmChange ?? false) {
-      _updateColorSlot(index, _pickedColor);
-    }
+    if (picked == null || !mounted) return;
+    _updateColorSlot(index, picked);
+    widget.setColor(picked);
   }
 
   @override
@@ -132,7 +102,6 @@ class _ColorToolbarState extends State<ColorToolbar> {
     return ValueListenableBuilder(
       valueListenable: stows.toolbarColorSlotsCount,
       builder: (context, count, _) {
-
         final currentSlots = _colorSlots;
 
         return Flex(
@@ -143,19 +112,18 @@ class _ColorToolbarState extends State<ColorToolbar> {
             for (int i = 0; i < currentSlots.length; i++)
               Builder(
                 builder: (context) {
+                  final slotColor = currentSlots[i];
                   final isSelected =
                       widget.currentColor?.withAlpha(255).toARGB32() ==
-                      currentSlots[i].withAlpha(255).toARGB32();
+                      slotColor.withAlpha(255).toARGB32();
                   return _ColorSlot(
-                    color: currentSlots[i].withInversion(widget.invert),
+                    color: slotColor.withInversion(widget.invert),
                     isSelected: isSelected,
                     onTap: () {
                       if (isSelected) {
-
                         _showColorPickerForSlot(context, i);
                       } else {
-
-                        widget.setColor(currentSlots[i]);
+                        widget.setColor(slotColor);
                       }
                     },
                     onLongPress: () => _showColorPickerForSlot(context, i),
@@ -187,6 +155,10 @@ class _ColorSlot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final luminance = color.computeLuminance();
+    final outlineColor = colorScheme.onSurface.withValues(
+      alpha: luminance < 0.18 ? 0.5 : 0.28,
+    );
     return Tooltip(
       message: isSelected
           ? t.editor.colors.colorPicker
@@ -202,15 +174,16 @@ class _ColorSlot extends StatelessWidget {
             height: 32,
             alignment: Alignment.center,
             child: CustomPaint(
-              size: const Size(16, 16),
+              size: const Size(20, 20),
               painter: _CircleColorPainter(
                 color: color,
-                borderColor: isSelected
-                    ? colorScheme.primary
-                    : colorScheme.onSurface.withValues(alpha: 0.3),
-                borderWidth: isSelected ? 3.0 : 2.0,
-                hasGlow: isSelected,
-                glowColor: colorScheme.primary,
+                outlineColor: outlineColor,
+                // Selection ring matches the swatch color (not accent/white).
+                selectedRingColor: color,
+                gapColor: colorScheme.surface,
+                wellLight: colorScheme.surfaceContainerHighest,
+                wellDark: colorScheme.surfaceContainerLowest,
+                selected: isSelected,
               ),
             ),
           ),
@@ -223,55 +196,96 @@ class _ColorSlot extends StatelessWidget {
 class _CircleColorPainter extends CustomPainter {
   _CircleColorPainter({
     required this.color,
-    required this.borderColor,
-    this.borderWidth = 2.0,
-    this.hasGlow = false,
-    this.glowColor = const Color(0xFF000000),
+    required this.outlineColor,
+    required this.selectedRingColor,
+    required this.gapColor,
+    required this.wellLight,
+    required this.wellDark,
+    required this.selected,
   });
 
   final Color color;
-  final Color borderColor;
-  final double borderWidth;
-  final bool hasGlow;
-  final Color glowColor;
+  final Color outlineColor;
+  final Color selectedRingColor;
+  final Color gapColor;
+  final Color wellLight;
+  final Color wellDark;
+  final bool selected;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final r = size.width / 2;
-    final fillRadius = r - borderWidth;
-    final strokeRadius = r - borderWidth / 2;
+    final radius = size.shortestSide / 2;
+    final fillRadius = radius - (selected ? 3.6 : 1.3);
 
-    if (hasGlow) {
-      canvas.drawCircle(
-        center,
-        r + 1,
-        Paint()
-          ..color = glowColor.withValues(alpha: 0.3)
-          ..style = PaintingStyle.fill
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
-      );
+    canvas.save();
+    canvas.clipPath(
+      Path()..addOval(Rect.fromCircle(center: center, radius: fillRadius)),
+    );
+    canvas.drawCircle(
+      center,
+      fillRadius,
+      Paint()
+        ..color = wellLight
+        ..isAntiAlias = true,
+    );
+    const cell = 3.0;
+    final wellPaint = Paint()..isAntiAlias = false;
+    for (var y = 0.0; y < size.height; y += cell) {
+      for (var x = 0.0; x < size.width; x += cell) {
+        if (((x / cell).floor() + (y / cell).floor()).isEven) continue;
+        wellPaint.color = wellDark;
+        canvas.drawRect(Rect.fromLTWH(x, y, cell, cell), wellPaint);
+      }
     }
+    canvas.drawCircle(
+      center,
+      fillRadius,
+      Paint()
+        ..color = color
+        ..isAntiAlias = true,
+    );
+    canvas.restore();
 
-    final fillPaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-    canvas.drawCircle(center, fillRadius, fillPaint);
+    canvas.drawCircle(
+      center,
+      fillRadius,
+      Paint()
+        ..color = outlineColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.15
+        ..isAntiAlias = true,
+    );
 
-    final strokePaint = Paint()
-      ..color = borderColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = borderWidth
-      ..isAntiAlias = true;
-    canvas.drawCircle(center, strokeRadius, strokePaint);
+    if (!selected) return;
+    canvas.drawCircle(
+      center,
+      fillRadius + 1.25,
+      Paint()
+        ..color = gapColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.7
+        ..isAntiAlias = true,
+    );
+    canvas.drawCircle(
+      center,
+      radius - 1.0,
+      Paint()
+        ..color = selectedRingColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0
+        ..isAntiAlias = true,
+    );
   }
 
   @override
   bool shouldRepaint(covariant _CircleColorPainter oldDelegate) {
     return color != oldDelegate.color ||
-        borderColor != oldDelegate.borderColor ||
-        borderWidth != oldDelegate.borderWidth ||
-        hasGlow != oldDelegate.hasGlow;
+        outlineColor != oldDelegate.outlineColor ||
+        selectedRingColor != oldDelegate.selectedRingColor ||
+        gapColor != oldDelegate.gapColor ||
+        wellLight != oldDelegate.wellLight ||
+        wellDark != oldDelegate.wellDark ||
+        selected != oldDelegate.selected;
   }
 }

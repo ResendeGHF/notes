@@ -5,15 +5,21 @@
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
+import 'package:saber/data/extensions/svg_path_formatting.dart';
 import 'package:saber/data/tools/_tool.dart';
 
 class RectangleStroke extends Stroke {
-  Rect rect;
+  Rect _rect;
+  Rect get rect => _rect;
+  set rect(Rect value) {
+    _rect = value;
+    markPolygonNeedsUpdating();
+  }
 
   RectangleStroke({
     required super.color,
@@ -22,8 +28,8 @@ class RectangleStroke extends Stroke {
     required super.pageIndex,
     required super.page,
     required super.toolId,
-    required this.rect,
-  }) {
+    required Rect rect,
+  }) : _rect = rect {
     options.isComplete = true;
   }
 
@@ -182,6 +188,45 @@ class RectangleStroke extends Stroke {
     );
   }
 
+  static void skipFromBinary(BinaryReader reader) {
+    int key = reader.readKey();
+    while (key != StrokeBinaryKeys.size &&
+        key != StrokeBinaryKeys.thinning &&
+        key != StrokeBinaryKeys.smoothing &&
+        key != StrokeBinaryKeys.streamline &&
+        key != StrokeBinaryKeys.simulatePressure &&
+        key != StrokeBinaryKeys.isComplete &&
+        key != StrokeBinaryKeys.startTaperEnabled &&
+        key != StrokeBinaryKeys.startCustomTaper &&
+        key != StrokeBinaryKeys.startCap &&
+        key != StrokeBinaryKeys.endTaperEnabled &&
+        key != StrokeBinaryKeys.endCustomTaper &&
+        key != StrokeBinaryKeys.endCap &&
+        key != StrokeBinaryKeys.endOptions) {
+      switch (key) {
+        case StrokeBinaryKeys.pageIndex:
+          reader.readIntNoKey();
+          break;
+        case StrokeBinaryKeys.left:
+        case StrokeBinaryKeys.top:
+        case StrokeBinaryKeys.width:
+        case StrokeBinaryKeys.height:
+          reader.readScaledFloat();
+          break;
+        case StrokeBinaryKeys.pressureEnabled:
+          reader.readBoolNoKey();
+          break;
+        case StrokeBinaryKeys.color:
+          reader.readColor();
+          break;
+        default:
+          break;
+      }
+      key = reader.readKey();
+    }
+    BinaryOptions().optionsFromBinary(reader, initialKey: key);
+  }
+
   @override
   bool get isEmpty => rect.isEmpty;
   @override
@@ -189,7 +234,6 @@ class RectangleStroke extends Stroke {
 
   @override
   List<Offset> getPolygon({required StrokeQuality quality}) => [
-
     for (int i = 0; i < 24 / quality.N; ++i)
       Offset(rect.left, rect.top + rect.height * i / 24),
 
@@ -235,16 +279,14 @@ class RectangleStroke extends Stroke {
   }
 
   @override
-  void optimisePoints({double thresholdMultiplier = 0}) {
-
-  }
+  void optimisePoints({double thresholdMultiplier = 0}) {}
 
   @override
   String toSvgPath() {
-    return 'M${rect.left},${rect.top} '
-        'L${rect.right},${rect.top} '
-        'L${rect.right},${rect.bottom} '
-        'L${rect.left},${rect.bottom} '
+    return 'M${formatSvgPathDouble(rect.left)},${formatSvgPathDouble(rect.top)} '
+        'L${formatSvgPathDouble(rect.right)},${formatSvgPathDouble(rect.top)} '
+        'L${formatSvgPathDouble(rect.right)},${formatSvgPathDouble(rect.bottom)} '
+        'L${formatSvgPathDouble(rect.left)},${formatSvgPathDouble(rect.bottom)} '
         'Z';
   }
 
@@ -294,6 +336,7 @@ class RectangleStroke extends Stroke {
       center.dx + (rect.right - center.dx) * factor,
       center.dy + (rect.bottom - center.dy) * factor,
     );
+    options.size *= factor;
     markPolygonNeedsUpdating();
   }
 }

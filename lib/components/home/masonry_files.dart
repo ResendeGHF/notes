@@ -5,15 +5,12 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:saber/components/home/animated_grid_item.dart';
+import 'package:saber/components/home/home_list_row_chrome.dart';
 import 'package:saber/components/home/preview_card.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
 
 class _DisplayEntry {
-  _DisplayEntry({
-    required this.filePath,
-    this.linkKey,
-    this.targetPath,
-  });
+  _DisplayEntry({required this.filePath, this.linkKey, this.targetPath});
 
   final String filePath;
   final String? linkKey;
@@ -30,6 +27,9 @@ class MasonryFiles extends StatefulWidget {
     required this.selectedFiles,
     required this.crossAxisCount,
     this.onDeleteLink,
+    this.animateMutations = true,
+    this.addAutomaticKeepAlives = true,
+    this.showListMetadata = true,
   });
 
   final List<String> files;
@@ -37,6 +37,15 @@ class MasonryFiles extends StatefulWidget {
   final int crossAxisCount;
   final ValueNotifier<List<String>> selectedFiles;
   final Future<void> Function(String)? onDeleteLink;
+
+  /// Browse/search fade cards in and out. Recent jumps in place with no blink.
+  final bool animateMutations;
+
+  /// Off for Recent so off-screen cards dispose and release thumbnail memory.
+  final bool addAutomaticKeepAlives;
+
+  /// Browse list rows show size/dates. Recent list rows are thumbnail + name.
+  final bool showListMetadata;
 
   @override
   State<MasonryFiles> createState() => _MasonryFilesState();
@@ -47,8 +56,8 @@ class _MasonryFilesState extends State<MasonryFiles> {
 
   List<_DisplayEntry> _displayEntries = [];
   final Set<String> _removingKeys = {};
-  final Set<String> _newKeys = {};
-  bool _initialized = false;
+  final Set<String> _enteringKeys = {};
+  var _initialized = false;
 
   @override
   void initState() {
@@ -61,8 +70,9 @@ class _MasonryFilesState extends State<MasonryFiles> {
     super.didUpdateWidget(oldWidget);
     final filesChanged = !listEquals(oldWidget.files, widget.files);
     final linksChanged = !mapEquals(oldWidget.linkedFiles, widget.linkedFiles);
-    final crossAxisChanged = oldWidget.crossAxisCount != widget.crossAxisCount;
-    if (filesChanged || linksChanged || crossAxisChanged) {
+    // Cross-axis / width changes must only rescale cells — do not rebuild the
+    // display list (avoids slot churn when the navbar toggles).
+    if (filesChanged || linksChanged) {
       _syncDisplayList();
     }
   }
@@ -82,49 +92,81 @@ class _MasonryFilesState extends State<MasonryFiles> {
     final newLinks = widget.linkedFiles;
     final newEntries = _buildEntries(newFiles, newLinks);
 
-    if (!_initialized) {
+    if (!_initialized || !widget.animateMutations) {
       _displayEntries = newEntries;
+      _removingKeys.clear();
+      _enteringKeys.clear();
       _initialized = true;
       return;
     }
 
-    final oldKeys = _displayEntries.map((e) => e.key).toSet();
+    final oldOrder = _displayEntries.map((e) => e.key).toList();
+    final oldKeys = oldOrder.toSet();
     final newKeys = newEntries.map((e) => e.key).toSet();
-
     final removedKeys = oldKeys.difference(newKeys);
     final addedKeys = newKeys.difference(oldKeys);
 
-    _removingKeys.addAll(removedKeys);
-    _newKeys.addAll(addedKeys);
+    _removingKeys
+      ..removeWhere((k) => newKeys.contains(k))
+      ..addAll(removedKeys);
+    _enteringKeys
+      ..removeWhere((k) => !newKeys.contains(k) || _removingKeys.contains(k))
+      ..addAll(addedKeys);
+    if (addedKeys.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _enteringKeys.removeAll(addedKeys);
+      });
+    }
 
     final oldIndices = <String, int>{};
     for (var i = 0; i < _displayEntries.length; i++) {
       oldIndices[_displayEntries[i].key] = i;
     }
 
-    final removingEntries =
-        _displayEntries.where((e) => _removingKeys.contains(e.key)).toList();
+    final removingEntries = _displayEntries
+        .where((e) => _removingKeys.contains(e.key))
+        .toList();
 
     if (removingEntries.isEmpty) {
       _displayEntries = newEntries;
       return;
     }
 
-    final entriesWithPositions = <({_DisplayEntry entry, double position})>[];
-    for (var i = 0; i < newEntries.length; i++) {
-      entriesWithPositions.add((
-        entry: newEntries[i],
-        position: i + 0.5,
-      ));
+    // At capacity (or any same-size swap), keep the grid slot count stable:
+    // show the new cards plus exiting cards in the trailing slots so we never
+    // grow an extra lonely row while one note fades out and another fades in.
+    final pairedSwap = addedKeys.isNotEmpty && removingEntries.isNotEmpty;
+
+    if (pairedSwap) {
+      final exitCount = removingEntries.length.clamp(1, newEntries.length);
+      final keepNew = newEntries.sublist(0, newEntries.length - exitCount);
+      _displayEntries = [...keepNew, ...removingEntries.take(exitCount)];
+      return;
     }
-    for (final e in removingEntries) {
-      entriesWithPositions.add((
-        entry: e,
-        position: (oldIndices[e.key] ?? 0).toDouble(),
-      ));
+
+    // Keep exiting cards in their old slots while they fade; survivors sit in
+    // the settled order without sliding every neighbor into place.
+    final survivors = newEntries
+        .where((e) => !_removingKeys.contains(e.key))
+        .toList();
+    final merged = <_DisplayEntry>[];
+    var survivorIndex = 0;
+    final maxLen = survivors.length + removingEntries.length;
+    for (var i = 0; i < maxLen; i++) {
+      final removingHere = removingEntries
+          .where((e) => (oldIndices[e.key] ?? -1) == i)
+          .toList();
+      if (removingHere.isNotEmpty) {
+        merged.addAll(removingHere);
+      } else if (survivorIndex < survivors.length) {
+        merged.add(survivors[survivorIndex++]);
+      }
     }
-    entriesWithPositions.sort((a, b) => a.position.compareTo(b.position));
-    _displayEntries = entriesWithPositions.map((e) => e.entry).toList();
+    while (survivorIndex < survivors.length) {
+      merged.add(survivors[survivorIndex++]);
+    }
+    _displayEntries = merged;
   }
 
   List<_DisplayEntry> _buildEntries(
@@ -137,13 +179,12 @@ class _MasonryFilesState extends State<MasonryFiles> {
     }
     for (final mapKey in linkedFiles.keys) {
       var fp = linkedFiles[mapKey]!;
-      if (fp.endsWith('.sbn2')) fp = fp.substring(0, fp.length - 5);
-      else if (fp.endsWith('.sbn')) fp = fp.substring(0, fp.length - 4);
-      entries.add(_DisplayEntry(
-        filePath: fp,
-        linkKey: mapKey,
-        targetPath: fp,
-      ));
+      if (fp.endsWith('.sbn2')) {
+        fp = fp.substring(0, fp.length - 5);
+      } else if (fp.endsWith('.sbn')) {
+        fp = fp.substring(0, fp.length - 4);
+      }
+      entries.add(_DisplayEntry(filePath: fp, linkKey: mapKey, targetPath: fp));
     }
     return entries;
   }
@@ -152,14 +193,8 @@ class _MasonryFilesState extends State<MasonryFiles> {
     if (!mounted) return;
     setState(() {
       _removingKeys.remove(key);
-      _displayEntries = _displayEntries.where((e) => e.key != key).toList();
-    });
-  }
-
-  void _onEntranceComplete(String key) {
-    if (!mounted) return;
-    setState(() {
-      _newKeys.remove(key);
+      // Settle to the authoritative file list once the exit fade ends.
+      _displayEntries = _buildEntries(widget.files, widget.linkedFiles);
     });
   }
 
@@ -169,8 +204,8 @@ class _MasonryFilesState extends State<MasonryFiles> {
     }
 
     final entry = _displayEntries[index];
-    final animateEntrance = _newKeys.contains(entry.key);
     final animateExit = _removingKeys.contains(entry.key);
+    final animateEnter = !animateExit && _enteringKeys.contains(entry.key);
 
     final card = RepaintBoundary(
       child: ValueListenableBuilder(
@@ -185,21 +220,22 @@ class _MasonryFilesState extends State<MasonryFiles> {
             selected: widget.selectedFiles.value.contains(entry.filePath),
             isAnythingSelected: isAnythingSelected,
             listMode: widget.crossAxisCount == 1,
+            showListMetadata: widget.showListMetadata,
           );
         },
       ),
     );
 
-    return ClipRect(
-      clipBehavior: Clip.hardEdge,
+    if (!widget.animateMutations) {
+      return KeyedSubtree(key: ValueKey(entry.key), child: card);
+    }
+
+    return KeyedSubtree(
+      key: ValueKey(entry.key),
       child: AnimatedGridItem(
-        key: ValueKey(entry.key),
-        animateEntrance: animateEntrance,
         animateExit: animateExit,
-        onExitComplete:
-            animateExit ? () => _onExitComplete(entry.key) : null,
-        onEntranceComplete:
-            animateEntrance ? () => _onEntranceComplete(entry.key) : null,
+        animateEnter: animateEnter,
+        onExitComplete: animateExit ? () => _onExitComplete(entry.key) : null,
         child: card,
       ),
     );
@@ -218,10 +254,12 @@ class _MasonryFilesState extends State<MasonryFiles> {
           final crossAxisExtent = constraints.crossAxisExtent;
 
           final childAspectRatio = n == 1
-              ? crossAxisExtent / 80
+              ? crossAxisExtent /
+                    (widget.showListMetadata
+                        ? kHomeListRowGridExtent
+                        : kHomeListRowCompactExtent)
               : () {
-                  final cellWidth =
-                      (crossAxisExtent - (n - 1) * spacing) / n;
+                  final cellWidth = (crossAxisExtent - (n - 1) * spacing) / n;
                   final thumbnailHeight = cellWidth * 1.4;
                   final cardHeight = thumbnailHeight + 36;
                   return cellWidth / cardHeight;
@@ -236,6 +274,16 @@ class _MasonryFilesState extends State<MasonryFiles> {
             delegate: SliverChildBuilderDelegate(
               (context, index) => itemBuilder(context, index),
               childCount: _displayEntries.length,
+              addAutomaticKeepAlives: widget.addAutomaticKeepAlives,
+              findChildIndexCallback: (Key key) {
+                if (key is ValueKey<String>) {
+                  final i = _displayEntries.indexWhere(
+                    (e) => e.key == key.value,
+                  );
+                  return i >= 0 ? i : null;
+                }
+                return null;
+              },
             ),
           );
         },

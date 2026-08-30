@@ -4,6 +4,7 @@
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
@@ -19,12 +20,27 @@ enum ExportPageRange { current, all, custom }
 
 enum ExportResolution { dpi72, dpi150, dpi300 }
 
+class _ImageArchiveFile {
+  const _ImageArchiveFile({required this.name, required this.bytes});
+
+  final String name;
+  final Uint8List bytes;
+}
+
+Uint8List _encodeImageArchive(List<_ImageArchiveFile> files) {
+  final archive = Archive();
+  for (final file in files) {
+    archive.addFile(ArchiveFile(file.name, file.bytes.length, file.bytes));
+  }
+  return Uint8List.fromList(ZipEncoder().encode(archive));
+}
+
 extension ExportResolutionExt on ExportResolution {
   double get pixelRatio => switch (this) {
-        ExportResolution.dpi72 => 1.0,
-        ExportResolution.dpi150 => 150 / 72,
-        ExportResolution.dpi300 => 300 / 72,
-      };
+    ExportResolution.dpi72 => 1.0,
+    ExportResolution.dpi150 => 150 / 72,
+    ExportResolution.dpi300 => 300 / 72,
+  };
 }
 
 class ExportDialog extends StatefulWidget {
@@ -115,13 +131,14 @@ class _ExportDialogState extends State<ExportDialog> {
   Future<void> _export() async {
     final indices = _getSelectedPageIndices();
     if (indices.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(t.export.noValidPagesSelected)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(t.export.noValidPagesSelected)));
       return;
     }
 
-    if (_format == ExportFormat.pdf && _shareLinks &&
+    if (_format == ExportFormat.pdf &&
+        _shareLinks &&
         stows.defaultExportPath.value.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(t.export.defaultExportPathRequired)),
@@ -140,101 +157,141 @@ class _ExportDialogState extends State<ExportDialog> {
         if (saveToPath != null) {
           final messengerContext = widget.parentContext ?? context;
           Navigator.of(context).pop();
-          await ExportManager.exportInBackground(
-            t.export.exportingNote,
-            (onProgress) async {
-              onProgress(0.3, '${widget.coreInfo.fileName}.pdf');
-              final pdf = await EditorExporter.generatePdf(
-                widget.coreInfo,
-                messengerContext,
-                pageIndices: indices,
-                invert: _invertColors,
-                shareLinks: _shareLinks,
-              );
-              final bytes = await pdf.save();
-              onProgress(0.9, t.export.exportComplete);
-              await FileManager.exportFile(
-                '${widget.coreInfo.fileName}.pdf',
-                bytes,
+          await ExportManager.exportInBackground(t.export.exportingNote, (
+            onProgress,
+          ) async {
+            onProgress(0.05, '${widget.coreInfo.fileName}.pdf');
+            final data = await EditorExporter.generatePdfData(
+              widget.coreInfo,
+              messengerContext,
+              pageIndices: indices,
+              invert: _invertColors,
+              shareLinks: _shareLinks,
+              onProgress: (done, total) {
+                onProgress(
+                  0.05 + 0.75 * (done / total),
+                  '${widget.coreInfo.fileName}.pdf',
+                );
+              },
+            );
+            await Future<void>.delayed(Duration.zero);
+            onProgress(0.9, t.export.exportComplete);
+            final outName = '${widget.coreInfo.fileName}.pdf';
+            if (data.tempPdfPath != null) {
+              await FileManager.exportPdfTempFile(
+                data.tempPdfPath!,
+                outName,
                 saveToPath: saveToPath,
                 context: messengerContext,
               );
-            },
-          );
+            } else {
+              await FileManager.exportFile(
+                outName,
+                data.bytes!,
+                saveToPath: saveToPath,
+                context: messengerContext,
+              );
+            }
+          });
           if (messengerContext.mounted) {
-            ScaffoldMessenger.of(messengerContext).showSnackBar(
-              SnackBar(content: Text(t.export.exportComplete)),
-            );
+            ScaffoldMessenger.of(
+              messengerContext,
+            ).showSnackBar(SnackBar(content: Text(t.export.exportComplete)));
           }
         } else {
-          final pdf = await EditorExporter.generatePdf(
-            widget.coreInfo,
-            context,
-            pageIndices: indices,
-            invert: _invertColors,
-            shareLinks: _shareLinks,
+          final data = await ExportManager.exportInBackground<PdfExportData>(
+            t.export.exportingNote,
+            (onProgress) async {
+              onProgress(0.05, '${widget.coreInfo.fileName}.pdf');
+              final pdf = await EditorExporter.generatePdfData(
+                widget.coreInfo,
+                context,
+                pageIndices: indices,
+                invert: _invertColors,
+                shareLinks: _shareLinks,
+                onProgress: (done, total) {
+                  onProgress(
+                    0.05 + 0.75 * (done / total),
+                    '${widget.coreInfo.fileName}.pdf',
+                  );
+                },
+              );
+              await Future<void>.delayed(Duration.zero);
+              onProgress(0.9, t.export.exportComplete);
+              return pdf;
+            },
           );
-          final bytes = await pdf.save();
           if (!mounted) return;
-          await FileManager.exportFile(
-            '${widget.coreInfo.fileName}.pdf',
-            bytes,
-            context: context,
-          );
+          final outName = '${widget.coreInfo.fileName}.pdf';
+          if (data.tempPdfPath != null) {
+            await FileManager.exportPdfTempFile(
+              data.tempPdfPath!,
+              outName,
+              context: context,
+            );
+          } else {
+            await FileManager.exportFile(
+              outName,
+              data.bytes!,
+              context: context,
+            );
+          }
         }
       } else {
         final ext = _format == ExportFormat.png ? 'png' : 'jpeg';
-        Future<Uint8List> rasterPage(int pageIndex) {
-          if (_format == ExportFormat.png) {
-            return EditorExporter.generatePng(
-              widget.coreInfo,
-              context,
-              pageIndex: pageIndex,
-              invert: _invertColors,
-              pixelRatio: _jpegResolution.pixelRatio,
-            );
-          }
-          return EditorExporter.generateJpeg(
-            widget.coreInfo,
-            context,
-            pageIndex: pageIndex,
-            invert: _invertColors,
-            pixelRatio: _jpegResolution.pixelRatio,
-          );
-        }
+        final rasterPages =
+            await ExportManager.exportInBackground<
+              List<({Uint8List bytes, int pageIndex})>
+            >(t.export.exportingNote, (onProgress) async {
+              return EditorExporter.generateRasterPages(
+                widget.coreInfo,
+                context,
+                pageIndices: indices,
+                jpeg: _format == ExportFormat.jpeg,
+                invert: _invertColors,
+                pixelRatio: _jpegResolution.pixelRatio,
+                onProgress: (done, total) {
+                  onProgress(
+                    0.05 + 0.85 * (done / total),
+                    '${widget.coreInfo.fileName}.$ext',
+                  );
+                },
+              );
+            });
+        if (!mounted) return;
 
+        final Uint8List exportBytes;
+        final String exportName;
+        final bool isImage;
         if (indices.length == 1) {
-          final bytes = await rasterPage(indices.first);
-          if (!mounted) return;
-          await FileManager.exportFile(
-            widget.coreInfo.isInfinite
-                ? '${widget.coreInfo.fileName}.$ext'
-                : '${widget.coreInfo.fileName}_page_${indices.first + 1}.$ext',
-            bytes,
-            isImage: true,
-            context: context,
-          );
+          exportBytes = rasterPages.first.bytes;
+          exportName = widget.coreInfo.isInfinite
+              ? '${widget.coreInfo.fileName}.$ext'
+              : '${widget.coreInfo.fileName}_page_${indices.first + 1}.$ext';
+          isImage = true;
         } else {
-          final encoder = ZipEncoder();
-          final archive = Archive();
-          for (final index in indices) {
-            final bytes = await rasterPage(index);
-            archive.addFile(
-              ArchiveFile(
-                '${widget.coreInfo.fileName}_page_${index + 1}.$ext',
-                bytes.length,
-                bytes,
+          final archiveFiles = <_ImageArchiveFile>[];
+          for (final page in rasterPages) {
+            archiveFiles.add(
+              _ImageArchiveFile(
+                name:
+                    '${widget.coreInfo.fileName}_page_${page.pageIndex + 1}.$ext',
+                bytes: page.bytes,
               ),
             );
           }
-          final zipBytes = encoder.encode(archive);
-          if (!mounted) return;
-          await FileManager.exportFile(
-            '${widget.coreInfo.fileName}_pages.zip',
-            Uint8List.fromList(zipBytes),
-            context: context,
-          );
+          exportBytes = await compute(_encodeImageArchive, archiveFiles);
+          exportName = '${widget.coreInfo.fileName}_pages.zip';
+          isImage = false;
         }
+
+        if (!mounted) return;
+        await FileManager.exportFile(
+          exportName,
+          exportBytes,
+          isImage: isImage,
+          context: context,
+        );
       }
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
@@ -451,7 +508,8 @@ class _ExportDialogState extends State<ExportDialog> {
                                             ? Colors.white.withValues(
                                                 alpha: 0.05,
                                               )
-                                            : colorScheme.surfaceContainerHighest
+                                            : colorScheme
+                                                  .surfaceContainerHighest
                                                   .withValues(alpha: 0.5),
                                       ),
                                     ),
@@ -489,10 +547,12 @@ class _ExportDialogState extends State<ExportDialog> {
                           ),
                         ),
                         if (_format == ExportFormat.pdf &&
-                            widget.coreInfo.links
-                                .any((l) =>
-                                    isExternalNoteLink(
-                                        l, widget.coreInfo.filePath))) ...[
+                            widget.coreInfo.links.any(
+                              (l) => isExternalNoteLink(
+                                l,
+                                widget.coreInfo.filePath,
+                              ),
+                            )) ...[
                           SwitchListTile(
                             title: Text(t.export.shareLinks),
                             subtitle: Text(

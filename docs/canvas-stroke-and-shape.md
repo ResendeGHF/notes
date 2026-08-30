@@ -4,8 +4,8 @@
 
 A `Stroke` is the **authoritative** representation of ink on a page:
 
-- **`points`** — `List<PointVector>` (from `perfect_freehand`): x, y, optional pressure.
-- **`StrokeOptions`** — size, thinning, smoothing, streamline, tapers, caps (`perfect_freehand` types).
+- **`points`** — `List<PointVector>` (from `lib/data/stroke_geometry`): x, y, optional pressure.
+- **`StrokeOptions`** — size, thinning, smoothing, streamline, tapers, caps (`stroke_geometry` types).
 - **`toolId`** — fountain, ballpoint, highlighter, calligraphy, advanced, etc.
 - **Caches:** polygon/path/vertices invalidated via `markPolygonNeedsUpdating()`.
 
@@ -55,19 +55,19 @@ Iterates segments; if deviation large, inserts points at **t = 0.33, 0.66** (rec
 
 | Tool | Strategy |
 |------|----------|
-| Highlighter | Smooth spine for ≥3 points → `perfect_freehand.getStroke` with tool-specific options (opacity, caps). |
+| Highlighter | Smooth spine for ≥3 points → `buildConstantWidthOutline` (flat or round caps via `flatEdge`). |
 | Advanced pen | High quality: smooth spine; low quality: decimate with `skipPoints`. |
-| Calligraphy / Fountain | Adaptive spine from packed floats, then calligraphy ribbon or `getStroke`. |
+| Calligraphy / Fountain | Adaptive spine from packed floats, then calligraphy ribbon or `getStroke` (`stroke_geometry`). |
 | Ballpoint | Adaptive spine (same family as fountain) for smooth output. |
 | Default | High quality + adaptive spine when needed; low quality may use **Ramer–Douglas–Peucker** (`_ramerDouglasPeucker`) with ε ∝ `options.size`. |
 
 **RDP complexity:** **O(n)** typical implementation per decimation pass.
 
-### `perfect_freehand.getStroke`
+### `stroke_geometry.getStroke` / `buildConstantWidthOutline`
 
-Produces a **closed polygon** outline around the smoothed polyline — used for **filled ink** look. Options control thinning, end caps, pressure simulation.
+Produces a **single closed polygon** outline around the polyline — used for **filled translucent ink** (highlighter) without triangle-mesh overlap artifacts. Options control size, end caps, and (for pressure pens) thinning/tapers.
 
-**Complexity:** Implementation is **O(m)** in processed points m (library); m depends on smoothing/streamline.
+**Complexity:** **O(m)** in spine points m.
 
 ---
 

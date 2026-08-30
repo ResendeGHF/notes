@@ -5,8 +5,10 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
-import 'package:saber/components/theming/adaptive_alert_dialog.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 
@@ -156,7 +158,18 @@ class _MoveNoteDialogState extends State<MoveNoteDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AdaptiveAlertDialog(
+    final h = (MediaQuery.sizeOf(context).height * 0.52).clamp(320.0, 620.0);
+    return AlertDialog(
+      backgroundColor: homeAppBarBackgroundColor(context),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(kSaberContainerRadius),
+        side: BorderSide(
+          color: Theme.of(
+            context,
+          ).colorScheme.outlineVariant.withValues(alpha: 0.18),
+        ),
+      ),
       title: originalFileNames.length < 5
           ? Text(
               t.home.moveNote.moveName(f: originalFileNames.join(', ')),
@@ -174,7 +187,7 @@ class _MoveNoteDialogState extends State<MoveNoteDialog> {
             ),
       content: SizedBox(
         width: double.maxFinite,
-        height: 300,
+        height: h,
         child: Column(
           children: [
             Container(
@@ -246,12 +259,23 @@ class _MoveNoteDialogState extends State<MoveNoteDialog> {
                       itemBuilder: (context, index) {
                         final folder =
                             currentFolderChildren!.directories[index];
+                        var destPath = p.join(currentFolder, folder);
+                        if (!destPath.startsWith('/')) {
+                          destPath = '/$destPath';
+                        }
                         return ListTile(
-                          leading: Icon(
-                            CupertinoIcons.folder_fill,
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.primary.withValues(alpha: 0.8),
+                          leading: ValueListenableBuilder<Map<String, int>>(
+                            valueListenable: stows.folderColors,
+                            builder: (context, colors, _) {
+                              final v = colors[destPath];
+                              final folderColor = v != null
+                                  ? Color(v)
+                                  : Theme.of(context).colorScheme.primary;
+                              return Icon(
+                                CupertinoIcons.folder_fill,
+                                color: folderColor,
+                              );
+                            },
                           ),
                           title: Text(
                             folder,
@@ -293,15 +317,14 @@ class _MoveNoteDialogState extends State<MoveNoteDialog> {
         ),
       ),
       actions: [
-        CupertinoDialogAction(
+        TextButton(
           onPressed: () {
             Navigator.of(context).pop();
           },
           child: Text(t.common.cancel),
         ),
-        CupertinoDialogAction(
+        FilledButton(
           onPressed: () async {
-
             widget.unselectNotes();
             if (context.mounted) {
               Navigator.of(context).pop();

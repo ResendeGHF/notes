@@ -3,6 +3,7 @@
 
 // ignore_for_file: avoid_dynamic_calls
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -23,14 +24,15 @@ String _resolveTargetPath(String sourcePath, String targetPath) {
     return p.posix.normalize(norm).replaceAll(RegExp(r'/+'), '/');
   }
   final sourceDir = p.posix.dirname(sourcePath);
-  return p.posix.normalize(p.posix.join(sourceDir, target)).replaceAll(RegExp(r'/+'), '/');
+  return p.posix
+      .normalize(p.posix.join(sourceDir, target))
+      .replaceAll(RegExp(r'/+'), '/');
 }
 
 String formatLinkDisplayLabel(NoteLink link) {
-  final name =
-      link.label?.trim().isNotEmpty == true
-          ? link.label!
-          : (link.targetPath.isNotEmpty ? link.targetPath.split('/').last : '');
+  final name = link.label?.trim().isNotEmpty == true
+      ? link.label!
+      : (link.targetPath.isNotEmpty ? link.targetPath.split('/').last : '');
   if (link.isRange) {
     return 'p:${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1} $name';
   }
@@ -44,18 +46,6 @@ bool isExternalNoteLink(NoteLink link, String selfFilePath) {
   return resolved != selfNorm;
 }
 
-String formatLinkLabelForPdf(NoteLink link) {
-  if (link.label?.trim().isNotEmpty == true) return link.label!;
-  final name = link.targetPath.isEmpty
-      ? 'Page ${link.targetPageIndex + 1}'
-      : link.targetPath.split('/').last;
-  if (link.targetPageIndexEnd != null &&
-      link.targetPageIndexEnd != link.targetPageIndex) {
-    return 'p:${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1} $name';
-  }
-  return 'p:${link.targetPageIndex + 1} $name';
-}
-
 Future<EditorImage?> _copyImageWithMergedAsset(
   EditorImage source,
   AssetCacheAll targetCache,
@@ -65,8 +55,8 @@ Future<EditorImage?> _copyImageWithMergedAsset(
   final oldId = source is PdfEditorImage
       ? source.assetId
       : (source is PngEditorImage
-          ? source.assetId
-          : (source is SvgEditorImage ? source.assetId : -1));
+            ? source.assetId
+            : (source is SvgEditorImage ? source.assetId : -1));
   if (oldId < 0) return null;
 
   int newId;
@@ -76,7 +66,10 @@ Future<EditorImage?> _copyImageWithMergedAsset(
     final ext = source.extension;
     final bytes = await source.assetCacheAll.getBytes(oldId);
     if (bytes.isEmpty) return null;
-    final tempFile = targetCache.createRuntimeFile(ext, Uint8List.fromList(bytes));
+    final tempFile = targetCache.createRuntimeFile(
+      ext,
+      Uint8List.fromList(bytes),
+    );
     newId = targetCache.length;
     targetCache.addSync(tempFile, ext, newId, null, null, null, null);
     assetIdMap[oldId] = newId;
@@ -85,65 +78,65 @@ Future<EditorImage?> _copyImageWithMergedAsset(
   if (source is PdfEditorImage) {
     final file = targetCache.getAssetFile(newId);
     return PdfEditorImage(
-      id: source.id,
-      assetCacheAll: targetCache,
-      assetId: newId,
-      pdfFile: file,
-      pdfPage: source.pdfPage,
-      pageIndex: pageIndex,
-      pageSize: source.pageSize,
-      invertible: source.invertible,
-      backgroundFit: source.backgroundFit,
-      onMoveImage: null,
-      onDeleteImage: null,
-      onMiscChange: null,
-      dstRect: source.dstRect,
-      naturalSize: source.naturalSize,
-      isThumbnail: source.isThumbnail,
-    )
+        id: source.id,
+        assetCacheAll: targetCache,
+        assetId: newId,
+        pdfFile: file,
+        pdfPage: source.pdfPage,
+        pageIndex: pageIndex,
+        pageSize: source.pageSize,
+        invertible: source.invertible,
+        backgroundFit: source.backgroundFit,
+        onMoveImage: null,
+        onDeleteImage: null,
+        onMiscChange: null,
+        dstRect: source.dstRect,
+        naturalSize: source.naturalSize,
+        isThumbnail: source.isThumbnail,
+      )
       ..rotationDeg = source.rotationDeg
       ..locked = source.locked;
   }
   if (source is PngEditorImage) {
     return PngEditorImage(
-      id: source.id,
-      assetCacheAll: targetCache,
-      assetId: newId,
-      extension: source.extension,
-      imageProviderNotifier: ValueNotifier(null),
-      pageIndex: pageIndex,
-      pageSize: source.pageSize,
-      invertible: source.invertible,
-      backgroundFit: source.backgroundFit,
-      onMoveImage: null,
-      onDeleteImage: null,
-      onMiscChange: null,
-      dstRect: source.dstRect,
-      srcRect: source.srcRect,
-      naturalSize: source.naturalSize,
-      thumbnailBytes: source.thumbnailBytes,
-      isThumbnail: source.isThumbnail,
-    )
+        id: source.id,
+        assetCacheAll: targetCache,
+        assetId: newId,
+        extension: source.extension,
+        imageProviderNotifier: ValueNotifier(null),
+        pageIndex: pageIndex,
+        pageSize: source.pageSize,
+        invertible: source.invertible,
+        backgroundFit: source.backgroundFit,
+        onMoveImage: null,
+        onDeleteImage: null,
+        onMiscChange: null,
+        dstRect: source.dstRect,
+        srcRect: source.srcRect,
+        naturalSize: source.naturalSize,
+        thumbnailBytes: source.thumbnailBytes,
+        isThumbnail: source.isThumbnail,
+      )
       ..rotationDeg = source.rotationDeg
       ..locked = source.locked;
   }
   if (source is SvgEditorImage) {
     return SvgEditorImage(
-      id: source.id,
-      assetCacheAll: targetCache,
-      assetId: newId,
-      pageIndex: pageIndex,
-      pageSize: source.pageSize,
-      invertible: source.invertible,
-      backgroundFit: source.backgroundFit,
-      onMoveImage: null,
-      onDeleteImage: null,
-      onMiscChange: null,
-      dstRect: source.dstRect,
-      srcRect: source.srcRect,
-      naturalSize: source.naturalSize,
-      isThumbnail: source.isThumbnail,
-    )
+        id: source.id,
+        assetCacheAll: targetCache,
+        assetId: newId,
+        pageIndex: pageIndex,
+        pageSize: source.pageSize,
+        invertible: source.invertible,
+        backgroundFit: source.backgroundFit,
+        onMoveImage: null,
+        onDeleteImage: null,
+        onMiscChange: null,
+        dstRect: source.dstRect,
+        srcRect: source.srcRect,
+        naturalSize: source.naturalSize,
+        isThumbnail: source.isThumbnail,
+      )
       ..rotationDeg = source.rotationDeg
       ..locked = source.locked;
   }
@@ -173,7 +166,9 @@ Future<EditorPage> _copyPageForExport(
       );
       if (copied != null) newImages.add(copied);
     }
-    layers.add(NoteLayer(name: layer.name, strokes: newStrokes, images: newImages));
+    layers.add(
+      NoteLayer(name: layer.name, strokes: newStrokes, images: newImages),
+    );
     layerOrder.add(i);
   }
 
@@ -219,14 +214,18 @@ Future<EditorPage> _copyPageForExport(
     marginBottom: source.marginBottom,
   );
   newPage.replaceLayersFromBinary(layers, layerOrder);
-  newPage.activeLayerIndex = source.activeLayerIndex.clamp(0, layers.length - 1);
+  newPage.activeLayerIndex = source.activeLayerIndex.clamp(
+    0,
+    layers.length - 1,
+  );
   return newPage;
 }
 
 Future<EditorCoreInfo> expandLinksForShare(
   EditorCoreInfo source,
-  bool shareLinks,
-) async {
+  bool shareLinks, {
+  List<int>? pageIndices,
+}) async {
   if (!shareLinks || source.links.isEmpty) {
     return source;
   }
@@ -251,30 +250,58 @@ Future<EditorCoreInfo> expandLinksForShare(
     assetIdMap[i] = i;
   }
   for (var i = 0; i < source.assetCacheAll.length; i++) {
+    final ext = source.assetCacheAll.getAssetExtension(i);
+    var copied = false;
+    try {
+      final src = source.assetCacheAll.getAssetFile(i);
+      if (await src.exists()) {
+        final dest = File(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}'
+          'TmPmP_${RandomFileName.generateRandomFileName(ext)}',
+        );
+        await src.copy(dest.path);
+        newCache.addSync(dest, ext, i, null, null, null, null);
+        copied = true;
+      }
+    } catch (_) {}
+    if (copied) continue;
+
     final bytes = await source.assetCacheAll.getBytes(i);
     if (bytes.isNotEmpty) {
-      final ext = source.assetCacheAll.getAssetExtension(i);
-      final tempFile = newCache.createRuntimeFile(ext, Uint8List.fromList(bytes));
+      final tempFile = newCache.createRuntimeFile(
+        ext,
+        Uint8List.fromList(bytes),
+      );
       newCache.addSync(tempFile, ext, i, null, null, null, null);
     }
   }
 
-  var currentPageNewIndex = 0;
+  final indicesToProcess =
+      pageIndices ?? List.generate(source.pages.length, (i) => i);
 
-  for (var origPageIdx = 0; origPageIdx < source.pages.length; origPageIdx++) {
+  for (final origPageIdx in indicesToProcess) {
     final origPage = source.pages[origPageIdx];
     final linksOnPage = source.linksForPage(origPage, origPageIdx);
 
+    final sourcePageIdx = newPages.length;
     final pageCopy = await _copyPageForExport(
       origPage,
       source,
       targetCoreInfo,
       assetIdMap,
-      newPages.length,
+      sourcePageIdx,
     );
-    pageCopy.id = targetCoreInfo.allocatePageId();
+    // Preserve stable page ids so outline bookmarks survive expansion.
+    final origId = origPage.id;
+    if (origId != null) {
+      pageCopy.id = origId;
+      if (origId >= targetCoreInfo.nextPageId) {
+        targetCoreInfo.nextPageId = origId + 1;
+      }
+    } else {
+      pageCopy.id = targetCoreInfo.allocatePageId();
+    }
     newPages.add(pageCopy);
-    currentPageNewIndex = newPages.length - 1;
 
     for (final link in linksOnPage) {
       if (!isExternalNoteLink(link, selfPath)) {
@@ -290,7 +317,10 @@ Future<EditorCoreInfo> expandLinksForShare(
 
       EditorCoreInfo? externalInfo;
       try {
-        externalInfo = await EditorCoreInfo.loadFromFilePath(resolvedPath, readOnly: true);
+        externalInfo = await EditorCoreInfo.loadFromFilePath(
+          resolvedPath,
+          readOnly: true,
+        );
       } catch (_) {
         newLinks.add(link);
         continue;
@@ -307,13 +337,12 @@ Future<EditorCoreInfo> expandLinksForShare(
       final from = start.clamp(0, maxIdx);
       final to = end.clamp(from, maxIdx);
 
-      final sourcePageIdx = currentPageNewIndex;
       final firstAppendedIndex = newPages.length;
       final externalAssetMap = <int, int>{};
 
       for (var k = from; k <= to; k++) {
         final extPage = externalInfo.pages[k];
-        final appendedPageIndex = currentPageNewIndex + 1 + (k - from);
+        final appendedPageIndex = newPages.length;
         final copied = await _copyPageForExport(
           extPage,
           externalInfo,
@@ -323,14 +352,12 @@ Future<EditorCoreInfo> expandLinksForShare(
         );
         copied.id = targetCoreInfo.allocatePageId();
         newPages.add(copied);
-        currentPageNewIndex = newPages.length - 1;
       }
 
-      final lastAppendedIndex = currentPageNewIndex;
-      final displayName =
-          link.label?.trim().isNotEmpty == true
-              ? link.label!
-              : resolvedPath.split('/').last;
+      final lastAppendedIndex = newPages.length - 1;
+      final displayName = link.label?.trim().isNotEmpty == true
+          ? link.label!
+          : resolvedPath.split('/').last;
       final displayLabel = from == to
           ? 'p:${from + 1} $displayName'
           : 'p:${from + 1}-${to + 1} $displayName';
@@ -341,6 +368,8 @@ Future<EditorCoreInfo> expandLinksForShare(
         targetPageIndex: firstAppendedIndex,
         targetPageIndexEnd: lastAppendedIndex,
         label: displayLabel,
+        targetPageId: newPages[firstAppendedIndex].id,
+        targetPageIdEnd: newPages[lastAppendedIndex].id,
       );
       newLinks.add(mutatedLink);
     }

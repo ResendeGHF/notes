@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:saber/components/toolbar/advanced_pen_panel.dart';
+import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
 import 'package:saber/data/extensions/axis_extensions.dart';
 import 'package:saber/data/prefs.dart';
@@ -48,7 +51,6 @@ class _PenModalState extends State<PenModal> {
                 : Axis.horizontal,
             mainAxisSize: MainAxisSize.min,
             children: [
-
               ValueListenableBuilder(
                 valueListenable: stows.strokeStabilization,
                 builder: (context, enabled, _) {
@@ -212,10 +214,10 @@ class _PenModalState extends State<PenModal> {
                                   min: 0.0,
                                   max: 1.0,
                                   divisions: 20,
-                                  label: '${(amount * 100).toStringAsFixed(0)}%',
+                                  label:
+                                      '${(amount * 100).toStringAsFixed(0)}%',
                                   onChanged: (value) {
-                                    stows.strokePredictionAmount.value =
-                                        value;
+                                    stows.strokePredictionAmount.value = value;
                                     if (value > 0 &&
                                         !stows.strokePrediction.value) {
                                       stows.strokePrediction.value = true;
@@ -295,10 +297,40 @@ class _PenModalState extends State<PenModal> {
           ),
         ],
         if (currentPen is! Highlighter) ...[
+          if (_supportsNeon(currentPen.toolId)) ...[
+            const SizedBox.square(dimension: 8),
+            ValueListenableBuilder(
+              valueListenable: _neonStow(currentPen.toolId),
+              builder: (context, enabled, _) {
+                return IconButton(
+                  onPressed: () {
+                    Pen.setNeonEnabledForTool(currentPen.toolId, !enabled);
+                    setState(() {});
+                  },
+                  tooltip: t.editor.penOptions.neonStroke,
+                  icon: Icon(
+                    enabled ? Icons.highlight : Icons.highlight_outlined,
+                    color: enabled
+                        ? ColorScheme.of(context).primary
+                        : ColorScheme.of(
+                            context,
+                          ).onSurface.withValues(alpha: 0.5),
+                  ),
+                  style: IconButton.styleFrom(
+                    backgroundColor: enabled
+                        ? ColorScheme.of(context).primary.withValues(alpha: 0.1)
+                        : Colors.transparent,
+                  ),
+                );
+              },
+            ),
+          ],
           const SizedBox.square(dimension: 8),
           IconButton(
             onPressed: () => setState(() {
-              widget.setTool(Pen.fountainPen());
+              final p = Pen.fountainPen();
+              Pen.currentPen = p;
+              widget.setTool(p);
             }),
             style: TextButton.styleFrom(
               foregroundColor: Pen.currentPen.icon == Pen.fountainPenIcon
@@ -326,7 +358,9 @@ class _PenModalState extends State<PenModal> {
           const SizedBox.square(dimension: 8),
           IconButton(
             onPressed: () => setState(() {
-              widget.setTool(Pen.ballpointPen());
+              final p = Pen.ballpointPen();
+              Pen.currentPen = p;
+              widget.setTool(p);
             }),
             style: TextButton.styleFrom(
               foregroundColor: Pen.currentPen.icon == Pen.ballpointPenIcon
@@ -354,7 +388,9 @@ class _PenModalState extends State<PenModal> {
           const SizedBox.square(dimension: 8),
           IconButton(
             onPressed: () => setState(() {
-              widget.setTool(Pen.calligraphyPen());
+              final p = Pen.calligraphyPen();
+              Pen.currentPen = p;
+              widget.setTool(p);
             }),
             style: TextButton.styleFrom(
               foregroundColor: Pen.currentPen.icon == Pen.calligraphyPenIcon
@@ -379,8 +415,89 @@ class _PenModalState extends State<PenModal> {
               ),
             ),
           ),
+          const SizedBox.square(dimension: 8),
+          IconButton(
+            onPressed: () => setState(() {
+              final p = Pen.advancedPen();
+              Pen.currentPen = p;
+              widget.setTool(p);
+            }),
+            style: TextButton.styleFrom(
+              foregroundColor: Pen.currentPen.icon == Pen.advancedPenIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+              backgroundColor: Pen.currentPen.icon == Pen.advancedPenIcon
+                  ? Theme.of(
+                      context,
+                    ).colorScheme.secondary.withValues(alpha: 0.1)
+                  : Colors.transparent,
+              shape: const CircleBorder(),
+            ),
+            tooltip: t.editor.pens.advancedPen,
+            icon: Icon(
+              Icons.tune,
+              color: Pen.currentPen.icon == Pen.advancedPenIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+            ),
+          ),
+          const SizedBox.square(dimension: 8),
+          IconButton(
+            onPressed: () => setState(() {
+              final p = Pen.advancedPencil();
+              Pen.currentPen = p;
+              widget.setTool(p);
+            }),
+            style: TextButton.styleFrom(
+              foregroundColor: Pen.currentPen.icon == Pen.advancedPencilIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+              backgroundColor: Pen.currentPen.icon == Pen.advancedPencilIcon
+                  ? Theme.of(
+                      context,
+                    ).colorScheme.secondary.withValues(alpha: 0.1)
+                  : Colors.transparent,
+              shape: const CircleBorder(),
+            ),
+            tooltip: t.editor.pens.advancedPencil,
+            icon: Icon(
+              Icons.edit_note,
+              color: Pen.currentPen.icon == Pen.advancedPencilIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+            ),
+          ),
+        ],
+        if (currentPen.toolId == ToolId.advancedPen) ...[
+          const SizedBox.square(dimension: 12),
+          AdvancedPenPresets(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
+          const SizedBox.square(dimension: 12),
+          AdvancedPenSettings(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
+        ],
+        if (currentPen.toolId == ToolId.advancedPencil) ...[
+          const SizedBox.square(dimension: 12),
+          AdvancedPencilPresets(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
+          const SizedBox.square(dimension: 12),
+          AdvancedPencilSettings(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
         ],
       ],
     );
   }
+
+  static bool _supportsNeon(ToolId id) => id == ToolId.ballpointPen;
+
+  static ValueListenable<bool> _neonStow(ToolId id) =>
+      stows.lastBallpointPenNeon;
 }

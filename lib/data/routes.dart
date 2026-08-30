@@ -15,6 +15,8 @@ abstract class RoutePaths {
   static const login = '/login';
   static const logs = '/logs';
   static const vaultPdfLoadOverrides = '/settings/vault-pdf-load-overrides';
+  static const settingsNoteDefaults = '/settings/note-defaults';
+  static const settingsInkDefaults = '/settings/ink-defaults';
 
   static const prefixOfHome = '/home';
 

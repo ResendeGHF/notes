@@ -2,13 +2,16 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:saber/components/files/file_tree.dart';
-import 'package:saber/components/home/new_note_button.dart';
+import 'package:saber/components/navbar/home_shell_layout.dart';
 import 'package:saber/components/theming/adaptive_icon.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/i18n/strings.g.dart';
+import 'package:saber/services/background_operation_queue.dart';
 
 class VerticalNavbar extends StatefulWidget {
   const VerticalNavbar({
@@ -18,6 +21,17 @@ class VerticalNavbar extends StatefulWidget {
     this.onDestinationSelected,
   });
 
+  /// Width when the file-tree rail is open.
+  static const double expandedWidth = 320;
+
+  /// Width when the rail is icons-only.
+  static const double collapsedWidth = 72;
+
+  /// Extra panel beside the icon rail when expanded.
+  static const double panelWidth = expandedWidth - collapsedWidth;
+
+  static const Duration expandDuration = Duration(milliseconds: 260);
+
   final List<NavigationRailDestination> destinations;
   final int selectedIndex;
   final ValueChanged<int>? onDestinationSelected;
@@ -26,11 +40,60 @@ class VerticalNavbar extends StatefulWidget {
   State<VerticalNavbar> createState() => _VerticalNavbarState();
 }
 
-class _VerticalNavbarState extends State<VerticalNavbar> {
-  var expanded = true;
+class _VerticalNavbarState extends State<VerticalNavbar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _expandController;
+  late final Animation<double> _expand;
+
+  /// Logical expanded flag used for body inset + chrome. Visual width follows
+  /// [_expand] so the file tree keeps a stable 320px layout during the anim.
+  var _expanded = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _expandController = AnimationController(
+      vsync: this,
+      duration: VerticalNavbar.expandDuration,
+      value: 1,
+    );
+    _expand = CurvedAnimation(
+      parent: _expandController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    HomeShellLayout.verticalNavExpanded.value = true;
+    HomeShellLayout.verticalNavExpandT.value = 1;
+    _expandController.addListener(_publishExpandT);
+  }
+
+  void _publishExpandT() {
+    HomeShellLayout.verticalNavExpandT.value = _expand.value;
+  }
+
+  @override
+  void dispose() {
+    _expandController.removeListener(_publishExpandT);
+    _expandController.dispose();
+    super.dispose();
+  }
 
   void _toggleExpanded() {
-    setState(() => expanded = !expanded);
+    final next = !_expanded;
+    _expanded = next;
+    if (next) {
+      // Expand: reserve body space immediately, chrome grows into the gap.
+      HomeShellLayout.verticalNavExpanded.value = true;
+      _expandController.forward();
+    } else {
+      // Collapse: animate chrome first, then release body space once — so the
+      // expensive home-grid relayout doesn't compete with the rail animation.
+      _expandController.reverse().whenComplete(() {
+        if (!mounted || _expanded) return;
+        HomeShellLayout.verticalNavExpanded.value = false;
+      });
+    }
+    setState(() {});
   }
 
   @override
@@ -38,487 +101,439 @@ class _VerticalNavbarState extends State<VerticalNavbar> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
-
     final surfaceColor = isDark ? const Color(0xFF111111) : colorScheme.surface;
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      width: expanded ? 320 : 72,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: surfaceColor,
-        borderRadius: const BorderRadius.horizontal(right: Radius.circular(16)),
-        border: Border(
-          right: BorderSide(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.15),
-            width: 1,
+    final rail = Theme(
+      data: theme.copyWith(
+        highlightColor: Colors.transparent,
+        splashColor: Colors.transparent,
+        splashFactory: NoSplash.splashFactory,
+        hoverColor: Colors.transparent,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: _toggleExpanded,
+                    style: ButtonStyle(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      padding: const WidgetStatePropertyAll(EdgeInsets.all(10)),
+                      minimumSize:
+                          const WidgetStatePropertyAll(Size.square(44)),
+                      visualDensity: VisualDensity.compact,
+                      overlayColor:
+                          const WidgetStatePropertyAll(Colors.transparent),
+                    ),
+                    icon: AdaptiveIcon(
+                      icon: _expanded ? Icons.menu_open : Icons.menu,
+                      cupertinoIcon: _expanded
+                          ? CupertinoIcons.sidebar_left
+                          : CupertinoIcons.sidebar_right,
+                    ),
+                    tooltip:
+                        _expanded ? 'Collapse sidebar' : 'Expand sidebar',
+                  ),
+                  FadeTransition(
+                    opacity: _expand,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(width: 8),
+                        Text(
+                          t.editor.navigation.title,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: colorScheme.onSurface,
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          for (final entry in widget.destinations.asMap().entries)
+            _DestinationRow(
+              destination: entry.value,
+              selected: entry.key == widget.selectedIndex,
+              isDark: isDark,
+              labelOpacity: _expand,
+              onTap: () => widget.onDestinationSelected?.call(entry.key),
+            ),
+          Expanded(
+            child: FadeTransition(
+              opacity: _expand,
+              child: TickerMode(
+                enabled: _expanded || _expandController.isAnimating,
+                child: IgnorePointer(
+                  ignoring: !_expanded && !_expandController.isAnimating,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        child: Divider(height: 1),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 8,
+                        ),
+                        child: Text(
+                          'FILES',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                            letterSpacing: 1.0,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const Expanded(
+                        child: RepaintBoundary(child: FileTree()),
+                      ),
+                      ValueListenableBuilder<BackgroundOperationUiState>(
+                        valueListenable: BackgroundOperationQueue.uiState,
+                        builder: (context, state, _) {
+                          if (!state.isActive) {
+                            return const SizedBox(height: 8);
+                          }
+                          return _TaskCard(state: state, showDetails: true);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    // Clip an always-320 layout down to the animated width. FileTree keeps
+    // stable constraints for the whole animation (no per-frame relayout).
+    return AnimatedBuilder(
+      animation: _expand,
+      builder: (context, child) {
+        final width = VerticalNavbar.collapsedWidth +
+            (VerticalNavbar.expandedWidth - VerticalNavbar.collapsedWidth) *
+                _expand.value;
+        return RepaintBoundary(
+          child: Material(
+            color: surfaceColor,
+            elevation: 0,
+            clipBehavior: Clip.hardEdge,
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.only(
+                bottomRight: Radius.circular(16),
+              ),
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(
+                  right: BorderSide(
+                    color: colorScheme.outlineVariant.withValues(alpha: 0.15),
+                    width: 1,
+                  ),
+                ),
+              ),
+              child: SizedBox(
+                width: width,
+                height: double.infinity,
+                child: ClipRect(
+                  child: OverflowBox(
+                    alignment: Alignment.topLeft,
+                    minWidth: VerticalNavbar.expandedWidth,
+                    maxWidth: VerticalNavbar.expandedWidth,
+                    child: SizedBox(
+                      width: VerticalNavbar.expandedWidth,
+                      height: double.infinity,
+                      child: child,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      child: rail,
+    );
+  }
+}
+
+class _DestinationRow extends StatelessWidget {
+  const _DestinationRow({
+    required this.destination,
+    required this.selected,
+    required this.isDark,
+    required this.labelOpacity,
+    required this.onTap,
+  });
+
+  final NavigationRailDestination destination;
+  final bool selected;
+  final bool isDark;
+  final Animation<double> labelOpacity;
+  final VoidCallback onTap;
+
+  static const double _iconSlot = 48;
+  /// Full-row highlight inside the expanded rail (320 - 24 side margins).
+  static const double _expandedHighlight = 296;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final color = selected
+        ? (isDark ? Colors.white : Colors.black)
+        : colorScheme.onSurfaceVariant;
+    final icon =
+        (selected ? destination.selectedIcon : null) ?? destination.icon;
+
+    // Icon sits in the collapsed rail column (72) so its center matches the
+    // accent square when clipped; label lives in the expanding panel.
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: SizedBox(
+          height: _iconSlot,
+          child: AnimatedBuilder(
+            animation: labelOpacity,
+            builder: (context, child) {
+              final t = labelOpacity.value.clamp(0.0, 1.0);
+              final highlightWidth =
+                  _iconSlot + (_expandedHighlight - _iconSlot) * t;
+              // Keep the square centered on the icon; grow extra width to the
+              // end (into the label) as the rail expands.
+              final iconCenterX = VerticalNavbar.collapsedWidth / 2;
+              final highlightLeft = iconCenterX - _iconSlot / 2;
+              return Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  if (selected)
+                    Positioned(
+                      left: highlightLeft,
+                      top: 0,
+                      width: highlightWidth,
+                      height: _iconSlot,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.blueGrey.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  child!,
+                ],
+              );
+            },
+            child: Row(
+              children: [
+                SizedBox(
+                  width: VerticalNavbar.collapsedWidth,
+                  child: Center(
+                    child: SizedBox(
+                      width: _iconSlot,
+                      height: _iconSlot,
+                      child: IconTheme(
+                        data: IconThemeData(color: color, size: 24),
+                        child: icon,
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: FadeTransition(
+                      opacity: labelOpacity,
+                      child: DefaultTextStyle(
+                        style: theme.textTheme.labelLarge!.copyWith(
+                          color: color,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        child: destination.label,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
-      child: Theme(
-        data: theme.copyWith(highlightColor: Colors.transparent),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    );
+  }
+}
 
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 16,
+class _TaskCard extends StatelessWidget {
+  const _TaskCard({required this.state, required this.showDetails});
+
+  final BackgroundOperationUiState state;
+  final bool showDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      onPressed: _toggleExpanded,
-                      icon: AdaptiveIcon(
-                        icon: expanded ? Icons.menu_open : Icons.menu,
-                        cupertinoIcon: expanded
-                            ? CupertinoIcons.sidebar_left
-                            : CupertinoIcons.sidebar_right,
-                      ),
-                      tooltip: expanded ? 'Collapse sidebar' : 'Expand sidebar',
-                    ),
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 350),
-                      curve: Curves.easeOutCubic,
-                      child: expanded
-                          ? Row(
-                              key: const ValueKey('expanded'),
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const SizedBox(width: 8),
-                                Text(
-                                  t.editor.navigation.title,
-                                  style: theme.textTheme.titleLarge?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                    color: colorScheme.onSurface,
-                                    letterSpacing: -0.5,
-                                  ),
-                                ),
-                              ],
-                            )
-                          : const SizedBox.shrink(key: ValueKey('collapsed')),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: widget.destinations.asMap().entries.map((entry) {
-                final index = entry.key;
-                final d = entry.value;
-                final isSelected = widget.selectedIndex == index;
-
-                final color = isSelected
-                    ? (isDark ? Colors.white : Colors.black)
-                    : colorScheme.onSurfaceVariant;
-                final icon = (isSelected ? d.selectedIcon : null) ?? d.icon;
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 4,
-                  ),
-                  child: InkWell(
-                    onTap: () => widget.onDestinationSelected?.call(index),
-                    borderRadius: BorderRadius.circular(12),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 280),
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? Colors.blueGrey.withValues(alpha: 0.25)
-                            : Colors.transparent,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: ClipRect(
-                        child: OverflowBox(
-                          alignment: Alignment.centerLeft,
-                          maxWidth: 296,
-                          minWidth: 296,
-                          child: Row(
-                            children: [
-                              SizedBox(
-                                width: 48,
-                                child: IconTheme(
-                                  data: IconThemeData(color: color, size: 24),
-                                  child: icon,
-                                ),
-                              ),
-                              Expanded(
-                                child: AnimatedOpacity(
-                                  duration: const Duration(milliseconds: 350),
-                                  curve: Curves.easeOutCubic,
-                                  opacity: expanded ? 1.0 : 0.0,
-                                  child: DefaultTextStyle(
-                                    style: theme.textTheme.labelLarge!.copyWith(
-                                      color: color,
-                                      fontWeight: isSelected
-                                          ? FontWeight.w600
-                                          : FontWeight.w500,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    child: d.label,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-
-            Expanded(
-              child: AnimatedOpacity(
-                opacity: expanded ? 1.0 : 0.0,
-                duration: const Duration(milliseconds: 350),
-                curve: Curves.easeOutCubic,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                        const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          child: Divider(height: 1),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 8,
-                          ),
-                          child: Text(
-                            'FILES',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: colorScheme.onSurfaceVariant,
-                              letterSpacing: 1.0,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const Expanded(child: FileTree()),
-                        ValueListenableBuilder<ImportStatus>(
-                          valueListenable: ImportManager.status,
-                          builder: (context, status, child) {
-                            return AnimatedSize(
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOutCubic,
-                              child: status.isImporting
-                                  ? Container(
-                                      width: double.infinity,
-                                      padding: const EdgeInsets.all(12),
-                                      margin: const EdgeInsets.fromLTRB(
-                                        16,
-                                        8,
-                                        16,
-                                        16,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: colorScheme
-                                            .surfaceContainerHighest
-                                            .withValues(alpha: 0.5),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                          color: colorScheme.outlineVariant
-                                              .withValues(alpha: 0.3),
-                                        ),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Row(
-                                            children: [
-                                              const SizedBox(
-                                                width: 14,
-                                                height: 14,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              ),
-                                              const SizedBox(width: 12),
-                                              Expanded(
-                                                child: Text(
-                                                  status.isParsing
-                                                      ? 'Parsing files...'
-                                                      : 'Importing...',
-                                                  style: theme
-                                                      .textTheme
-                                                      .labelSmall
-                                                      ?.copyWith(
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                ),
-                                              ),
-                                              if (!status.isParsing &&
-                                                  status.countText.isNotEmpty)
-                                                Text(
-                                                  status.countText,
-                                                  style: theme
-                                                      .textTheme
-                                                      .labelSmall
-                                                      ?.copyWith(
-                                                        color: colorScheme
-                                                            .onSurfaceVariant,
-                                                      ),
-                                                ),
-                                            ],
-                                          ),
-                                          if (!status.isParsing) ...[
-                                            const SizedBox(height: 12),
-                                            ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(4),
-                                              child: LinearProgressIndicator(
-                                                value: status.progress,
-                                                minHeight: 4,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 6),
-                                            Text(
-                                              status.fileName,
-                                              style: theme.textTheme.bodySmall
-                                                  ?.copyWith(
-                                                    color: colorScheme
-                                                        .onSurfaceVariant,
-                                                    fontSize: 10,
-                                                  ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            );
-                          },
-                        ),
-                        ValueListenableBuilder<ExportStatus>(
-                          valueListenable: ExportManager.status,
-                          builder: (context, status, child) {
-                            return AnimatedSize(
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOutCubic,
-                              child: status.isExporting
-                                  ? Container(
-                                      margin: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                        vertical: 8,
-                                      ),
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: colorScheme.surfaceContainerHigh,
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color:
-                                                  colorScheme.primaryContainer,
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                            child: Icon(
-                                              Icons.save_rounded,
-                                              size: 18,
-                                              color: colorScheme
-                                                  .onPrimaryContainer,
-                                            ),
-                                          ),
-                                          if (expanded) ...[
-                                            const SizedBox(width: 12),
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    t.export.exportingNote,
-                                                    style: theme
-                                                        .textTheme
-                                                        .labelMedium
-                                                        ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  ClipRRect(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          2,
-                                                        ),
-                                                    child:
-                                                        LinearProgressIndicator(
-                                                          value:
-                                                              status.progress,
-                                                          minHeight: 4,
-                                                        ),
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  Text(
-                                                    status.currentFile,
-                                                    style: theme
-                                                        .textTheme
-                                                        .bodySmall
-                                                        ?.copyWith(
-                                                          color: colorScheme
-                                                              .onSurfaceVariant,
-                                                          fontSize: 10,
-                                                        ),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            );
-                          },
-                        ),
-                        ValueListenableBuilder<BackupStatus>(
-                          valueListenable: BackupManager.status,
-                          builder: (context, status, child) {
-                            return AnimatedSize(
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOutCubic,
-                              child: status.isRunning
-                                  ? Container(
-                                      margin: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                        vertical: 8,
-                                      ),
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: colorScheme.surfaceContainerHigh,
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color:
-                                                  colorScheme.primaryContainer,
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                            child: Icon(
-                                              Icons.cloud_upload_rounded,
-                                              size: 18,
-                                              color: colorScheme
-                                                  .onPrimaryContainer,
-                                            ),
-                                          ),
-                                          if (expanded) ...[
-                                            const SizedBox(width: 12),
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    'Backing up...',
-                                                    style: theme
-                                                        .textTheme
-                                                        .labelMedium
-                                                        ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  ClipRRect(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          2,
-                                                        ),
-                                                    child:
-                                                        LinearProgressIndicator(
-                                                          value:
-                                                              status.progress,
-                                                          minHeight: 4,
-                                                        ),
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  Text(
-                                                    status.currentFile,
-                                                    style: theme
-                                                        .textTheme
-                                                        .bodySmall
-                                                        ?.copyWith(
-                                                          color: colorScheme
-                                                              .onSurfaceVariant,
-                                                          fontSize: 10,
-                                                        ),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            IconButton(
-                                              icon: const Icon(
-                                                Icons.close,
-                                                size: 16,
-                                              ),
-                                              onPressed:
-                                                  BackupManager.cancelBackup,
-                                              padding: EdgeInsets.zero,
-                                              constraints:
-                                                  const BoxConstraints(),
-                                              color:
-                                                  colorScheme.onSurfaceVariant,
-                                              tooltip: 'Cancel Backup',
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            );
-                          },
-                        ),
-                  ],
+                child: Icon(
+                  switch (state.kind!) {
+                    BackgroundOperationKind.importFile =>
+                      Icons.download_rounded,
+                    BackgroundOperationKind.exportFile => Icons.save_rounded,
+                    BackgroundOperationKind.backup =>
+                      Icons.cloud_upload_rounded,
+                    BackgroundOperationKind.restoreBackup =>
+                      Icons.cloud_download_rounded,
+                  },
+                  size: 18,
+                  color: colorScheme.onPrimaryContainer,
                 ),
               ),
-            ),
-          ],
+              if (showDetails) ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        state.headline,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 6),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(2),
+                        child: LinearProgressIndicator(
+                          value: state.indeterminate ? null : state.progress,
+                          minHeight: 4,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      _VerticalNavbarTaskMarquee(
+                        text: [
+                          if (state.headline.isNotEmpty) state.headline,
+                          if (state.detail.isNotEmpty) state.detail,
+                        ].join(' · '),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (state.kind == BackgroundOperationKind.backup)
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16),
+                    onPressed: BackupManager.cancelBackup,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    color: colorScheme.onSurfaceVariant,
+                    tooltip: 'Cancel backup',
+                  ),
+              ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _VerticalNavbarTaskMarquee extends StatefulWidget {
+  const _VerticalNavbarTaskMarquee({required this.text, required this.style});
+
+  final String text;
+  final TextStyle? style;
+
+  @override
+  State<_VerticalNavbarTaskMarquee> createState() =>
+      _VerticalNavbarTaskMarqueeState();
+}
+
+class _VerticalNavbarTaskMarqueeState
+    extends State<_VerticalNavbarTaskMarquee> {
+  Timer? _timer;
+  int _tick = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 280), (_) {
+      if (mounted) setState(() => _tick++);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _line() {
+    final t = widget.text.trim();
+    if (t.isEmpty) return '…';
+    const maxChars = 40;
+    if (t.length <= maxChars) return t;
+    final loop = '$t     ';
+    final start = _tick % loop.length;
+    final buf = StringBuffer();
+    for (var i = 0; i < maxChars; i++) {
+      buf.write(loop[(start + i) % loop.length]);
+    }
+    return buf.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      _line(),
+      maxLines: 1,
+      overflow: TextOverflow.clip,
+      style: widget.style,
     );
   }
 }

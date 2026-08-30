@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';

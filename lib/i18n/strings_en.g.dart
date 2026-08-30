@@ -1,7 +1,3 @@
-// SPDX-FileCopyrightText: 2022 Adil Hanney <https://github.com/adil192>
-// SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 ///
 /// Generated file. Do not edit.
 ///
@@ -39,25 +35,25 @@ class Translations with BaseTranslations<AppLocale, Translations> {
 	Translations $copyWith({TranslationMetadata<AppLocale, Translations>? meta}) => Translations(meta: meta ?? this.$meta);
 
 	// Translations
-	late final TranslationsCommonEn common = TranslationsCommonEn.internal(_root);
-	late final TranslationsHomeEn home = TranslationsHomeEn.internal(_root);
-	late final TranslationsSentryEn sentry = TranslationsSentryEn.internal(_root);
-	late final TranslationsSettingsEn settings = TranslationsSettingsEn.internal(_root);
-	late final TranslationsLogsEn logs = TranslationsLogsEn.internal(_root);
-	late final TranslationsLoginEn login = TranslationsLoginEn.internal(_root);
-	late final TranslationsProfileEn profile = TranslationsProfileEn.internal(_root);
-	late final TranslationsAppInfoEn appInfo = TranslationsAppInfoEn.internal(_root);
-	late final TranslationsUpdateEn update = TranslationsUpdateEn.internal(_root);
-	late final TranslationsEditorEn editor = TranslationsEditorEn.internal(_root);
-	late final TranslationsExportEn export = TranslationsExportEn.internal(_root);
-	late final TranslationsVaultEn vault = TranslationsVaultEn.internal(_root);
-	late final TranslationsToolbarEn toolbar = TranslationsToolbarEn.internal(_root);
-	late final TranslationsBackupEn backup = TranslationsBackupEn.internal(_root);
+	late final Translations$common$en common = Translations$common$en.internal(_root);
+	late final Translations$home$en home = Translations$home$en.internal(_root);
+	late final Translations$sentry$en sentry = Translations$sentry$en.internal(_root);
+	late final Translations$settings$en settings = Translations$settings$en.internal(_root);
+	late final Translations$logs$en logs = Translations$logs$en.internal(_root);
+	late final Translations$login$en login = Translations$login$en.internal(_root);
+	late final Translations$profile$en profile = Translations$profile$en.internal(_root);
+	late final Translations$appInfo$en appInfo = Translations$appInfo$en.internal(_root);
+	late final Translations$update$en update = Translations$update$en.internal(_root);
+	late final Translations$editor$en editor = Translations$editor$en.internal(_root);
+	late final Translations$export$en export = Translations$export$en.internal(_root);
+	late final Translations$vault$en vault = Translations$vault$en.internal(_root);
+	late final Translations$toolbar$en toolbar = Translations$toolbar$en.internal(_root);
+	late final Translations$backup$en backup = Translations$backup$en.internal(_root);
 }
 
 // Path: common
-class TranslationsCommonEn {
-	TranslationsCommonEn.internal(this._root);
+class Translations$common$en {
+	Translations$common$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -77,14 +73,14 @@ class TranslationsCommonEn {
 }
 
 // Path: home
-class TranslationsHomeEn {
-	TranslationsHomeEn.internal(this._root);
+class Translations$home$en {
+	Translations$home$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
 	// Translations
-	late final TranslationsHomeFolderColorEn folderColor = TranslationsHomeFolderColorEn.internal(_root);
-	late final TranslationsHomeSortNamesEn sortNames = TranslationsHomeSortNamesEn.internal(_root);
+	late final Translations$home$folderColor$en folderColor = Translations$home$folderColor$en.internal(_root);
+	late final Translations$home$sortNames$en sortNames = Translations$home$sortNames$en.internal(_root);
 
 	/// en: 'Select all'
 	String get selectAllNotes => 'Select all';
@@ -92,11 +88,11 @@ class TranslationsHomeEn {
 	/// en: 'Deselect all'
 	String get deselectAllNotes => 'Deselect all';
 
-	late final TranslationsHomeTabsEn tabs = TranslationsHomeTabsEn.internal(_root);
-	late final TranslationsHomeTitlesEn titles = TranslationsHomeTitlesEn.internal(_root);
-	late final TranslationsHomeGraphEn graph = TranslationsHomeGraphEn.internal(_root);
-	late final TranslationsHomeTooltipsEn tooltips = TranslationsHomeTooltipsEn.internal(_root);
-	late final TranslationsHomeCreateEn create = TranslationsHomeCreateEn.internal(_root);
+	late final Translations$home$tabs$en tabs = Translations$home$tabs$en.internal(_root);
+	late final Translations$home$titles$en titles = Translations$home$titles$en.internal(_root);
+	late final Translations$home$graph$en graph = Translations$home$graph$en.internal(_root);
+	late final Translations$home$tooltips$en tooltips = Translations$home$tooltips$en.internal(_root);
+	late final Translations$home$create$en create = Translations$home$create$en.internal(_root);
 
 	/// en: 'Welcome to Notes'
 	String get welcome => 'Welcome to Notes';
@@ -110,22 +106,24 @@ class TranslationsHomeEn {
 	/// en: 'No preview available'
 	String get noPreviewAvailable => 'No preview available';
 
+	late final Translations$home$fileList$en fileList = Translations$home$fileList$en.internal(_root);
+
 	/// en: 'Tap the + button to create a new note'
 	String get createNewNote => 'Tap the + button to create a new note';
 
 	/// en: 'Go back to the previous folder'
 	String get backFolder => 'Go back to the previous folder';
 
-	late final TranslationsHomeNewFolderEn newFolder = TranslationsHomeNewFolderEn.internal(_root);
-	late final TranslationsHomeRenameNoteEn renameNote = TranslationsHomeRenameNoteEn.internal(_root);
-	late final TranslationsHomeMoveNoteEn moveNote = TranslationsHomeMoveNoteEn.internal(_root);
+	late final Translations$home$newFolder$en newFolder = Translations$home$newFolder$en.internal(_root);
+	late final Translations$home$renameNote$en renameNote = Translations$home$renameNote$en.internal(_root);
+	late final Translations$home$moveNote$en moveNote = Translations$home$moveNote$en.internal(_root);
 
 	/// en: 'Delete note'
 	String get deleteNote => 'Delete note';
 
-	late final TranslationsHomeRenameFolderEn renameFolder = TranslationsHomeRenameFolderEn.internal(_root);
-	late final TranslationsHomeDeleteFolderEn deleteFolder = TranslationsHomeDeleteFolderEn.internal(_root);
-	late final TranslationsHomeMoveFolderEn moveFolder = TranslationsHomeMoveFolderEn.internal(_root);
+	late final Translations$home$renameFolder$en renameFolder = Translations$home$renameFolder$en.internal(_root);
+	late final Translations$home$deleteFolder$en deleteFolder = Translations$home$deleteFolder$en.internal(_root);
+	late final Translations$home$moveFolder$en moveFolder = Translations$home$moveFolder$en.internal(_root);
 
 	/// en: 'Folder Color'
 	String get folderColorTitle => 'Folder Color';
@@ -207,29 +205,30 @@ class TranslationsHomeEn {
 }
 
 // Path: sentry
-class TranslationsSentryEn {
-	TranslationsSentryEn.internal(this._root);
+class Translations$sentry$en {
+	Translations$sentry$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
 	// Translations
-	late final TranslationsSentryConsentEn consent = TranslationsSentryConsentEn.internal(_root);
+	late final Translations$sentry$consent$en consent = Translations$sentry$consent$en.internal(_root);
 }
 
 // Path: settings
-class TranslationsSettingsEn {
-	TranslationsSettingsEn.internal(this._root);
+class Translations$settings$en {
+	Translations$settings$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
 	// Translations
-	late final TranslationsSettingsPrefLabelsEn prefLabels = TranslationsSettingsPrefLabelsEn.internal(_root);
-	late final TranslationsSettingsPrefDescriptionsEn prefDescriptions = TranslationsSettingsPrefDescriptionsEn.internal(_root);
-	late final TranslationsSettingsThemeVariantsEn themeVariants = TranslationsSettingsThemeVariantsEn.internal(_root);
-	late final TranslationsSettingsPrefCategoriesEn prefCategories = TranslationsSettingsPrefCategoriesEn.internal(_root);
-	late final TranslationsSettingsThemeModesEn themeModes = TranslationsSettingsThemeModesEn.internal(_root);
-	late final TranslationsSettingsLayoutSizesEn layoutSizes = TranslationsSettingsLayoutSizesEn.internal(_root);
-	late final TranslationsSettingsAccentColorPickerEn accentColorPicker = TranslationsSettingsAccentColorPickerEn.internal(_root);
+	late final Translations$settings$prefLabels$en prefLabels = Translations$settings$prefLabels$en.internal(_root);
+	late final Translations$settings$prefDescriptions$en prefDescriptions = Translations$settings$prefDescriptions$en.internal(_root);
+	late final Translations$settings$themeVariants$en themeVariants = Translations$settings$themeVariants$en.internal(_root);
+	late final Translations$settings$prefCategories$en prefCategories = Translations$settings$prefCategories$en.internal(_root);
+	late final Translations$settings$noteInkDefaults$en noteInkDefaults = Translations$settings$noteInkDefaults$en.internal(_root);
+	late final Translations$settings$themeModes$en themeModes = Translations$settings$themeModes$en.internal(_root);
+	late final Translations$settings$layoutSizes$en layoutSizes = Translations$settings$layoutSizes$en.internal(_root);
+	late final Translations$settings$accentColorPicker$en accentColorPicker = Translations$settings$accentColorPicker$en.internal(_root);
 
 	/// en: 'Auto'
 	String get systemLanguage => 'Auto';
@@ -240,7 +239,7 @@ class TranslationsSettingsEn {
 		'Bottom',
 		'Left',
 	];
-	late final TranslationsSettingsResetEn reset = TranslationsSettingsResetEn.internal(_root);
+	late final Translations$settings$reset$en reset = Translations$settings$reset$en.internal(_root);
 
 	/// en: 'Resync everything'
 	String get resyncEverything => 'Resync everything';
@@ -248,7 +247,7 @@ class TranslationsSettingsEn {
 	/// en: 'Open Saber folder'
 	String get openDataDir => 'Open Saber folder';
 
-	late final TranslationsSettingsCustomDataDirEn customDataDir = TranslationsSettingsCustomDataDirEn.internal(_root);
+	late final Translations$settings$customDataDir$en customDataDir = Translations$settings$customDataDir$en.internal(_root);
 
 	/// en: 'Never'
 	String get autosaveDisabled => 'Never';
@@ -291,8 +290,8 @@ class TranslationsSettingsEn {
 }
 
 // Path: logs
-class TranslationsLogsEn {
-	TranslationsLogsEn.internal(this._root);
+class Translations$logs$en {
+	Translations$logs$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -315,8 +314,8 @@ class TranslationsLogsEn {
 }
 
 // Path: login
-class TranslationsLoginEn {
-	TranslationsLoginEn.internal(this._root);
+class Translations$login$en {
+	Translations$login$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -325,7 +324,7 @@ class TranslationsLoginEn {
 	/// en: 'Login'
 	String get title => 'Login';
 
-	late final TranslationsLoginFormEn form = TranslationsLoginFormEn.internal(_root);
+	late final Translations$login$form$en form = Translations$login$form$en.internal(_root);
 
 	/// en: 'Don't have an account yet? ${linkToSignup(Sign up now)}!'
 	TextSpan signup({required InlineSpanBuilder linkToSignup}) => TextSpan(children: [
@@ -341,14 +340,14 @@ class TranslationsLoginEn {
 		const TextSpan(text: '.'),
 	]);
 
-	late final TranslationsLoginStatusEn status = TranslationsLoginStatusEn.internal(_root);
-	late final TranslationsLoginNcLoginStepEn ncLoginStep = TranslationsLoginNcLoginStepEn.internal(_root);
-	late final TranslationsLoginEncLoginStepEn encLoginStep = TranslationsLoginEncLoginStepEn.internal(_root);
+	late final Translations$login$status$en status = Translations$login$status$en.internal(_root);
+	late final Translations$login$ncLoginStep$en ncLoginStep = Translations$login$ncLoginStep$en.internal(_root);
+	late final Translations$login$encLoginStep$en encLoginStep = Translations$login$encLoginStep$en.internal(_root);
 }
 
 // Path: profile
-class TranslationsProfileEn {
-	TranslationsProfileEn.internal(this._root);
+class Translations$profile$en {
+	Translations$profile$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -366,22 +365,22 @@ class TranslationsProfileEn {
 	/// en: 'Connected to'
 	String get connectedTo => 'Connected to';
 
-	late final TranslationsProfileQuickLinksEn quickLinks = TranslationsProfileQuickLinksEn.internal(_root);
+	late final Translations$profile$quickLinks$en quickLinks = Translations$profile$quickLinks$en.internal(_root);
 
 	/// en: 'Frequently asked questions'
 	String get faqTitle => 'Frequently asked questions';
 
 	List<dynamic> get faq => [
-		TranslationsProfile$faq$0i0$En.internal(_root),
-		TranslationsProfile$faq$0i1$En.internal(_root),
-		TranslationsProfile$faq$0i2$En.internal(_root),
-		TranslationsProfile$faq$0i3$En.internal(_root),
+		Translations$profile$faq$0$en.internal(_root),
+		Translations$profile$faq$1$en.internal(_root),
+		Translations$profile$faq$2$en.internal(_root),
+		Translations$profile$faq$3$en.internal(_root),
 	];
 }
 
 // Path: appInfo
-class TranslationsAppInfoEn {
-	TranslationsAppInfoEn.internal(this._root);
+class Translations$appInfo$en {
+	Translations$appInfo$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -404,8 +403,8 @@ class TranslationsAppInfoEn {
 }
 
 // Path: update
-class TranslationsUpdateEn {
-	TranslationsUpdateEn.internal(this._root);
+class Translations$update$en {
+	Translations$update$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -425,25 +424,26 @@ class TranslationsUpdateEn {
 }
 
 // Path: editor
-class TranslationsEditorEn {
-	TranslationsEditorEn.internal(this._root);
+class Translations$editor$en {
+	Translations$editor$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
 	// Translations
-	late final TranslationsEditorNavigationEn navigation = TranslationsEditorNavigationEn.internal(_root);
-	late final TranslationsEditorPensEn pens = TranslationsEditorPensEn.internal(_root);
-	late final TranslationsEditorSelectionBarEn selectionBar = TranslationsEditorSelectionBarEn.internal(_root);
-	late final TranslationsEditorToolbarEn toolbar = TranslationsEditorToolbarEn.internal(_root);
-	late final TranslationsEditorPenOptionsEn penOptions = TranslationsEditorPenOptionsEn.internal(_root);
-	late final TranslationsEditorColorsEn colors = TranslationsEditorColorsEn.internal(_root);
-	late final TranslationsEditorPdfLoadingEn pdfLoading = TranslationsEditorPdfLoadingEn.internal(_root);
-	late final TranslationsEditorVaultPdfLargeRamEn vaultPdfLargeRam = TranslationsEditorVaultPdfLargeRamEn.internal(_root);
-	late final TranslationsEditorImageOptionsEn imageOptions = TranslationsEditorImageOptionsEn.internal(_root);
-	late final TranslationsEditorMenuEn menu = TranslationsEditorMenuEn.internal(_root);
-	late final TranslationsEditorNewerFileFormatEn newerFileFormat = TranslationsEditorNewerFileFormatEn.internal(_root);
-	late final TranslationsEditorQuillEn quill = TranslationsEditorQuillEn.internal(_root);
-	late final TranslationsEditorHudEn hud = TranslationsEditorHudEn.internal(_root);
+	late final Translations$editor$navigation$en navigation = Translations$editor$navigation$en.internal(_root);
+	late final Translations$editor$pens$en pens = Translations$editor$pens$en.internal(_root);
+	late final Translations$editor$selectionBar$en selectionBar = Translations$editor$selectionBar$en.internal(_root);
+	late final Translations$editor$toolbar$en toolbar = Translations$editor$toolbar$en.internal(_root);
+	late final Translations$editor$penOptions$en penOptions = Translations$editor$penOptions$en.internal(_root);
+	late final Translations$editor$penSizePresets$en penSizePresets = Translations$editor$penSizePresets$en.internal(_root);
+	late final Translations$editor$colors$en colors = Translations$editor$colors$en.internal(_root);
+	late final Translations$editor$pdfLoading$en pdfLoading = Translations$editor$pdfLoading$en.internal(_root);
+	late final Translations$editor$vaultPdfLargeRam$en vaultPdfLargeRam = Translations$editor$vaultPdfLargeRam$en.internal(_root);
+	late final Translations$editor$imageOptions$en imageOptions = Translations$editor$imageOptions$en.internal(_root);
+	late final Translations$editor$menu$en menu = Translations$editor$menu$en.internal(_root);
+	late final Translations$editor$newerFileFormat$en newerFileFormat = Translations$editor$newerFileFormat$en.internal(_root);
+	late final Translations$editor$quill$en quill = Translations$editor$quill$en.internal(_root);
+	late final Translations$editor$hud$en hud = Translations$editor$hud$en.internal(_root);
 
 	/// en: 'Pages'
 	String get pages => 'Pages';
@@ -504,9 +504,6 @@ class TranslationsEditorEn {
 
 	/// en: 'Go Back'
 	String get goBack => 'Go Back';
-
-	/// en: 'Large erase throttled to avoid running out of memory — finishing in the background'
-	String get areaEraserMemorySafeQueue => 'Large erase throttled to avoid running out of memory — finishing in the background';
 
 	/// en: 'Add'
 	String get add => 'Add';
@@ -609,8 +606,8 @@ class TranslationsEditorEn {
 }
 
 // Path: export
-class TranslationsExportEn {
-	TranslationsExportEn.internal(this._root);
+class Translations$export$en {
+	Translations$export$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -774,8 +771,8 @@ class TranslationsExportEn {
 }
 
 // Path: vault
-class TranslationsVaultEn {
-	TranslationsVaultEn.internal(this._root);
+class Translations$vault$en {
+	Translations$vault$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -787,8 +784,8 @@ class TranslationsVaultEn {
 	/// en: 'Vault Locked'
 	String get vaultLocked => 'Vault Locked';
 
-	/// en: 'Your notes are encrypted. Please enter your password to access them.'
-	String get vaultLockedMessage => 'Your notes are encrypted. Please enter your password to access them.';
+	/// en: 'Please enter your password.'
+	String get vaultLockedMessage => 'Please enter your password.';
 
 	/// en: 'You have $count file(s) waiting to import. Unlock to continue.'
 	String filesWaitingToImport({required Object count}) => 'You have ${count} file(s) waiting to import. Unlock to continue.';
@@ -942,8 +939,8 @@ class TranslationsVaultEn {
 }
 
 // Path: toolbar
-class TranslationsToolbarEn {
-	TranslationsToolbarEn.internal(this._root);
+class Translations$toolbar$en {
+	Translations$toolbar$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1080,8 +1077,8 @@ class TranslationsToolbarEn {
 }
 
 // Path: backup
-class TranslationsBackupEn {
-	TranslationsBackupEn.internal(this._root);
+class Translations$backup$en {
+	Translations$backup$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1092,11 +1089,14 @@ class TranslationsBackupEn {
 
 	/// en: '$current / $total assets synced'
 	String notificationBody({required Object current, required Object total}) => '${current} / ${total} assets synced';
+
+	/// en: 'Restoring backup...'
+	String get restoreProgressTitle => 'Restoring backup...';
 }
 
 // Path: home.folderColor
-class TranslationsHomeFolderColorEn {
-	TranslationsHomeFolderColorEn.internal(this._root);
+class Translations$home$folderColor$en {
+	Translations$home$folderColor$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1113,8 +1113,8 @@ class TranslationsHomeFolderColorEn {
 }
 
 // Path: home.sortNames
-class TranslationsHomeSortNamesEn {
-	TranslationsHomeSortNamesEn.internal(this._root);
+class Translations$home$sortNames$en {
+	Translations$home$sortNames$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1137,8 +1137,8 @@ class TranslationsHomeSortNamesEn {
 }
 
 // Path: home.tabs
-class TranslationsHomeTabsEn {
-	TranslationsHomeTabsEn.internal(this._root);
+class Translations$home$tabs$en {
+	Translations$home$tabs$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1161,8 +1161,8 @@ class TranslationsHomeTabsEn {
 }
 
 // Path: home.titles
-class TranslationsHomeTitlesEn {
-	TranslationsHomeTitlesEn.internal(this._root);
+class Translations$home$titles$en {
+	Translations$home$titles$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1185,8 +1185,8 @@ class TranslationsHomeTitlesEn {
 }
 
 // Path: home.graph
-class TranslationsHomeGraphEn {
-	TranslationsHomeGraphEn.internal(this._root);
+class Translations$home$graph$en {
+	Translations$home$graph$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1206,8 +1206,8 @@ class TranslationsHomeGraphEn {
 }
 
 // Path: home.tooltips
-class TranslationsHomeTooltipsEn {
-	TranslationsHomeTooltipsEn.internal(this._root);
+class Translations$home$tooltips$en {
+	Translations$home$tooltips$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1233,8 +1233,8 @@ class TranslationsHomeTooltipsEn {
 }
 
 // Path: home.create
-class TranslationsHomeCreateEn {
-	TranslationsHomeCreateEn.internal(this._root);
+class Translations$home$create$en {
+	Translations$home$create$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1250,9 +1250,33 @@ class TranslationsHomeCreateEn {
 	String get infiniteNote => 'Infinite note';
 }
 
+// Path: home.fileList
+class Translations$home$fileList$en {
+	Translations$home$fileList$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Size'
+	String get metaSize => 'Size';
+
+	/// en: 'Modified'
+	String get metaModified => 'Modified';
+
+	/// en: 'Accessed'
+	String get metaAccessed => 'Accessed';
+
+	/// en: 'Notes inside'
+	String get metaNotesInside => 'Notes inside';
+
+	/// en: 'Not opened in the app yet'
+	String get accessedUnavailableVault => 'Not opened in the app yet';
+}
+
 // Path: home.newFolder
-class TranslationsHomeNewFolderEn {
-	TranslationsHomeNewFolderEn.internal(this._root);
+class Translations$home$newFolder$en {
+	Translations$home$newFolder$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1278,8 +1302,8 @@ class TranslationsHomeNewFolderEn {
 }
 
 // Path: home.renameNote
-class TranslationsHomeRenameNoteEn {
-	TranslationsHomeRenameNoteEn.internal(this._root);
+class Translations$home$renameNote$en {
+	Translations$home$renameNote$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1305,8 +1329,8 @@ class TranslationsHomeRenameNoteEn {
 }
 
 // Path: home.moveNote
-class TranslationsHomeMoveNoteEn {
-	TranslationsHomeMoveNoteEn.internal(this._root);
+class Translations$home$moveNote$en {
+	Translations$home$moveNote$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1335,8 +1359,8 @@ class TranslationsHomeMoveNoteEn {
 }
 
 // Path: home.renameFolder
-class TranslationsHomeRenameFolderEn {
-	TranslationsHomeRenameFolderEn.internal(this._root);
+class Translations$home$renameFolder$en {
+	Translations$home$renameFolder$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1362,8 +1386,8 @@ class TranslationsHomeRenameFolderEn {
 }
 
 // Path: home.deleteFolder
-class TranslationsHomeDeleteFolderEn {
-	TranslationsHomeDeleteFolderEn.internal(this._root);
+class Translations$home$deleteFolder$en {
+	Translations$home$deleteFolder$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1383,8 +1407,8 @@ class TranslationsHomeDeleteFolderEn {
 }
 
 // Path: home.moveFolder
-class TranslationsHomeMoveFolderEn {
-	TranslationsHomeMoveFolderEn.internal(this._root);
+class Translations$home$moveFolder$en {
+	Translations$home$moveFolder$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1407,8 +1431,8 @@ class TranslationsHomeMoveFolderEn {
 }
 
 // Path: sentry.consent
-class TranslationsSentryConsentEn {
-	TranslationsSentryConsentEn.internal(this._root);
+class Translations$sentry$consent$en {
+	Translations$sentry$consent$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1417,13 +1441,13 @@ class TranslationsSentryConsentEn {
 	/// en: 'Help improve Saber?'
 	String get title => 'Help improve Saber?';
 
-	late final TranslationsSentryConsentDescriptionEn description = TranslationsSentryConsentDescriptionEn.internal(_root);
-	late final TranslationsSentryConsentAnswersEn answers = TranslationsSentryConsentAnswersEn.internal(_root);
+	late final Translations$sentry$consent$description$en description = Translations$sentry$consent$description$en.internal(_root);
+	late final Translations$sentry$consent$answers$en answers = Translations$sentry$consent$answers$en.internal(_root);
 }
 
 // Path: settings.prefLabels
-class TranslationsSettingsPrefLabelsEn {
-	TranslationsSettingsPrefLabelsEn.internal(this._root);
+class Translations$settings$prefLabels$en {
+	Translations$settings$prefLabels$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1452,6 +1476,12 @@ class TranslationsSettingsPrefLabelsEn {
 
 	/// en: 'Toolbar color slots'
 	String get toolbarColorSlotsCount => 'Toolbar color slots';
+
+	/// en: 'Pen size presets'
+	String get penSizePresetCount => 'Pen size presets';
+
+	/// en: 'Preset'
+	String get penSizePresetSlot => 'Preset';
 
 	/// en: 'Theme variant'
 	String get themeVariant => 'Theme variant';
@@ -1542,8 +1572,8 @@ class TranslationsSettingsPrefLabelsEn {
 }
 
 // Path: settings.prefDescriptions
-class TranslationsSettingsPrefDescriptionsEn {
-	TranslationsSettingsPrefDescriptionsEn.internal(this._root);
+class Translations$settings$prefDescriptions$en {
+	Translations$settings$prefDescriptions$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1560,6 +1590,9 @@ class TranslationsSettingsPrefDescriptionsEn {
 
 	/// en: 'Number of colors to show in the toolbar'
 	String get toolbarColorSlotsCount => 'Number of colors to show in the toolbar';
+
+	/// en: 'Number of stroke-width presets shown in the editor toolbar'
+	String get penSizePresetCount => 'Number of stroke-width presets shown in the editor toolbar';
 
 	/// en: 'Color scheme variant'
 	String get themeVariant => 'Color scheme variant';
@@ -1582,7 +1615,7 @@ class TranslationsSettingsPrefDescriptionsEn {
 	/// en: 'Larger images will be compressed'
 	String get maxImageSize => 'Larger images will be compressed';
 
-	late final TranslationsSettingsPrefDescriptionsHideFingerDrawingEn hideFingerDrawing = TranslationsSettingsPrefDescriptionsHideFingerDrawingEn.internal(_root);
+	late final Translations$settings$prefDescriptions$hideFingerDrawing$en hideFingerDrawing = Translations$settings$prefDescriptions$hideFingerDrawing$en.internal(_root);
 
 	/// en: 'Turn off finger drawing when a stylus is detected'
 	String get autoDisableFingerDrawingWhenStylusDetected => 'Turn off finger drawing when a stylus is detected';
@@ -1608,12 +1641,12 @@ class TranslationsSettingsPrefDescriptionsEn {
 	/// en: 'Tell me about updates as soon as they're available'
 	String get shouldAlwaysAlertForUpdates => 'Tell me about updates as soon as they\'re available';
 
-	late final TranslationsSettingsPrefDescriptionsSentryEn sentry = TranslationsSettingsPrefDescriptionsSentryEn.internal(_root);
+	late final Translations$settings$prefDescriptions$sentry$en sentry = Translations$settings$prefDescriptions$sentry$en.internal(_root);
 }
 
 // Path: settings.themeVariants
-class TranslationsSettingsThemeVariantsEn {
-	TranslationsSettingsThemeVariantsEn.internal(this._root);
+class Translations$settings$themeVariants$en {
+	Translations$settings$themeVariants$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1627,8 +1660,8 @@ class TranslationsSettingsThemeVariantsEn {
 }
 
 // Path: settings.prefCategories
-class TranslationsSettingsPrefCategoriesEn {
-	TranslationsSettingsPrefCategoriesEn.internal(this._root);
+class Translations$settings$prefCategories$en {
+	Translations$settings$prefCategories$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1653,9 +1686,84 @@ class TranslationsSettingsPrefCategoriesEn {
 	String get advanced => 'Advanced';
 }
 
+// Path: settings.noteInkDefaults
+class Translations$settings$noteInkDefaults$en {
+	Translations$settings$noteInkDefaults$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Note & ink defaults'
+	String get sectionTitle => 'Note & ink defaults';
+
+	/// en: 'Change note defaults'
+	String get changeNoteDefaults => 'Change note defaults';
+
+	/// en: 'Pattern, spacing, colors, and margins for new notes'
+	String get changeNoteDefaultsSubtitle => 'Pattern, spacing, colors, and margins for new notes';
+
+	/// en: 'Change ink defaults'
+	String get changeInkDefaults => 'Change ink defaults';
+
+	/// en: 'Toolbar colors, stroke widths, and palettes'
+	String get changeInkDefaultsSubtitle => 'Toolbar colors, stroke widths, and palettes';
+
+	/// en: 'Note defaults'
+	String get noteDefaultsTitle => 'Note defaults';
+
+	/// en: 'Live preview — used when you create a note'
+	String get noteDefaultsSubtitle => 'Live preview — used when you create a note';
+
+	/// en: 'Ink defaults'
+	String get inkDefaultsTitle => 'Ink defaults';
+
+	/// en: 'Palettes and toolbar colors'
+	String get inkDefaultsSubtitle => 'Palettes and toolbar colors';
+
+	/// en: 'Palette'
+	String get activePalette => 'Palette';
+
+	/// en: 'Palette'
+	String get palettePickerLabel => 'Palette';
+
+	/// en: 'New palette from current'
+	String get savePaletteAsNew => 'New palette from current';
+
+	/// en: 'New palette'
+	String get savePaletteAsNewShort => 'New palette';
+
+	/// en: 'Save palette'
+	String get savePaletteAsNewTitle => 'Save palette';
+
+	/// en: 'Tap a swatch to recolor toolbar slots.'
+	String get toolbarSlotsHint => 'Tap a swatch to recolor toolbar slots.';
+
+	/// en: 'Rename palette'
+	String get renamePalette => 'Rename palette';
+
+	/// en: 'Rename palette'
+	String get renamePaletteTitle => 'Rename palette';
+
+	/// en: 'Name'
+	String get paletteNameHint => 'Name';
+
+	/// en: 'Remove this palette? Toolbar colors stay until you choose another palette.'
+	String get deletePaletteConfirm => 'Remove this palette? Toolbar colors stay until you choose another palette.';
+
+	/// en: 'Colors in toolbar'
+	String get toolbarSlotsDropdownLabel => 'Colors in toolbar';
+
+	/// en: 'Toolbar slot $index'
+	String toolbarSlotColor({required Object index}) => 'Toolbar slot ${index}';
+
+	/// en: 'Stroke width presets'
+	String get penSizePresetCountLabel => 'Stroke width presets';
+}
+
 // Path: settings.themeModes
-class TranslationsSettingsThemeModesEn {
-	TranslationsSettingsThemeModesEn.internal(this._root);
+class Translations$settings$themeModes$en {
+	Translations$settings$themeModes$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1672,8 +1780,8 @@ class TranslationsSettingsThemeModesEn {
 }
 
 // Path: settings.layoutSizes
-class TranslationsSettingsLayoutSizesEn {
-	TranslationsSettingsLayoutSizesEn.internal(this._root);
+class Translations$settings$layoutSizes$en {
+	Translations$settings$layoutSizes$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1690,8 +1798,8 @@ class TranslationsSettingsLayoutSizesEn {
 }
 
 // Path: settings.accentColorPicker
-class TranslationsSettingsAccentColorPickerEn {
-	TranslationsSettingsAccentColorPickerEn.internal(this._root);
+class Translations$settings$accentColorPicker$en {
+	Translations$settings$accentColorPicker$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1702,8 +1810,8 @@ class TranslationsSettingsAccentColorPickerEn {
 }
 
 // Path: settings.reset
-class TranslationsSettingsResetEn {
-	TranslationsSettingsResetEn.internal(this._root);
+class Translations$settings$reset$en {
+	Translations$settings$reset$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1717,8 +1825,8 @@ class TranslationsSettingsResetEn {
 }
 
 // Path: settings.customDataDir
-class TranslationsSettingsCustomDataDirEn {
-	TranslationsSettingsCustomDataDirEn.internal(this._root);
+class Translations$settings$customDataDir$en {
+	Translations$settings$customDataDir$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1741,8 +1849,8 @@ class TranslationsSettingsCustomDataDirEn {
 }
 
 // Path: login.form
-class TranslationsLoginFormEn {
-	TranslationsLoginFormEn.internal(this._root);
+class Translations$login$form$en {
+	Translations$login$form$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1757,8 +1865,8 @@ class TranslationsLoginFormEn {
 }
 
 // Path: login.status
-class TranslationsLoginStatusEn {
-	TranslationsLoginStatusEn.internal(this._root);
+class Translations$login$status$en {
+	Translations$login$status$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1781,8 +1889,8 @@ class TranslationsLoginStatusEn {
 }
 
 // Path: login.ncLoginStep
-class TranslationsLoginNcLoginStepEn {
-	TranslationsLoginNcLoginStepEn.internal(this._root);
+class Translations$login$ncLoginStep$en {
+	Translations$login$ncLoginStep$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1806,12 +1914,12 @@ class TranslationsLoginNcLoginStepEn {
 	/// en: 'Login with Nextcloud'
 	String get loginWithNextcloud => 'Login with Nextcloud';
 
-	late final TranslationsLoginNcLoginStepLoginFlowEn loginFlow = TranslationsLoginNcLoginStepLoginFlowEn.internal(_root);
+	late final Translations$login$ncLoginStep$loginFlow$en loginFlow = Translations$login$ncLoginStep$loginFlow$en.internal(_root);
 }
 
 // Path: login.encLoginStep
-class TranslationsLoginEncLoginStepEn {
-	TranslationsLoginEncLoginStepEn.internal(this._root);
+class Translations$login$encLoginStep$en {
+	Translations$login$encLoginStep$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1836,15 +1944,15 @@ class TranslationsLoginEncLoginStepEn {
 	String get connectionFailed => 'Something went wrong connecting to the server. Please try again later.';
 
 	List<dynamic> get encFaq => [
-		TranslationsLoginEncLoginStep$encFaq$0i0$En.internal(_root),
-		TranslationsLoginEncLoginStep$encFaq$0i1$En.internal(_root),
-		TranslationsLoginEncLoginStep$encFaq$0i2$En.internal(_root),
+		Translations$login$encLoginStep$encFaq$0$en.internal(_root),
+		Translations$login$encLoginStep$encFaq$1$en.internal(_root),
+		Translations$login$encLoginStep$encFaq$2$en.internal(_root),
 	];
 }
 
 // Path: profile.quickLinks
-class TranslationsProfileQuickLinksEn {
-	TranslationsProfileQuickLinksEn.internal(this._root);
+class Translations$profile$quickLinks$en {
+	Translations$profile$quickLinks$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1858,8 +1966,8 @@ class TranslationsProfileQuickLinksEn {
 }
 
 // Path: profile.faq.0
-class TranslationsProfile$faq$0i0$En {
-	TranslationsProfile$faq$0i0$En.internal(this._root);
+class Translations$profile$faq$0$en {
+	Translations$profile$faq$0$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1873,8 +1981,8 @@ class TranslationsProfile$faq$0i0$En {
 }
 
 // Path: profile.faq.1
-class TranslationsProfile$faq$0i1$En {
-	TranslationsProfile$faq$0i1$En.internal(this._root);
+class Translations$profile$faq$1$en {
+	Translations$profile$faq$1$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1888,8 +1996,8 @@ class TranslationsProfile$faq$0i1$En {
 }
 
 // Path: profile.faq.2
-class TranslationsProfile$faq$0i2$En {
-	TranslationsProfile$faq$0i2$En.internal(this._root);
+class Translations$profile$faq$2$en {
+	Translations$profile$faq$2$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1903,8 +2011,8 @@ class TranslationsProfile$faq$0i2$En {
 }
 
 // Path: profile.faq.3
-class TranslationsProfile$faq$0i3$En {
-	TranslationsProfile$faq$0i3$En.internal(this._root);
+class Translations$profile$faq$3$en {
+	Translations$profile$faq$3$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1918,8 +2026,8 @@ class TranslationsProfile$faq$0i3$En {
 }
 
 // Path: editor.navigation
-class TranslationsEditorNavigationEn {
-	TranslationsEditorNavigationEn.internal(this._root);
+class Translations$editor$navigation$en {
+	Translations$editor$navigation$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1928,8 +2036,29 @@ class TranslationsEditorNavigationEn {
 	/// en: 'Notes'
 	String get title => 'Notes';
 
-	/// en: 'PDF Outlines'
-	String get pdfOutlines => 'PDF Outlines';
+	/// en: 'Outlines'
+	String get pdfOutlines => 'Outlines';
+
+	/// en: 'No outline entries'
+	String get noPdfOutlineEntries => 'No outline entries';
+
+	/// en: 'Add outlines to bookmark pages in this note. They are included when you export as PDF.'
+	String get noOutlineEntriesHint => 'Add outlines to bookmark pages in this note. They are included when you export as PDF.';
+
+	/// en: 'Add outline for current page'
+	String get addOutlineForPage => 'Add outline for current page';
+
+	/// en: 'Rename outline'
+	String get renameOutline => 'Rename outline';
+
+	/// en: 'Delete outline'
+	String get deleteOutline => 'Delete outline';
+
+	/// en: 'Title'
+	String get outlineTitle => 'Title';
+
+	/// en: 'Outline actions'
+	String get outlineActions => 'Outline actions';
 
 	/// en: 'First page'
 	String get firstPage => 'First page';
@@ -1948,8 +2077,8 @@ class TranslationsEditorNavigationEn {
 }
 
 // Path: editor.pens
-class TranslationsEditorPensEn {
-	TranslationsEditorPensEn.internal(this._root);
+class Translations$editor$pens$en {
+	Translations$editor$pens$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -1964,6 +2093,12 @@ class TranslationsEditorPensEn {
 	/// en: 'Ballpoint pen'
 	String get ballpointPen => 'Ballpoint pen';
 
+	/// en: 'Advanced pen'
+	String get advancedPen => 'Advanced pen';
+
+	/// en: 'Advanced pencil'
+	String get advancedPencil => 'Advanced pencil';
+
 	/// en: 'Highlighter'
 	String get highlighter => 'Highlighter';
 
@@ -1975,8 +2110,8 @@ class TranslationsEditorPensEn {
 }
 
 // Path: editor.selectionBar
-class TranslationsEditorSelectionBarEn {
-	TranslationsEditorSelectionBarEn.internal(this._root);
+class Translations$editor$selectionBar$en {
+	Translations$editor$selectionBar$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2005,11 +2140,23 @@ class TranslationsEditorSelectionBarEn {
 
 	/// en: 'Share as SVG'
 	String get shareAsSvg => 'Share as SVG';
+
+	/// en: 'Change color'
+	String get changeColor => 'Change color';
+
+	/// en: 'Change stroke type'
+	String get changeStrokeType => 'Change stroke type';
+
+	/// en: 'Change stroke type'
+	String get changeStrokeTypeTitle => 'Change stroke type';
+
+	/// en: 'Convert selected strokes to another pen.'
+	String get changeStrokeTypeHint => 'Convert selected strokes to another pen.';
 }
 
 // Path: editor.toolbar
-class TranslationsEditorToolbarEn {
-	TranslationsEditorToolbarEn.internal(this._root);
+class Translations$editor$toolbar$en {
+	Translations$editor$toolbar$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2047,11 +2194,35 @@ class TranslationsEditorToolbarEn {
 
 	/// en: 'Toggle fullscreen'
 	String get fullscreen => 'Toggle fullscreen';
+
+	/// en: 'Region screenshot'
+	String get regionScreenshot => 'Region screenshot';
+
+	/// en: 'Drag to select an area'
+	String get regionScreenshotHint => 'Drag to select an area';
+
+	/// en: 'Share or copy screenshot?'
+	String get regionScreenshotTitle => 'Share or copy screenshot?';
+
+	/// en: 'Share with another app, or copy the image to the clipboard.'
+	String get regionScreenshotBody => 'Share with another app, or copy the image to the clipboard.';
+
+	/// en: 'Share'
+	String get regionScreenshotShare => 'Share';
+
+	/// en: 'Copy to clipboard'
+	String get regionScreenshotCopy => 'Copy to clipboard';
+
+	/// en: 'Selection too small'
+	String get regionScreenshotTooSmall => 'Selection too small';
+
+	/// en: 'Failed to capture screenshot'
+	String get regionScreenshotFailed => 'Failed to capture screenshot';
 }
 
 // Path: editor.penOptions
-class TranslationsEditorPenOptionsEn {
-	TranslationsEditorPenOptionsEn.internal(this._root);
+class Translations$editor$penOptions$en {
+	Translations$editor$penOptions$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2062,11 +2233,107 @@ class TranslationsEditorPenOptionsEn {
 
 	/// en: 'Opacity'
 	String get opacity => 'Opacity';
+
+	/// en: 'Thinning'
+	String get thinning => 'Thinning';
+
+	/// en: 'Smoothing'
+	String get smoothing => 'Smoothing';
+
+	/// en: 'Streamline'
+	String get streamline => 'Streamline';
+
+	/// en: 'Pressure sensitivity'
+	String get pressureSensitivity => 'Pressure sensitivity';
+
+	/// en: 'Velocity thinning'
+	String get velocityThinning => 'Velocity thinning';
+
+	/// en: 'Min width ratio'
+	String get minSizeRatio => 'Min width ratio';
+
+	/// en: 'Max width ratio'
+	String get maxSizeRatio => 'Max width ratio';
+
+	/// en: 'Start taper'
+	String get startTaper => 'Start taper';
+
+	/// en: 'End taper'
+	String get endTaper => 'End taper';
+
+	/// en: 'Width easing'
+	String get easing => 'Width easing';
+
+	/// en: 'Start taper easing'
+	String get startEasing => 'Start taper easing';
+
+	/// en: 'End taper easing'
+	String get endEasing => 'End taper easing';
+
+	/// en: 'Neon stroke'
+	String get neonStroke => 'Neon stroke';
+
+	/// en: 'Preset name'
+	String get presetNameHint => 'Preset name';
+
+	/// en: 'Pencil grain'
+	String get pencilNoise => 'Pencil grain';
+
+	/// en: 'Fast procedural noise (no image tiles). Defaults are tuned for smooth drawing.'
+	String get pencilNoiseHint => 'Fast procedural noise (no image tiles). Defaults are tuned for smooth drawing.';
+
+	/// en: 'Grain size'
+	String get noiseGrainScale => 'Grain size';
+
+	/// en: 'Coverage'
+	String get noiseThreshold => 'Coverage';
+
+	/// en: 'Contrast'
+	String get noiseContrast => 'Contrast';
+
+	/// en: 'Fine speck mix'
+	String get noiseFineMix => 'Fine speck mix';
+
+	/// en: 'Reset grain'
+	String get resetNoiseDefaults => 'Reset grain';
+
+	/// en: 'Stylus pressure'
+	String get pressureMapsTo => 'Stylus pressure';
+
+	/// en: 'Thickness'
+	String get pressureToThickness => 'Thickness';
+
+	/// en: 'Coverage'
+	String get pressureToCoverage => 'Coverage';
+
+	/// en: 'Shadow'
+	String get pencilShadow => 'Shadow';
+}
+
+// Path: editor.penSizePresets
+class Translations$editor$penSizePresets$en {
+	Translations$editor$penSizePresets$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Pen preset $n'
+	String editTitle({required Object n}) => 'Pen preset ${n}';
+
+	/// en: 'Applies from editor toolbar presets (double tap a preset chip to tune it.)'
+	String get editSubtitle => 'Applies from editor toolbar presets (double tap a preset chip to tune it.)';
+
+	/// en: 'Matches pen modal stroke scale; labels match the toolbar pen slider numbering (around 1.0 to 10.0).'
+	String get sameAsPenSlider => 'Matches pen modal stroke scale; labels match the toolbar pen slider numbering (around 1.0 to 10.0).';
+
+	/// en: 'Tap once for preset stroke width; double tap (with editor open) adjusts it for that note.'
+	String get tooltip => 'Tap once for preset stroke width; double tap (with editor open) adjusts it for that note.';
 }
 
 // Path: editor.colors
-class TranslationsEditorColorsEn {
-	TranslationsEditorColorsEn.internal(this._root);
+class Translations$editor$colors$en {
+	Translations$editor$colors$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2152,8 +2419,8 @@ class TranslationsEditorColorsEn {
 }
 
 // Path: editor.pdfLoading
-class TranslationsEditorPdfLoadingEn {
-	TranslationsEditorPdfLoadingEn.internal(this._root);
+class Translations$editor$pdfLoading$en {
+	Translations$editor$pdfLoading$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2167,8 +2434,8 @@ class TranslationsEditorPdfLoadingEn {
 }
 
 // Path: editor.vaultPdfLargeRam
-class TranslationsEditorVaultPdfLargeRamEn {
-	TranslationsEditorVaultPdfLargeRamEn.internal(this._root);
+class Translations$editor$vaultPdfLargeRam$en {
+	Translations$editor$vaultPdfLargeRam$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2185,8 +2452,8 @@ class TranslationsEditorVaultPdfLargeRamEn {
 }
 
 // Path: editor.imageOptions
-class TranslationsEditorImageOptionsEn {
-	TranslationsEditorImageOptionsEn.internal(this._root);
+class Translations$editor$imageOptions$en {
+	Translations$editor$imageOptions$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2212,8 +2479,8 @@ class TranslationsEditorImageOptionsEn {
 }
 
 // Path: editor.menu
-class TranslationsEditorMenuEn {
-	TranslationsEditorMenuEn.internal(this._root);
+class Translations$editor$menu$en {
+	Translations$editor$menu$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2264,13 +2531,13 @@ class TranslationsEditorMenuEn {
 	/// en: 'Editing is disabled while watching the server'
 	String get watchServerReadOnly => 'Editing is disabled while watching the server';
 
-	late final TranslationsEditorMenuBoxFitsEn boxFits = TranslationsEditorMenuBoxFitsEn.internal(_root);
-	late final TranslationsEditorMenuBgPatternsEn bgPatterns = TranslationsEditorMenuBgPatternsEn.internal(_root);
+	late final Translations$editor$menu$boxFits$en boxFits = Translations$editor$menu$boxFits$en.internal(_root);
+	late final Translations$editor$menu$bgPatterns$en bgPatterns = Translations$editor$menu$bgPatterns$en.internal(_root);
 }
 
 // Path: editor.newerFileFormat
-class TranslationsEditorNewerFileFormatEn {
-	TranslationsEditorNewerFileFormatEn.internal(this._root);
+class Translations$editor$newerFileFormat$en {
+	Translations$editor$newerFileFormat$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2290,8 +2557,8 @@ class TranslationsEditorNewerFileFormatEn {
 }
 
 // Path: editor.quill
-class TranslationsEditorQuillEn {
-	TranslationsEditorQuillEn.internal(this._root);
+class Translations$editor$quill$en {
+	Translations$editor$quill$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2302,8 +2569,8 @@ class TranslationsEditorQuillEn {
 }
 
 // Path: editor.hud
-class TranslationsEditorHudEn {
-	TranslationsEditorHudEn.internal(this._root);
+class Translations$editor$hud$en {
+	Translations$editor$hud$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2329,8 +2596,8 @@ class TranslationsEditorHudEn {
 }
 
 // Path: sentry.consent.description
-class TranslationsSentryConsentDescriptionEn {
-	TranslationsSentryConsentDescriptionEn.internal(this._root);
+class Translations$sentry$consent$description$en {
+	Translations$sentry$consent$description$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2357,8 +2624,8 @@ class TranslationsSentryConsentDescriptionEn {
 }
 
 // Path: sentry.consent.answers
-class TranslationsSentryConsentAnswersEn {
-	TranslationsSentryConsentAnswersEn.internal(this._root);
+class Translations$sentry$consent$answers$en {
+	Translations$sentry$consent$answers$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2375,8 +2642,8 @@ class TranslationsSentryConsentAnswersEn {
 }
 
 // Path: settings.prefDescriptions.hideFingerDrawing
-class TranslationsSettingsPrefDescriptionsHideFingerDrawingEn {
-	TranslationsSettingsPrefDescriptionsHideFingerDrawingEn.internal(this._root);
+class Translations$settings$prefDescriptions$hideFingerDrawing$en {
+	Translations$settings$prefDescriptions$hideFingerDrawing$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2393,8 +2660,8 @@ class TranslationsSettingsPrefDescriptionsHideFingerDrawingEn {
 }
 
 // Path: settings.prefDescriptions.sentry
-class TranslationsSettingsPrefDescriptionsSentryEn {
-	TranslationsSettingsPrefDescriptionsSentryEn.internal(this._root);
+class Translations$settings$prefDescriptions$sentry$en {
+	Translations$settings$prefDescriptions$sentry$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2414,8 +2681,8 @@ class TranslationsSettingsPrefDescriptionsSentryEn {
 }
 
 // Path: login.ncLoginStep.loginFlow
-class TranslationsLoginNcLoginStepLoginFlowEn {
-	TranslationsLoginNcLoginStepLoginFlowEn.internal(this._root);
+class Translations$login$ncLoginStep$loginFlow$en {
+	Translations$login$ncLoginStep$loginFlow$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2432,8 +2699,8 @@ class TranslationsLoginNcLoginStepLoginFlowEn {
 }
 
 // Path: login.encLoginStep.encFaq.0
-class TranslationsLoginEncLoginStep$encFaq$0i0$En {
-	TranslationsLoginEncLoginStep$encFaq$0i0$En.internal(this._root);
+class Translations$login$encLoginStep$encFaq$0$en {
+	Translations$login$encLoginStep$encFaq$0$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2447,8 +2714,8 @@ class TranslationsLoginEncLoginStep$encFaq$0i0$En {
 }
 
 // Path: login.encLoginStep.encFaq.1
-class TranslationsLoginEncLoginStep$encFaq$0i1$En {
-	TranslationsLoginEncLoginStep$encFaq$0i1$En.internal(this._root);
+class Translations$login$encLoginStep$encFaq$1$en {
+	Translations$login$encLoginStep$encFaq$1$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2462,8 +2729,8 @@ class TranslationsLoginEncLoginStep$encFaq$0i1$En {
 }
 
 // Path: login.encLoginStep.encFaq.2
-class TranslationsLoginEncLoginStep$encFaq$0i2$En {
-	TranslationsLoginEncLoginStep$encFaq$0i2$En.internal(this._root);
+class Translations$login$encLoginStep$encFaq$2$en {
+	Translations$login$encLoginStep$encFaq$2$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2477,8 +2744,8 @@ class TranslationsLoginEncLoginStep$encFaq$0i2$En {
 }
 
 // Path: editor.menu.boxFits
-class TranslationsEditorMenuBoxFitsEn {
-	TranslationsEditorMenuBoxFitsEn.internal(this._root);
+class Translations$editor$menu$boxFits$en {
+	Translations$editor$menu$boxFits$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 
@@ -2495,8 +2762,8 @@ class TranslationsEditorMenuBoxFitsEn {
 }
 
 // Path: editor.menu.bgPatterns
-class TranslationsEditorMenuBgPatternsEn {
-	TranslationsEditorMenuBgPatternsEn.internal(this._root);
+class Translations$editor$menu$bgPatterns$en {
+	Translations$editor$menu$bgPatterns$en.internal(this._root);
 
 	final Translations _root; // ignore: unused_field
 

@@ -2,11 +2,9 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -124,8 +122,7 @@ class _SizeSlider extends StatelessWidget {
   final void Function(void Function()) setState;
 
   double _sliderToSize(double value) {
-    final double exponent = pen.toolId == ToolId.advancedPen ? 2.2 : 1.0;
-    final curved = math.pow(value.clamp(0.0, 1.0), exponent).toDouble();
+    final curved = value.clamp(0.0, 1.0);
     final size = pen.sizeMin + curved * (pen.sizeMax - pen.sizeMin);
 
     final stepsFromMin = ((size - pen.sizeMin) / pen.sizeStep).round();
@@ -137,9 +134,10 @@ class _SizeSlider extends StatelessWidget {
 
   double _sizeToSlider(double size) {
     final clampedSize = size.clamp(pen.sizeMin, pen.sizeMax);
-    final linear = (clampedSize - pen.sizeMin) / (pen.sizeMax - pen.sizeMin);
-    final double exponent = pen.toolId == ToolId.advancedPen ? 2.2 : 1.0;
-    return math.pow(linear, 1 / exponent).toDouble().clamp(0.0, 1.0);
+    return ((clampedSize - pen.sizeMin) / (pen.sizeMax - pen.sizeMin)).clamp(
+      0.0,
+      1.0,
+    );
   }
 
   double _getValue() => _sizeToSlider(pen.options.size);

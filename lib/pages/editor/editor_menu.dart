@@ -3,65 +3,8 @@
 
 part of 'editor.dart';
 
-enum _MenuPage { main, pageSettings, backgroundSettings, layers }
+enum _MenuPage { main, backgroundSettings, layers, pageSettings, inkDefaults }
 
-const List<Color> _pageColorPresets = [
-
-  Color(0xFFFFFFFF),
-  Color(0xFFFFFBF5),
-  Color(0xFFF8F8F8),
-  Color(0xFFF0F4F8),
-  Color(0xFFF5F0FF),
-  Color(0xFFF8F6F0),
-  Color(0xFFEDEAE6),
-  Color(0xFFE8ECF0),
-  Color(0xFFF5E6E8),
-  Color(0xFFE8F4F0),
-  Color(0xFFF5F5F0),
-  Color(0xFFEEEEF2),
-
-  Color(0xFF1A1A1A),
-  Color(0xFF2D2D2D),
-  Color(0xFF37474F),
-  Color(0xFF263238),
-  Color(0xFF3E2723),
-  Color(0xFF1B2838),
-  Color(0xFF2C1810),
-  Color(0xFF1E2A2A),
-  Color(0xFF2D2432),
-  Color(0xFF252525),
-  Color(0xFF2A2A2E),
-  Color(0xFF1C1C1C),
-];
-
-const List<Color> _lineColorPresets = [
-
-  Color(0xFFBDBDBD),
-  Color(0xFF9E9E9E),
-  Color(0xFF90A4AE),
-  Color(0xFF78909C),
-  Color(0xFFB0BEC5),
-  Color(0xFFA0A0A0),
-  Color(0xFF8D8D8D),
-  Color(0xFF9CA3AF),
-  Color(0xFF94A3B8),
-  Color(0xFFADB5BD),
-  Color(0xFF6B7280),
-  Color(0xFF6B6B6B),
-
-  Color(0xFF616161),
-  Color(0xFF546E7A),
-  Color(0xFF607D8B),
-  Color(0xFF37474F),
-  Color(0xFF455A64),
-  Color(0xFF4A5568),
-  Color(0xFF525252),
-  Color(0xFF424242),
-  Color(0xFF3D3D3D),
-  Color(0xFF2D3748),
-  Color(0xFF374151),
-  Color(0xFF1F2937),
-];
 
 class ModernEditorMenu extends StatefulWidget {
   final EditorCoreInfo coreInfo;
@@ -92,9 +35,6 @@ class ModernEditorMenu extends StatefulWidget {
   final VoidCallback onClearAll;
   final VoidCallback onPickImage;
   final Future<bool> Function() onImportPdf;
-  final Future<void> Function() onPlotFunction;
-  final Future<void> Function() onPlotSurface;
-  final Future<void> Function(int rows, int cols) onInsertTable;
   final Future<void> Function(Uint8List imageBytes)? onInsertMatrixImage;
   final VoidCallback onToggleCalculator;
   final VoidCallback onManageTagsAndLinks;
@@ -121,6 +61,10 @@ class ModernEditorMenu extends StatefulWidget {
   final VoidCallback? onLayersChanged;
 
   final ValueChanged<bool> onToggleGlobalBackgroundInversion;
+  final VoidCallback? onInkDefaultsChanged;
+  /// Snapshot open-note tool prefs before ink-settings overwrites live stows
+  /// with the active preset (restored on cancel).
+  final NoteToolSettings? Function()? captureNoteToolSettingsForInk;
 
   const ModernEditorMenu({
     super.key,
@@ -149,9 +93,6 @@ class ModernEditorMenu extends StatefulWidget {
     required this.onClearAll,
     required this.onPickImage,
     required this.onImportPdf,
-    required this.onPlotFunction,
-    required this.onPlotSurface,
-    required this.onInsertTable,
     this.onInsertMatrixImage,
     required this.onToggleCalculator,
     required this.onManageTagsAndLinks,
@@ -171,6 +112,8 @@ class ModernEditorMenu extends StatefulWidget {
     this.splitAxis,
     this.onLayersChanged,
     required this.onToggleGlobalBackgroundInversion,
+    this.onInkDefaultsChanged,
+    this.captureNoteToolSettingsForInk,
   });
 
   @override
@@ -181,6 +124,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
   _MenuPage _page = _MenuPage.main;
   late bool _localBackgroundInverted;
   late BoxFit _currentFit;
+  NoteToolSettings? _inkSessionBackup;
 
   @override
   void initState() {
@@ -196,29 +140,11 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
-      constraints: const BoxConstraints(maxHeight: 600),
+      constraints: const BoxConstraints(),
       child: AnimatedSwitcher(
         duration: const Duration(milliseconds: 300),
         child: switch (_page) {
           _MenuPage.main => _buildMainMenu(context, colorScheme),
-          _MenuPage.pageSettings => _StyleSettingsView(
-            key: const ValueKey('pageSettings'),
-            title: 'Page Settings (Page ${widget.currentPageIndex + 1})',
-            coreInfo: widget.coreInfo,
-            currentPageIndex: widget.currentPageIndex,
-            invert: widget.invert,
-            onBack: () => setState(() => _page = _MenuPage.main),
-            onSetPattern: widget.onSetPagePattern,
-            onSetLineHeight: widget.onSetPageLineHeight,
-            onSetLineThickness: widget.onSetPageLineThickness,
-            onSetColor: widget.onSetPageColor,
-            onSetLineColor: widget.onSetPageLineColor,
-            onSetPageOrientation: widget.onSetPageOrientation,
-            onSetMargins: widget.onSetMargins,
-            onSetBorderColor: widget.onSetBorderColor,
-            onToggleGlobalBackgroundInversion:
-                widget.onToggleGlobalBackgroundInversion,
-          ),
           _MenuPage.layers => _LayersSettingsView(
             key: const ValueKey('layers'),
             coreInfo: widget.coreInfo,
@@ -230,9 +156,6 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             key: const ValueKey('background'),
             currentFit: _currentFit,
             isInverted: _localBackgroundInverted,
-            pageSize: widget.coreInfo.pages[widget.currentPageIndex].size,
-            backgroundImage:
-                widget.coreInfo.pages[widget.currentPageIndex].backgroundImage,
             onBack: () => setState(() => _page = _MenuPage.main),
             onSetFit: (fit) {
               setState(() => _currentFit = fit);
@@ -247,33 +170,67 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             onRemoveBackground: widget.onRemoveBackground,
             onDeleteBackground: widget.onDeleteBackground,
           ),
+          _MenuPage.pageSettings => _PageSettingsSidebarView(
+            key: const ValueKey('pageSettings'),
+            coreInfo: widget.coreInfo,
+            currentPageIndex: widget.currentPageIndex,
+            onBack: () => setState(() => _page = _MenuPage.main),
+            onSetPattern: widget.onSetPagePattern,
+            onSetLineHeight: widget.onSetPageLineHeight,
+            onSetLineThickness: widget.onSetPageLineThickness,
+            onSetColor: widget.onSetPageColor,
+            onSetLineColor: widget.onSetPageLineColor,
+            onSetPageOrientation: widget.onSetPageOrientation,
+            onSetMargins: widget.onSetMargins,
+            onSetBorderColor: widget.onSetBorderColor,
+            onToggleGlobalBackgroundInversion:
+                widget.onToggleGlobalBackgroundInversion,
+          ),
+          _MenuPage.inkDefaults => _InkDefaultsSidebarView(
+            key: const ValueKey('inkDefaults'),
+            noteSessionBackup: _inkSessionBackup,
+            onChanged: widget.onInkDefaultsChanged,
+            onBack: () => setState(() => _page = _MenuPage.main),
+          ),
         },
       ),
     );
   }
 
   Widget _buildMainMenu(BuildContext context, ColorScheme colors) {
+    final theme = Theme.of(context);
+    final textTheme = theme.textTheme;
 
-    IconData bgIcon = Icons.image;
+    IconData bgIcon = Icons.image_outlined;
     if (widget.hasBackground && widget.coreInfo.pages.isNotEmpty) {
-      final img =
-          widget.coreInfo.pages[widget.currentPageIndex].backgroundImage;
+      final img = widget.coreInfo.pages[widget.currentPageIndex].backgroundImage;
       if (img is PdfEditorImage) {
-        bgIcon = Icons.picture_as_pdf;
+        bgIcon = Icons.picture_as_pdf_outlined;
       }
+    }
+
+    Widget subHeader(String text) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+        child: Text(
+          text,
+          style: textTheme.labelLarge?.copyWith(
+            color: colors.primary,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      );
     }
 
     return ListView(
       key: const ValueKey('main'),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.only(bottom: 24),
       children: [
-        const SizedBox(height: 8),
         if (widget.onSetCustomThumbnail != null) ...[
-          _MenuLargeCard(
-            icon: Icons.image_outlined,
-            title: 'Set Custom Thumbnail',
-            subtitle: 'Choose an image for the note preview',
-            color: colors.surfaceContainerHighest,
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+            leading: const Icon(Icons.image_outlined),
+            title: const Text('Set custom thumbnail'),
             onTap: () {
               widget.onClose();
               Future.delayed(const Duration(milliseconds: 300), () {
@@ -281,259 +238,212 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
               });
             },
           ),
-          const SizedBox(height: 12),
+          const Divider(height: 1),
         ],
-        _MenuLargeCard(
-          icon: Icons.tune,
-          title: 'Page Settings',
-          subtitle: 'Adjust page style (Pattern, Colors, Lines)',
-          color: colors.surfaceContainerHighest,
-          onTap: () => setState(() => _page = _MenuPage.pageSettings),
-        ),
 
-        const SizedBox(height: 12),
-        _MenuLargeCard(
-          icon: Icons.layers,
-          title: "Layers",
-          subtitle: "Add layers, reorder, choose where to draw",
-          color: colors.surfaceContainerHighest,
+        subHeader('Appearance'),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.layers_outlined),
+          title: const Text('Layers'),
           onTap: () => setState(() => _page = _MenuPage.layers),
         ),
-
-        if (widget.hasBackground) ...[
-          const SizedBox(height: 12),
-          _MenuLargeCard(
-            icon: bgIcon,
-            title: "Background Settings",
-            subtitle: "Image & Fit Options",
-            color: colors.surfaceContainerHighest,
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.tune_rounded),
+          title: const Text('Page setup'),
+          onTap: () => setState(() => _page = _MenuPage.pageSettings),
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.brush_outlined),
+          title: Text(t.settings.noteInkDefaults.changeInkDefaults),
+          onTap: () {
+            _inkSessionBackup = widget.captureNoteToolSettingsForInk?.call();
+            setState(() => _page = _MenuPage.inkDefaults);
+          },
+        ),
+        if (widget.hasBackground)
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+            leading: Icon(bgIcon),
+            title: const Text('Background image'),
             onTap: () => setState(() => _page = _MenuPage.backgroundSettings),
           ),
+
+        if (widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
+          const Divider(height: 16),
+          subHeader('Split view'),
+          if (!widget.splitHasSecondary && widget.onOpenSplitView != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: const Icon(Icons.splitscreen_outlined),
+              title: const Text('Open second note'),
+              onTap: () {
+                widget.onClose();
+                widget.onOpenSplitView?.call();
+              },
+            ),
+          if (widget.splitHasSecondary && widget.onReopenSplitView != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: const Icon(Icons.folder_open_outlined),
+              title: const Text('Open different note'),
+              onTap: () {
+                widget.onClose();
+                widget.onReopenSplitView?.call();
+              },
+            ),
+          if (widget.splitHasSecondary && widget.onSwapSplitView != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: const Icon(Icons.swap_horiz_rounded),
+              title: const Text('Swap notes'),
+              onTap: () {
+                widget.onClose();
+                widget.onSwapSplitView?.call();
+              },
+            ),
+          if (widget.splitHasSecondary && widget.onToggleSplitAxis != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: Icon(widget.splitAxis == Axis.vertical ? Icons.vertical_split_outlined : Icons.horizontal_split_outlined),
+              title: Text(widget.splitAxis == Axis.vertical ? 'Vertical split' : 'Horizontal split'),
+              onTap: () {
+                widget.onClose();
+                widget.onToggleSplitAxis?.call();
+              },
+            ),
+          if (widget.splitHasSecondary && widget.onCloseSplitView != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: const Icon(Icons.close_fullscreen_rounded),
+              title: const Text('Close split view'),
+              onTap: () {
+                widget.onClose();
+                widget.onCloseSplitView?.call();
+              },
+            ),
         ],
 
-        const SizedBox(height: 24),
-        if (widget.onOpenSplitView != null ||
-            widget.onCloseSplitView != null ||
-            widget.onReopenSplitView != null ||
-            widget.onSwapSplitView != null ||
-            widget.onToggleSplitAxis != null) ...[
-          Text("Split View", style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 8),
-          _MenuSection(
-            children: [
-              if (!widget.splitHasSecondary && widget.onOpenSplitView != null)
-                _MenuTile(
-                  icon: Icons.view_week,
-                  title: "Open Second Note",
-                  onTap: () {
-                    widget.onClose();
-                    widget.onOpenSplitView?.call();
-                  },
-                ),
-              if (widget.splitHasSecondary && widget.onReopenSplitView != null)
-                _MenuTile(
-                  icon: Icons.folder_open,
-                  title: "Reopen split view",
-                  onTap: () {
-                    widget.onClose();
-                    widget.onReopenSplitView?.call();
-                  },
-                ),
-              if (widget.splitHasSecondary && widget.onSwapSplitView != null)
-                _MenuTile(
-                  icon: Icons.swap_horiz,
-                  title: "Swap Notes",
-                  onTap: () {
-                    widget.onClose();
-                    widget.onSwapSplitView?.call();
-                  },
-                ),
-              if (widget.splitHasSecondary && widget.onToggleSplitAxis != null)
-                _MenuTile(
-                  icon: widget.splitAxis == Axis.vertical
-                      ? Icons.view_week
-                      : Icons.view_day,
-                  title: widget.splitAxis == Axis.vertical
-                      ? "Switch to Left/Right"
-                      : "Switch to Top/Bottom",
-                  onTap: () {
-                    widget.onClose();
-                    widget.onToggleSplitAxis?.call();
-                  },
-                ),
-              if (widget.splitHasSecondary && widget.onCloseSplitView != null)
-                _MenuTile(
-                  icon: Icons.close,
-                  title: "Close Split View",
-                  onTap: () {
-                    widget.onClose();
-                    widget.onCloseSplitView?.call();
-                  },
-                ),
-            ],
+        const Divider(height: 16),
+        subHeader('Insert'),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.add_photo_alternate_outlined),
+          title: const Text('Image'),
+          onTap: () => widget.onPickImage(),
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.picture_as_pdf_outlined),
+          title: const Text('PDF document'),
+          onTap: () async => await widget.onImportPdf(),
+        ),
+        if (widget.onInsertMatrixImage != null)
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+            leading: const Icon(Icons.calculate_outlined),
+            title: const Text('Matrix calculator'),
+            onTap: () async {
+              final result = await _MatrixCalculatorDialog.show(context);
+              if (result != null) {
+                widget.onClose();
+                await widget.onInsertMatrixImage!(result);
+              }
+            },
           ),
-          const SizedBox(height: 16),
-        ],
-        Text("Data & Tools", style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        _MenuSection(
-          children: [
-            _MenuTile(
-              icon: Icons.show_chart,
-              title: "Plot Function",
-              onTap: () async {
-
-                await widget.onPlotFunction();
-                widget.onClose();
-              },
-            ),
-            _MenuTile(
-              icon: Icons.table_chart_outlined,
-              title: "Insert Table",
-              onTap: () async {
-
-                final rowsCols = await _TableDialog.show(context);
-                if (rowsCols != null) {
-                  widget.onClose();
-                  await widget.onInsertTable(rowsCols.$1, rowsCols.$2);
-                }
-              },
-            ),
-            if (widget.onInsertMatrixImage != null)
-              _MenuTile(
-                icon: Icons.data_array,
-                title: "Matrix Calculator",
-                onTap: () async {
-
-                  final result = await _MatrixCalculatorDialog.show(context);
-                  if (result != null) {
-                    widget.onClose();
-                    await widget.onInsertMatrixImage!(result);
-                  }
-                },
-              ),
-            _MenuTile(
-              icon: Icons.link,
-              title: "Tags & Links",
-              onTap: () {
-                widget.onClose();
-                widget.onManageTagsAndLinks();
-              },
-            ),
-            if (widget.onNoteHandwritingToLatex != null)
-              _MenuTile(
-                icon: Icons.functions_outlined,
-                title: t.editor.noteHandwritingToLatex,
-                onTap: () async {
-                  widget.onClose();
-                  await widget.onNoteHandwritingToLatex!();
-                },
-              ),
-            ValueListenableBuilder(
-              valueListenable: stows.enableFingerDrawing,
-              builder: (context, enabled, _) {
-                return _MenuTile(
-                  icon: enabled ? Icons.touch_app : Icons.do_not_touch,
-                  title: "Finger Drawing",
-                  iconColor: enabled ? colors.primary : null,
-                  textColor: enabled ? colors.primary : null,
-                  onTap: () {
-                    stows.enableFingerDrawing.value = !enabled;
-                  },
-                );
-              },
-            ),
-          ],
+        
+        const Divider(height: 16),
+        subHeader('Tools'),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.link_rounded),
+          title: const Text('Tags & links'),
+          onTap: () {
+            widget.onClose();
+            widget.onManageTagsAndLinks();
+          },
+        ),
+        if (widget.onNoteHandwritingToLatex != null)
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+            leading: const Icon(Icons.functions_outlined),
+            title: Text(t.editor.noteHandwritingToLatex),
+            onTap: () async {
+              widget.onClose();
+              await widget.onNoteHandwritingToLatex!();
+            },
+          ),
+        ValueListenableBuilder(
+          valueListenable: stows.enableFingerDrawing,
+          builder: (context, enabled, _) {
+            return SwitchListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              secondary: const Icon(Icons.touch_app_outlined),
+              title: const Text('Finger drawing'),
+              value: enabled,
+              onChanged: (val) => stows.enableFingerDrawing.value = val,
+            );
+          },
         ),
 
-        const SizedBox(height: 16),
-        Text("Insert", style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        _MenuSection(
-          children: [
-            _MenuTile(
-              icon: Icons.image_outlined,
-              title: "Image",
-              onTap: () {
-                widget.onPickImage();
-              },
-            ),
-            _MenuTile(
-              icon: Icons.picture_as_pdf_outlined,
-              title: "PDF",
-              onTap: () async {
-                await widget.onImportPdf();
-              },
-            ),
-          ],
+        const Divider(height: 16),
+        subHeader('Share & export'),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.archive_outlined),
+          title: const Text('Save as .sba'),
+          onTap: () => widget.onExportSba(context),
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.picture_as_pdf_outlined),
+          title: const Text('Save as PDF'),
+          onTap: () => widget.onExportPdf(context),
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.image_outlined),
+          title: const Text('Save as Image'),
+          onTap: () => widget.onExportPng(context),
         ),
 
-        const SizedBox(height: 16),
-        Text("Export", style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        _MenuSection(
-          children: [
-            _MenuTile(
-              icon: Icons.save_as_outlined,
-              title: "Note Archive (.sba)",
-              onTap: () => widget.onExportSba(context),
-            ),
-            _MenuTile(
-              icon: Icons.picture_as_pdf,
-              title: "PDF Document",
-              onTap: () => widget.onExportPdf(context),
-            ),
-            _MenuTile(
-              icon: Icons.image,
-              title: "Image (PNG / JPEG)",
-              onTap: () => widget.onExportPng(context),
-            ),
-          ],
+        const Divider(height: 16),
+        subHeader('Danger zone'),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: Icon(Icons.layers_clear_outlined, color: colors.error),
+          title: Text('Clear current page', style: TextStyle(color: colors.error)),
+          onTap: () {
+            widget.onClose();
+            widget.onClearPage();
+          },
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: Icon(Icons.delete_sweep_outlined, color: colors.error),
+          title: Text('Clear all pages', style: TextStyle(color: colors.error)),
+          onTap: () {
+            widget.onClose();
+            widget.onClearAll();
+          },
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: Icon(Icons.delete_outline, color: colors.error),
+          title: Text('Delete note', style: TextStyle(color: colors.error)),
+          onTap: () async {
+            widget.onClose();
+            await widget.onDeleteNote();
+          },
         ),
 
-        const SizedBox(height: 16),
-        Text("Actions", style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        _MenuSection(
-          children: [
-            _MenuTile(
-              icon: Icons.cleaning_services_outlined,
-              title: "Clear Current Page",
-              textColor: colors.error,
-              iconColor: colors.error,
-              onTap: () {
-                widget.onClose();
-                widget.onClearPage();
-              },
-            ),
-            _MenuTile(
-              icon: Icons.delete_forever_outlined,
-              title: "Clear All Pages",
-              textColor: colors.error,
-              iconColor: colors.error,
-              onTap: () {
-                widget.onClose();
-                widget.onClearAll();
-              },
-            ),
-            _MenuTile(
-              icon: Icons.delete_outline,
-              title: "Delete Note",
-              textColor: colors.error,
-              iconColor: colors.error,
-              onTap: () async {
-                widget.onClose();
-                await widget.onDeleteNote();
-              },
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        _MenuLargeCard(
-          icon: Icons.info_outline,
-          title: "Properties",
-          subtitle: "Note size, dates, and time spent",
-          color: colors.surfaceContainerHighest,
+        const Divider(height: 16),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+          leading: const Icon(Icons.info_outline),
+          title: const Text('Properties'),
           onTap: () async {
             widget.onClose();
             if (widget.onShowProperties != null) {
@@ -543,7 +453,6 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             }
           },
         ),
-        const SizedBox(height: 16),
       ],
     );
   }
@@ -555,19 +464,13 @@ class _MenuSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Theme.of(
-            context,
-          ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-          width: 1,
-        ),
+    // Minimalista: Sem caixas coloridas redundantes.
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
       ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(children: children),
     );
   }
 }
@@ -589,17 +492,20 @@ class _MenuTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
       leading: Icon(
         icon,
-        color: iconColor ?? Theme.of(context).colorScheme.onSurfaceVariant,
+        color: iconColor ?? colorScheme.onSurfaceVariant,
+        size: 22,
       ),
       title: Text(
         title,
         style: TextStyle(
-          color: textColor ?? Theme.of(context).colorScheme.onSurface,
-          fontWeight: FontWeight.w500,
+          color: textColor ?? colorScheme.onSurface,
+          fontWeight: FontWeight.w400,
+          fontSize: 15,
         ),
       ),
       onTap: onTap,
@@ -611,102 +517,62 @@ class _MenuLargeCard extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  final Color color;
   final VoidCallback onTap;
 
   const _MenuLargeCard({
     required this.icon,
     required this.title,
     required this.subtitle,
-    required this.color,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    final colorScheme = Theme.of(context).colorScheme;
+
+    // Converte o "Card Grande com Fundo Escuro" do KDE 
+    // em um ListTile amigável com botão de ícone destacado Material 3.
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Ink(
-        padding: const EdgeInsets.all(16),
+      leading: Container(
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: Theme.of(
-              context,
-            ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-            width: 1,
-          ),
+          color: colorScheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(10),
         ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(
-                  context,
-                ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                icon,
-                size: 24,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+        child: Icon(
+          icon,
+          size: 20,
+          color: colorScheme.onSecondaryContainer,
+        ),
+      ),
+      title: Text(
+        title,
+        style: TextStyle(
+          fontWeight: FontWeight.w500,
+          fontSize: 15,
+          color: colorScheme.onSurface,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: TextStyle(
+          color: colorScheme.onSurfaceVariant,
+          fontSize: 13,
         ),
       ),
     );
   }
 }
 
-class _StyleSettingsView extends StatefulWidget {
-  final String title;
-  final EditorCoreInfo coreInfo;
-  final int currentPageIndex;
-  final bool invert;
-  final VoidCallback onBack;
-  final ValueChanged<CanvasBackgroundPattern>? onSetPattern;
-  final ValueChanged<int> onSetLineHeight;
-  final ValueChanged<double> onSetLineThickness;
-  final ValueChanged<Color> onSetColor;
-  final ValueChanged<Color> onSetLineColor;
-  final ValueChanged<PageOrientation>? onSetPageOrientation;
-  final ValueChanged<bool> onToggleGlobalBackgroundInversion;
-  final void Function(double left, double right, double top, double bottom)?
-  onSetMargins;
-  final ValueChanged<Color>? onSetBorderColor;
-
-  const _StyleSettingsView({
+/// Full-screen page appearance (still used from Settings note-defaults if needed).
+/// Editor sidebar uses [_PageSettingsSidebarView] instead.
+class EditorPageSettingsPage extends StatelessWidget {
+  const EditorPageSettingsPage({
     super.key,
-    required this.title,
     required this.coreInfo,
     required this.currentPageIndex,
-    required this.invert,
-    required this.onBack,
     required this.onSetPattern,
     required this.onSetLineHeight,
     required this.onSetLineThickness,
@@ -718,887 +584,73 @@ class _StyleSettingsView extends StatefulWidget {
     this.onSetBorderColor,
   });
 
-  @override
-  State<_StyleSettingsView> createState() => _StyleSettingsViewState();
-}
-
-class _StyleSettingsViewState extends State<_StyleSettingsView> {
-  late CanvasBackgroundPattern _pattern;
-  late int _lineHeight;
-  late double _lineThickness;
-  late Color _pageColor;
-  late Color _lineColor;
-  late TextEditingController _hexController;
-  late TextEditingController _hexLineController;
-  late Size _pageSize;
-  late bool _invertInDarkMode;
-  late bool _invertBackground;
-  late double _marginLeft;
-  late double _marginRight;
-  late double _marginTop;
-  late double _marginBottom;
-  late Color _borderColor;
-  late TextEditingController _hexBorderController;
-  @override
-  void initState() {
-    super.initState();
-    _hexController = TextEditingController();
-    _hexLineController = TextEditingController();
-    _hexBorderController = TextEditingController();
-    _invertInDarkMode = getEffectiveNoteInvertInDarkModeForFile(
-      widget.coreInfo.filePath,
-    );
-    _invertBackground = getEffectiveNoteInvertBackgroundForFile(
-      widget.coreInfo.filePath,
-    );
-    _syncFromMetadata();
-  }
-
-  @override
-  void didUpdateWidget(covariant _StyleSettingsView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-
-    if (oldWidget.coreInfo != widget.coreInfo) {
-      _syncFromMetadata();
-    }
-  }
-
-  void _syncFromMetadata() {
-    final ci = widget.coreInfo;
-    ci.ensureDocumentDefaultsFromGlobal();
-    _pattern = ci.noteDefaultPattern!;
-    _lineHeight = ci.noteDefaultLineHeight!;
-    _lineThickness = ci.noteDefaultLineThickness!;
-    _pageColor = Color(ci.noteDefaultPageColor!);
-    _lineColor = Color(ci.noteDefaultLineColor!);
-    _marginLeft = ci.noteDefaultMarginLeft!;
-    _marginRight = ci.noteDefaultMarginRight!;
-    _marginTop = ci.noteDefaultMarginTop!;
-    _marginBottom = ci.noteDefaultMarginBottom!;
-    _borderColor = ci.noteDefaultBorderColor != null
-        ? Color(ci.noteDefaultBorderColor!)
-        : Colors.transparent;
-
-    final page = ci.pages[widget.currentPageIndex];
-    _pageSize = page.size;
-
-    _hexBorderController.text =
-        '#${_borderColor.value.toRadixString(16).substring(2).toUpperCase()}';
-    _hexController.text =
-        '#${_pageColor.value.toRadixString(16).substring(2).toUpperCase()}';
-    _hexLineController.text =
-        '#${_lineColor.value.toRadixString(16).substring(2).toUpperCase()}';
-  }
-
-  @override
-  void dispose() {
-    _hexController.dispose();
-    _hexLineController.dispose();
-    _hexBorderController.dispose();
-    super.dispose();
-  }
+  final EditorCoreInfo coreInfo;
+  final int currentPageIndex;
+  final ValueChanged<CanvasBackgroundPattern> onSetPattern;
+  final ValueChanged<int> onSetLineHeight;
+  final ValueChanged<double> onSetLineThickness;
+  final ValueChanged<Color> onSetColor;
+  final ValueChanged<Color> onSetLineColor;
+  final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<bool> onToggleGlobalBackgroundInversion;
+  final void Function(double left, double right, double top, double bottom)?
+      onSetMargins;
+  final ValueChanged<Color>? onSetBorderColor;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    final previewWidget = LayoutBuilder(
-      builder: (context, constraints) {
-        final pageAspect = _pageSize.width / _pageSize.height;
-        final maxW = (constraints.maxWidth - 48).clamp(50.0, double.infinity);
-        final maxH = (constraints.maxHeight - 48).clamp(50.0, double.infinity);
-        double w = maxW;
-        double h = w / pageAspect;
-        if (h > maxH) {
-          h = maxH;
-          w = h * pageAspect;
-        }
-        final previewWidth = w.clamp(50.0, double.infinity);
-        final previewHeight = previewWidth / pageAspect;
-
-        final paintWidth = previewWidth;
-        final content = Container(
-          decoration: BoxDecoration(
-            color: _pageColor,
-            border: Border.all(color: colorScheme.outlineVariant, width: 2),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: CanvasBackgroundPreview(
-            selected: true,
-            invert: _invertInDarkMode,
-            backgroundColor: _pageColor,
-            backgroundPattern: _pattern,
-            backgroundImage: null,
-            pageSize: _pageSize,
-            lineHeight: _lineHeight,
-            lineThickness: _lineThickness.toInt(),
-            lineColor: _lineColor,
-            width: paintWidth,
-            marginLeft: _marginLeft,
-            marginRight: _marginRight,
-            marginTop: _marginTop,
-            marginBottom: _marginBottom,
-            borderColor: _borderColor,
-            key: ValueKey(
-              'preview_${_pattern.index}_$_lineHeight'
-              '_${_lineThickness}_${_lineColor.value}_${_pageColor.value}'
-              '_${_marginLeft}_${_marginRight}_${_marginTop}_${_marginBottom}_${_borderColor.value}',
-            ),
-          ),
-        );
-
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: SizedBox(
-              width: previewWidth,
-              height: previewHeight,
-              child: content,
-            ),
-          ),
-        );
-      },
-    );
-
-    Widget buildModernSwitch({
-      required String title,
-      required String subtitle,
-      required bool value,
-      required ValueChanged<bool> onChanged,
-    }) {
-      return Container(
-        decoration: BoxDecoration(
-          color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-          borderRadius: BorderRadius.circular(12),
+    return Scaffold(
+      backgroundColor: homeAppBarBackgroundColor(context),
+      appBar: AppBar(
+        backgroundColor: homeAppBarBackgroundColor(context),
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          onPressed: () => Navigator.of(context).maybePop(),
         ),
-        child: SwitchListTile(
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 8,
-          ),
-          title: Text(
-            title,
-            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
-          ),
-          subtitle: Text(
-            subtitle,
-            style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 13),
-          ),
-          value: value,
-          onChanged: onChanged,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      );
-    }
-
-    Widget buildSectionTitle(String title) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 12, top: 8),
-        child: Text(
-          title,
-          style: theme.textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w700,
-            color: colorScheme.primary,
-            letterSpacing: 0.3,
-          ),
-        ),
-      );
-    }
-
-    Widget _marginSlider(
-      String label,
-      double value,
-      ValueChanged<double> onChanged,
-    ) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
-              Text(
-                '${value.toInt()}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          Slider(
-            value: value.clamp(0.0, 50.0),
-            min: 0,
-            max: 50,
-            divisions: 50,
-            onChanged: onChanged,
-          ),
-          const SizedBox(height: 12),
-        ],
-      );
-    }
-
-    Widget buildColorPresets(
-      List<Color> presets,
-      Color selected,
-      ValueChanged<Color> onSelect,
-    ) {
-      return SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        clipBehavior: Clip.none,
-        child: Row(
-          children: presets.map((color) {
-            final isSelected = selected.value == color.value;
-            return GestureDetector(
-              onTap: () => onSelect(color),
-              child: Container(
-                margin: const EdgeInsets.only(right: 12),
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: isSelected
-                        ? colorScheme.primary
-                        : colorScheme.outlineVariant.withOpacity(0.5),
-                    width: isSelected ? 3 : 1,
-                  ),
-                  boxShadow: [
-                    if (isSelected)
-                      BoxShadow(
-                        color: colorScheme.primary.withOpacity(0.3),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      )
-                    else
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.05),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                  ],
-                ),
-              ),
-            );
-          }).toList(),
-        ),
-      );
-    }
-
-    final settingsContent = ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-      children: [
-        buildSectionTitle('General Settings'),
-        buildModernSwitch(
-          title: 'Invert in dark mode',
-          subtitle: 'Override app setting just for this note',
-          value: _invertInDarkMode,
-          onChanged: (value) {
-            setState(() => _invertInDarkMode = value);
-            setNoteInvertInDarkModeOverrideForFile(
-              widget.coreInfo.filePath,
-              value,
-            );
-          },
-        ),
-        if (_invertInDarkMode) ...[
-          const SizedBox(height: 12),
-          buildModernSwitch(
-            title: 'Invert Background',
-            subtitle: 'Apply dark mode inversion to background images',
-            value: _invertBackground,
-            onChanged: (value) {
-              setState(() => _invertBackground = value);
-              setNoteInvertBackgroundOverrideForFile(
-                widget.coreInfo.filePath,
-                value,
-              );
-              widget.onToggleGlobalBackgroundInversion(value);
-            },
-          ),
-        ],
-        if (widget.onSetPageOrientation != null) ...[
-          const SizedBox(height: 24),
-          buildSectionTitle('Orientation'),
-          SegmentedButton<PageOrientation>(
-            style: SegmentedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            segments: const [
-              ButtonSegment<PageOrientation>(
-                value: PageOrientation.portrait,
-                icon: Icon(Icons.stay_current_portrait),
-                label: Text('Portrait'),
-              ),
-              ButtonSegment<PageOrientation>(
-                value: PageOrientation.landscape,
-                icon: Icon(Icons.stay_current_landscape),
-                label: Text('Landscape'),
-              ),
-            ],
-            selected: {widget.coreInfo.notePageOrientation},
-            onSelectionChanged: (Set<PageOrientation> selected) {
-              widget.onSetPageOrientation!(selected.single);
-              setState(() {});
-            },
-          ),
-        ],
-
-        const SizedBox(height: 32),
-        buildSectionTitle('Background Pattern'),
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 2,
-          mainAxisSpacing: 12,
-          crossAxisSpacing: 12,
-          childAspectRatio: 3.5,
-          children: CanvasBackgroundPattern.values.map((pattern) {
-            final isSelected = _pattern == pattern;
-            return Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () {
-                  if (widget.onSetPattern != null) {
-                    setState(() => _pattern = pattern);
-                    widget.onSetPattern!(pattern);
-                  }
-                },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? colorScheme.primaryContainer
-                        : colorScheme.surfaceContainerHighest.withOpacity(0.3),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isSelected
-                          ? colorScheme.primary
-                          : Colors.transparent,
-                      width: 2,
-                    ),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    CanvasBackgroundPattern.localizedName(pattern),
-                    textAlign: TextAlign.center,
-                    maxLines:
-                        1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: isSelected
-                          ? FontWeight.w600
-                          : FontWeight.w500,
-                      color: isSelected
-                          ? colorScheme.onPrimaryContainer
-                          : colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ),
-            );
-          }).toList(),
-        ),
-
-        const SizedBox(height: 32),
-        buildSectionTitle('Page Color'),
-        buildColorPresets(_pageColorPresets, _pageColor, (color) {
-          setState(() {
-            _pageColor = color;
-            _hexController.text =
-                '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-          });
-          widget.onSetColor(color);
-        }),
-        const SizedBox(height: 16),
-        Container(
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-          child: Column(
-            children: [
-              ColorPicker(
-                color: _pageColor,
-                onColorChanged: (color) {
-                  setState(() {
-                    _pageColor = color;
-                    _hexController.text =
-                        '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-                  });
-                  widget.onSetColor(color);
-                },
-                pickersEnabled: const {ColorPickerType.wheel: true},
-                enableShadesSelection: false,
-                showColorName: false,
-                showRecentColors: false,
-                showColorCode: false,
-                enableOpacity: false,
-                hasBorder: false,
-                wheelDiameter: 200,
-                wheelWidth: 16,
-              ),
-              const SizedBox(height: 24),
-              TextField(
-                controller: _hexController,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1,
-                ),
-                decoration: InputDecoration(
-                  labelText: 'HEX Code',
-                  hintText: '#FFFFFF',
-                  prefixIcon: const Icon(Icons.tag, size: 20),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor: colorScheme.surface,
-                  isDense: true,
-                ),
-                onChanged: (value) {
-                  if (value.startsWith('#') && value.length == 7) {
-                    try {
-                      final color = Color(
-                        int.parse(value.substring(1), radix: 16) + 0xFF000000,
-                      );
-                      setState(() => _pageColor = color);
-                      widget.onSetColor(color);
-                    } catch (_) {}
-                  }
-                },
-              ),
-            ],
-          ),
-        ),
-
-        if (_pattern != CanvasBackgroundPattern.none) ...[
-          const SizedBox(height: 32),
-          buildSectionTitle('Line Settings'),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Spacing',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    Text(
-                      '${_lineHeight}px',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-                Slider(
-                  value: _lineHeight.toDouble(),
-                  min: 20,
-                  max: 100,
-                  divisions: 80,
-                  onChanged: (v) {
-                    setState(() => _lineHeight = v.toInt());
-                    widget.onSetLineHeight(_lineHeight);
-                  },
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Thickness',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    Text(
-                      '${_lineThickness.toStringAsFixed(1)}px',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-                Slider(
-                  value: _lineThickness.clamp(1.0, 5.0),
-                  min: 1,
-                  max: 5,
-                  divisions: 4,
-                  onChanged: (v) {
-                    setState(() => _lineThickness = v);
-                    widget.onSetLineThickness(v);
-                  },
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 32),
-          buildSectionTitle('Line Color'),
-          buildColorPresets(_lineColorPresets, _lineColor, (color) {
-            setState(() {
-              _lineColor = color;
-              _hexLineController.text =
-                  '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-            });
-            widget.onSetLineColor(color);
-          }),
-          const SizedBox(height: 16),
-          Container(
-            decoration: BoxDecoration(
-              color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-            child: Column(
-              children: [
-                ColorPicker(
-                  color: _lineColor,
-                  onColorChanged: (color) {
-                    setState(() {
-                      _lineColor = color;
-                      _hexLineController.text =
-                          '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-                    });
-                    widget.onSetLineColor(color);
-                  },
-                  pickersEnabled: const {ColorPickerType.wheel: true},
-                  enableShadesSelection: false,
-                  showColorName: false,
-                  showRecentColors: false,
-                  showColorCode: false,
-                  enableOpacity: false,
-                  hasBorder: false,
-                  wheelDiameter: 200,
-                  wheelWidth: 16,
-                ),
-                const SizedBox(height: 24),
-                TextField(
-                  controller: _hexLineController,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1,
-                  ),
-                  decoration: InputDecoration(
-                    labelText: 'HEX Code',
-                    hintText: '#808080',
-                    prefixIcon: const Icon(Icons.tag, size: 20),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    filled: true,
-                    fillColor: colorScheme.surface,
-                    isDense: true,
-                  ),
-                  onChanged: (value) {
-                    if (value.startsWith('#') && value.length == 7) {
-                      try {
-                        final color = Color(
-                          int.parse(value.substring(1), radix: 16) + 0xFF000000,
-                        );
-                        setState(() => _lineColor = color);
-                        widget.onSetLineColor(color);
-                      } catch (_) {}
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        ],
-        const SizedBox(height: 32),
-        buildSectionTitle('Margins'),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _marginSlider('Left', _marginLeft, (v) {
-                setState(() => _marginLeft = v);
-                widget.onSetMargins?.call(
-                  v,
-                  _marginRight,
-                  _marginTop,
-                  _marginBottom,
-                );
-              }),
-              _marginSlider('Right', _marginRight, (v) {
-                setState(() => _marginRight = v);
-                widget.onSetMargins?.call(
-                  _marginLeft,
-                  v,
-                  _marginTop,
-                  _marginBottom,
-                );
-              }),
-              _marginSlider('Top', _marginTop, (v) {
-                setState(() => _marginTop = v);
-                widget.onSetMargins?.call(
-                  _marginLeft,
-                  _marginRight,
-                  v,
-                  _marginBottom,
-                );
-              }),
-              _marginSlider('Bottom', _marginBottom, (v) {
-                setState(() => _marginBottom = v);
-                widget.onSetMargins?.call(
-                  _marginLeft,
-                  _marginRight,
-                  _marginTop,
-                  v,
-                );
-              }),
-            ],
-          ),
-        ),
-        const SizedBox(height: 32),
-        buildSectionTitle('Border Color'),
-        buildColorPresets(_pageColorPresets, _borderColor, (color) {
-          setState(() {
-            _borderColor = color;
-            _hexBorderController.text =
-                '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-          });
-          widget.onSetBorderColor?.call(color);
-        }),
-        const SizedBox(height: 16),
-        Container(
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-          child: Column(
-            children: [
-              ColorPicker(
-                color: _borderColor,
-                onColorChanged: (color) {
-                  setState(() {
-                    _borderColor = color;
-                    _hexBorderController.text =
-                        '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
-                  });
-                  widget.onSetBorderColor?.call(color);
-                },
-                pickersEnabled: const {ColorPickerType.wheel: true},
-                enableShadesSelection: false,
-                showColorName: false,
-                showRecentColors: false,
-                showColorCode: false,
-                enableOpacity: false,
-                hasBorder: false,
-                wheelDiameter: 200,
-                wheelWidth: 16,
-              ),
-              const SizedBox(height: 24),
-              TextField(
-                controller: _hexBorderController,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1,
-                ),
-                decoration: InputDecoration(
-                  labelText: 'HEX Code',
-                  hintText: '#FFFFFF',
-                  prefixIcon: const Icon(Icons.tag, size: 20),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor: colorScheme.surface,
-                  isDense: true,
-                ),
-                onChanged: (value) {
-                  if (value.startsWith('#') && value.length == 7) {
-                    try {
-                      final color = Color(
-                        int.parse(value.substring(1), radix: 16) + 0xFF000000,
-                      );
-                      setState(() => _borderColor = color);
-                      widget.onSetBorderColor?.call(color);
-                    } catch (_) {}
-                  }
-                },
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 32),
-      ],
-    );
-
-    return Column(
-      key: const ValueKey('pageSettings'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-
-        Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: widget.onBack,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(widget.title, style: theme.textTheme.titleMedium),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth > 600) {
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 5, child: settingsContent),
-                    const VerticalDivider(width: 1),
-                    Expanded(flex: 4, child: previewWidget),
-                  ],
-                );
-              } else {
-                return Column(
-                  children: [
-                    SizedBox(height: 250, child: previewWidget),
-                    const Divider(height: 1),
-                    Expanded(child: settingsContent),
-                  ],
-                );
-              }
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _InlineColorPicker extends StatefulWidget {
-  const _InlineColorPicker({required this.color, required this.onColorChanged});
-
-  final Color color;
-  final ValueChanged<Color> onColorChanged;
-
-  @override
-  State<_InlineColorPicker> createState() => _InlineColorPickerState();
-}
-
-class _InlineColorPickerState extends State<_InlineColorPicker> {
-  late TextEditingController _hexController;
-  late Color _currentColor;
-
-  @override
-  void initState() {
-    super.initState();
-    _currentColor = widget.color;
-    _hexController = TextEditingController(text: _colorToHex(widget.color));
-  }
-
-  @override
-  void didUpdateWidget(covariant _InlineColorPicker oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.color != widget.color) {
-      _currentColor = widget.color;
-      _hexController.text = _colorToHex(widget.color);
-    }
-  }
-
-  @override
-  void dispose() {
-    _hexController.dispose();
-    super.dispose();
-  }
-
-  String _colorToHex(Color c) {
-    return '#${c.red.toRadixString(16).padLeft(2, '0')}'
-        '${c.green.toRadixString(16).padLeft(2, '0')}'
-        '${c.blue.toRadixString(16).padLeft(2, '0')}';
-  }
-
-  void _applyHex(String hex) {
-    hex = hex.trim();
-    if (hex.startsWith('#')) hex = hex.substring(1);
-    if (hex.length == 6) {
-      final r = int.tryParse(hex.substring(0, 2), radix: 16);
-      final g = int.tryParse(hex.substring(2, 4), radix: 16);
-      final b = int.tryParse(hex.substring(4, 6), radix: 16);
-      if (r != null && g != null && b != null) {
-        final color = Color.fromARGB(255, r, g, b);
-        _currentColor = color;
-        widget.onColorChanged(color);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ColorPicker(
-          color: _currentColor,
-          onColorChanged: (c) {
-            setState(() {
-              _currentColor = c;
-              _hexController.text = _colorToHex(c);
-            });
-            widget.onColorChanged(c);
-          },
-          pickersEnabled: const <ColorPickerType, bool>{
-            ColorPickerType.primary: false,
-            ColorPickerType.accent: false,
-            ColorPickerType.bw: false,
-            ColorPickerType.custom: false,
-            ColorPickerType.wheel: true,
-          },
-          showColorCode: false,
-          width: 36,
-          height: 36,
-          borderRadius: 6,
-          enableOpacity: false,
+        title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Page appearance',
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.35,
+              ),
+            ),
+            Text(
+              'Page ${currentPageIndex + 1} · pattern, colors, margins',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _hexController,
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
-            hintText: '#RRGGBB',
-            isDense: true,
-          ),
-          maxLength: 7,
-          onSubmitted: _applyHex,
-          onChanged: (s) {
-            if (s.length == 7 && s.startsWith('#')) {
-              _applyHex(s);
-            }
-          },
+      ),
+      body: SafeArea(
+        child: EditorPageSettingsBody(
+          coreInfo: coreInfo,
+          currentPageIndex: currentPageIndex,
+          onSetPattern: onSetPattern,
+          onSetLineHeight: onSetLineHeight,
+          onSetLineThickness: onSetLineThickness,
+          onSetColor: onSetColor,
+          onSetLineColor: onSetLineColor,
+          onSetPageOrientation: onSetPageOrientation,
+          onToggleGlobalBackgroundInversion: onToggleGlobalBackgroundInversion,
+          onSetMargins: onSetMargins,
+          onSetBorderColor: onSetBorderColor,
         ),
-      ],
+      ),
     );
   }
 }
+
 
 class _LayersSettingsView extends StatelessWidget {
   final EditorCoreInfo coreInfo;
@@ -1770,8 +822,6 @@ class _LayersSettingsView extends StatelessWidget {
 class _BackgroundSettingsView extends StatelessWidget {
   final BoxFit currentFit;
   final bool isInverted;
-  final Size pageSize;
-  final EditorImage? backgroundImage;
   final VoidCallback onBack;
   final ValueChanged<BoxFit> onSetFit;
   final VoidCallback? onToggleInvert;
@@ -1782,8 +832,6 @@ class _BackgroundSettingsView extends StatelessWidget {
     super.key,
     required this.currentFit,
     required this.isInverted,
-    required this.pageSize,
-    required this.backgroundImage,
     required this.onBack,
     required this.onSetFit,
     this.onToggleInvert,
@@ -1795,35 +843,6 @@ class _BackgroundSettingsView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-
-    final previewWidget = Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: AspectRatio(
-          aspectRatio: pageSize.width / pageSize.height,
-          child: Container(
-            decoration: BoxDecoration(
-              color: colorScheme.surfaceContainerLow,
-              border: Border.all(color: colorScheme.outlineVariant, width: 2),
-              borderRadius: BorderRadius.circular(12),
-
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: CanvasBackgroundPreview(
-              selected: true,
-              invert: isInverted,
-              backgroundColor: Colors.transparent,
-              backgroundPattern: CanvasBackgroundPattern.none,
-              backgroundImage: backgroundImage,
-              pageSize: pageSize,
-              lineHeight: 0,
-              lineThickness: 0,
-              lineColor: Colors.transparent,
-            ),
-          ),
-        ),
-      ),
-    );
 
     final settingsContent = ListView(
       key: const ValueKey('backgroundSettingsContent'),
@@ -1912,7 +931,6 @@ class _BackgroundSettingsView extends StatelessWidget {
       key: const ValueKey('backgroundSettings'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-
         Padding(
           padding: const EdgeInsets.all(16.0),
           child: Row(
@@ -1929,29 +947,87 @@ class _BackgroundSettingsView extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
+        Expanded(child: settingsContent),
+      ],
+    );
+  }
+}
 
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth > 600) {
-                return Row(
+class _PageSettingsSidebarView extends StatelessWidget {
+  const _PageSettingsSidebarView({
+    super.key,
+    required this.coreInfo,
+    required this.currentPageIndex,
+    required this.onBack,
+    required this.onSetPattern,
+    required this.onSetLineHeight,
+    required this.onSetLineThickness,
+    required this.onSetColor,
+    required this.onSetLineColor,
+    this.onSetPageOrientation,
+    required this.onToggleGlobalBackgroundInversion,
+    this.onSetMargins,
+    this.onSetBorderColor,
+  });
+
+  final EditorCoreInfo coreInfo;
+  final int currentPageIndex;
+  final VoidCallback onBack;
+  final ValueChanged<CanvasBackgroundPattern> onSetPattern;
+  final ValueChanged<int> onSetLineHeight;
+  final ValueChanged<double> onSetLineThickness;
+  final ValueChanged<Color> onSetColor;
+  final ValueChanged<Color> onSetLineColor;
+  final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<bool> onToggleGlobalBackgroundInversion;
+  final void Function(double left, double right, double top, double bottom)?
+      onSetMargins;
+  final ValueChanged<Color>? onSetBorderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      key: const ValueKey('pageSettingsSidebar'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            children: [
+              IconButton(icon: const Icon(Icons.arrow_back), onPressed: onBack),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(flex: 5, child: settingsContent),
-                    const VerticalDivider(width: 1),
-                    Expanded(flex: 4, child: previewWidget),
+                    Text('Page Settings', style: theme.textTheme.titleMedium),
+                    Text(
+                      'Page ${currentPageIndex + 1} · pattern, colors, margins',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                   ],
-                );
-              } else {
-                return Column(
-                  children: [
-                    SizedBox(height: 250, child: previewWidget),
-                    const Divider(height: 1),
-                    Expanded(child: settingsContent),
-                  ],
-                );
-              }
-            },
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: EditorPageSettingsBody(
+            coreInfo: coreInfo,
+            currentPageIndex: currentPageIndex,
+            onSetPattern: onSetPattern,
+            onSetLineHeight: onSetLineHeight,
+            onSetLineThickness: onSetLineThickness,
+            onSetColor: onSetColor,
+            onSetLineColor: onSetLineColor,
+            onSetPageOrientation: onSetPageOrientation,
+            onToggleGlobalBackgroundInversion: onToggleGlobalBackgroundInversion,
+            onSetMargins: onSetMargins,
+            onSetBorderColor: onSetBorderColor,
           ),
         ),
       ],
@@ -1959,143 +1035,88 @@ class _BackgroundSettingsView extends StatelessWidget {
   }
 }
 
-class _TableDialog extends StatefulWidget {
-  static Future<(int, int)?> show(BuildContext context) async {
-    final result = await showDialog<(int, int)>(
-      context: context,
-      builder: (context) => const _TableDialog(),
-    );
-    return result;
-  }
+class _InkDefaultsSidebarView extends StatefulWidget {
+  const _InkDefaultsSidebarView({
+    super.key,
+    required this.onBack,
+    this.onChanged,
+    this.noteSessionBackup,
+  });
 
-  const _TableDialog();
+  final VoidCallback onBack;
+  final VoidCallback? onChanged;
+  final NoteToolSettings? noteSessionBackup;
 
   @override
-  State<_TableDialog> createState() => _TableDialogState();
+  State<_InkDefaultsSidebarView> createState() => _InkDefaultsSidebarViewState();
 }
 
-class _TableDialogState extends State<_TableDialog> {
-  final _rowsCtrl = TextEditingController(text: '3');
-  final _colsCtrl = TextEditingController(text: '3');
+class _InkDefaultsSidebarViewState extends State<_InkDefaultsSidebarView> {
+  var _dirty = false;
 
   @override
-  void dispose() {
-    _rowsCtrl.dispose();
-    _colsCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    InkPresetLibrary.applyActive(stows);
+  }
+
+  void _onChanged() {
+    _dirty = true;
+    widget.onChanged?.call();
+  }
+
+  void _handleBack() {
+    final backup = widget.noteSessionBackup;
+    if (!_dirty && backup != null) {
+      applyNoteToolSettings(backup);
+    }
+    widget.onBack();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: Colors.transparent,
-      elevation: 0,
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          width: 400,
-          padding: const EdgeInsets.all(32),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface.withOpacity(0.65),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.grey.withOpacity(0.3), width: 1.5),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.2),
-                blurRadius: 40,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+    final theme = Theme.of(context);
+    return Column(
+      key: const ValueKey('inkDefaultsSidebar'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
             children: [
-              Text(
-                'Create table',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-                textAlign: TextAlign.center,
+              IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _handleBack,
               ),
-              const SizedBox(height: 24),
-              TextField(
-                controller: _rowsCtrl,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: 'Rows',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  filled: true,
-                  fillColor: Colors.grey.withOpacity(0.1),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      t.settings.noteInkDefaults.inkDefaultsTitle,
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    Text(
+                      t.settings.noteInkDefaults.inkDefaultsSubtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _colsCtrl,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: 'Columns',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  filled: true,
-                  fillColor: Colors.grey.withOpacity(0.1),
-                ),
-              ),
-              const SizedBox(height: 32),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: Text(
-                      MaterialLocalizations.of(context).cancelButtonLabel,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
-                      backgroundColor: Colors.grey.shade800,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      elevation: 0,
-                    ),
-                    onPressed: () {
-                      final rows = int.tryParse(_rowsCtrl.text) ?? 0;
-                      final cols = int.tryParse(_colsCtrl.text) ?? 0;
-                      if (rows < 1 || cols < 1) {
-                        Navigator.of(context).pop();
-                        return;
-                      }
-                      Navigator.of(context).pop((rows, cols));
-                    },
-                    child: Text(
-                      MaterialLocalizations.of(context).okButtonLabel,
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
         ),
-      ),
+        const Divider(height: 1),
+        Expanded(
+          child: InkDefaultsSettingsBody(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+            onChanged: _onChanged,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2238,34 +1259,30 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
   @override
   Widget build(BuildContext context) {
     final isUnary = _op == 'T' || _op == 'RREF' || _op == 'INV';
+    final cs = Theme.of(context).colorScheme;
     return Dialog(
       backgroundColor: Colors.transparent,
       elevation: 0,
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          width: 700,
-          padding: const EdgeInsets.all(32),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface.withOpacity(0.65),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.grey.withOpacity(0.3), width: 1.5),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.2),
-                blurRadius: 40,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: SingleChildScrollView(
-            child: Column(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
+      child: RuggedDialogShell(
+        maxWidth: 720,
+        padding: const EdgeInsets.all(24),
+        child: SingleChildScrollView(
+          child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Matrix Calculator',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  'Matrix calculator',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w600,
+                    letterSpacing: -0.4,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Define matrices and an operation, then render as an image.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -2435,21 +1452,18 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
+                    FilledButton(
+                      style: FilledButton.styleFrom(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 24,
                           vertical: 16,
                         ),
-                        backgroundColor: Colors.grey.shade800,
-                        foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        elevation: 0,
                       ),
                       onPressed: _renderAndReturn,
-                      child: const Text('Render Equation'),
+                      child: const Text('Render equation'),
                     ),
                   ],
                 ),
@@ -2457,7 +1471,6 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
             ),
           ),
         ),
-      ),
     );
   }
 }

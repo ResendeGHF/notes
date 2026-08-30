@@ -4,6 +4,7 @@
 
 // ignore_for_file: omit_obvious_property_types
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show clampDouble;
@@ -11,7 +12,10 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:saber/components/canvas/page_raster_cache.dart'
+    show PageRasterCacheManager;
 import 'package:saber/data/prefs.dart';
+import 'package:saber/services/display_ink_feel.dart';
 import 'package:vector_math/vector_math_64.dart' show Matrix4, Quad, Vector3;
 
 typedef InteractiveCanvasViewerWidgetBuilder =
@@ -19,7 +23,6 @@ typedef InteractiveCanvasViewerWidgetBuilder =
 
 @immutable
 class InteractiveCanvasViewer extends StatefulWidget {
-
   static bool isAutoPanningEnabled = false;
 
   InteractiveCanvasViewer({
@@ -33,6 +36,7 @@ class InteractiveCanvasViewer extends StatefulWidget {
     this.minScale = 0.8,
     this.isDrawGesture,
     this.interactionEndFrictionCoefficient = kDrag,
+    this.onInteractionStart,
     this.onInteractionEnd,
     this.onDrawEnd,
     this.onDrawStart,
@@ -73,6 +77,7 @@ class InteractiveCanvasViewer extends StatefulWidget {
     this.minScale = 0.8,
     this.isDrawGesture,
     this.interactionEndFrictionCoefficient = kDrag,
+    this.onInteractionStart,
     this.onInteractionEnd,
     this.onDrawEnd,
     this.onDrawStart,
@@ -144,6 +149,8 @@ class InteractiveCanvasViewer extends StatefulWidget {
 
   final ValueNotifier<int>? scrollPhysicsStopNotifier;
 
+  final GestureScaleStartCallback? onInteractionStart;
+
   final GestureScaleEndCallback? onInteractionEnd;
 
   final TransformationController? transformationController;
@@ -208,7 +215,6 @@ class InteractiveCanvasViewer extends StatefulWidget {
 
   @visibleForTesting
   static Vector3 getNearestPointInside(Vector3 point, Quad quad) {
-
     if (pointIsInside(point, quad)) {
       return point;
     }
@@ -278,6 +284,16 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   double? _rotationStart = 0;
   double _currentRotation = 0;
   _GestureType? _gestureType;
+  Timer? _wheelZoomSettleTimer;
+
+  void _markWheelZoomActive() {
+    PageRasterCacheManager.updateViewportMoving(true);
+    _wheelZoomSettleTimer?.cancel();
+    _wheelZoomSettleTimer = Timer(PageRasterCacheManager.viewportSettleDelay, () {
+      _wheelZoomSettleTimer = null;
+      PageRasterCacheManager.updateViewportMoving(false);
+    });
+  }
 
   final bool _rotateEnabled = false;
 
@@ -457,11 +473,18 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
   bool isCurrentGestureADrawGesture = false;
   bool _ignoreThisPanZoomGesture = false;
+  Offset _panVelocityScene = Offset.zero;
+  Offset _appliedPanLead = Offset.zero;
+  Duration? _lastPanStamp;
+  var _viewportGestureActive = false;
 
   void _onScaleStart(ScaleStartDetails details) {
     _ignoreThisPanZoomGesture =
         widget.shouldIgnorePanZoom?.call(details) ?? false;
     _stopPhysics();
+    _panVelocityScene = Offset.zero;
+    _appliedPanLead = Offset.zero;
+    _lastPanStamp = null;
     if (_controller.isAnimating) {
       _controller.stop();
       _controller.reset();
@@ -484,19 +507,21 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     if (widget.isDrawGesture?.call(details) ?? false) {
       isCurrentGestureADrawGesture = true;
       widget.onDrawStart?.call(details);
+    } else if (!_ignoreThisPanZoomGesture) {
+      _viewportGestureActive = true;
+      PageRasterCacheManager.updateViewportMoving(true);
+      widget.onInteractionStart?.call(details);
     }
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
     if (_ignoreThisPanZoomGesture && !isCurrentGestureADrawGesture) return;
-    _transformer.value.getMaxScaleOnAxis();
     _scaleAnimationFocalPoint = details.localFocalPoint;
     final Offset focalPointScene = _transformer.toScene(
       details.localFocalPoint,
     );
 
     if (_gestureType == _GestureType.pan) {
-
       _gestureType = _getGestureType(details);
     } else {
       _gestureType ??= _getGestureType(details);
@@ -512,7 +537,12 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
         final Matrix4 nextMatrix = _transformer.value.clone();
         final double currentScale = nextMatrix.getMaxScaleOnAxis();
 
-        final double desiredScale = _scaleStart! * details.scale;
+        final feel = DisplayInkFeel.instance;
+        final double reportedScale = details.scale;
+        final double gainedScale = feel.isLowRefresh
+            ? 1.0 + (reportedScale - 1.0) * feel.zoomDeltaGain
+            : reportedScale;
+        final double desiredScale = _scaleStart! * gainedScale;
         final double scaleChange = desiredScale / currentScale;
 
         if (scaleChange != 1.0) {
@@ -589,8 +619,35 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
         } else {
           _currentAxis ??= _getPanAxis(_referenceFocalPoint!, focalPointScene);
 
-          final Offset translationChange =
-              focalPointScene - _referenceFocalPoint!;
+          Offset translationChange = focalPointScene - _referenceFocalPoint!;
+          final feel = DisplayInkFeel.instance;
+          if (feel.isLowRefresh && translationChange != Offset.zero) {
+            final now = SchedulerBinding.instance.currentSystemFrameTimeStamp;
+            final last = _lastPanStamp;
+            if (last != null) {
+              final dt = (now - last).inMicroseconds / 1e6;
+              if (dt > 0.0005 && dt < 0.08) {
+                final instant = translationChange / dt;
+                _panVelocityScene = Offset.lerp(
+                  _panVelocityScene,
+                  instant,
+                  0.45,
+                )!;
+              }
+            }
+            _lastPanStamp = now;
+            // Constant-velocity lead stays fixed so we track 1:1 with the
+            // finger while content sits ~one frame ahead (no cumulative drift).
+            final newLead = _panVelocityScene * feel.panVelocityLeadSec;
+            translationChange =
+                translationChange * feel.panDeltaGain +
+                (newLead - _appliedPanLead);
+            _appliedPanLead = newLead;
+          } else {
+            _panVelocityScene = Offset.zero;
+            _appliedPanLead = Offset.zero;
+            _lastPanStamp = null;
+          }
           _transformer.value = _matrixTranslate(
             _transformer.value,
             translationChange,
@@ -617,6 +674,10 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     _scaleStart = null;
     _rotationStart = null;
     _referenceFocalPoint = null;
+    _panVelocityScene = Offset.zero;
+    // Keep the last lead baked into the matrix (no snap-back on lift).
+    _appliedPanLead = Offset.zero;
+    _lastPanStamp = null;
 
     _animation?.removeListener(_handleInertiaAnimation);
     _scaleAnimation?.removeListener(_handleScaleAnimation);
@@ -625,27 +686,36 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
     if (!_gestureIsSupported(_gestureType)) {
       _currentAxis = null;
+      _finishViewportGesture();
       return;
     }
 
     switch (_gestureType) {
       case _GestureType.pan:
-
         if (details.velocity.pixelsPerSecond.distance < 150.0) {
           _currentAxis = null;
+          _finishViewportGesture();
           return;
         }
 
         final double scale = _transformer.value.getMaxScaleOnAxis();
 
         _inertiaVelocity = (details.velocity.pixelsPerSecond / scale) * 0.7;
+        // Keep viewportMoving true through fling so tiles stay on the cheap path.
         _startPhysics();
 
       case _GestureType.rotate:
       case _GestureType.scale:
       case null:
+        _finishViewportGesture();
         break;
     }
+  }
+
+  void _finishViewportGesture() {
+    if (!_viewportGestureActive) return;
+    _viewportGestureActive = false;
+    PageRasterCacheManager.updateViewportMoving(false);
   }
 
   void _receivedPointerSignal(PointerSignalEvent event) {
@@ -655,7 +725,6 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     if (event is PointerScrollEvent) {
       if (!HardwareKeyboard.instance.isControlPressed &&
           !HardwareKeyboard.instance.isMetaPressed) {
-
         if (!_gestureIsSupported(_GestureType.pan)) return;
 
         final Offset localDelta = PointerEvent.transformDeltaViaPositions(
@@ -670,10 +739,12 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
           local - localDelta,
         );
 
+        PageRasterCacheManager.updateViewportMoving(true);
         _transformer.value = _matrixTranslate(
           _transformer.value,
           newFocalPointScene - focalPointScene,
         );
+        PageRasterCacheManager.updateViewportMoving(false);
 
         return;
       }
@@ -689,6 +760,8 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     }
 
     if (!_gestureIsSupported(_GestureType.scale)) return;
+
+    _markWheelZoomActive();
 
     final Offset focalPointScene = _transformer.toScene(local);
 
@@ -761,9 +834,14 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   }
 
   void _handleTransformation() {
-    stows.lastCanvasScale = _transformer.value.getMaxScaleOnAxis();
+    final scale = _transformer.value.getMaxScaleOnAxis();
+    final lastPersisted = _lastPersistedCanvasScale;
+    if (lastPersisted == null || (scale - lastPersisted).abs() >= 0.01) {
+      _lastPersistedCanvasScale = scale;
+      stows.lastCanvasScale = scale;
+    }
 
-    setState(() {});
+    _scheduleViewportRebuildIfNeeded();
   }
 
   Ticker? _physicsTicker;
@@ -771,6 +849,53 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   Offset _inertiaVelocity = Offset.zero;
   Offset? _autoPanVelocity;
   ScaleUpdateDetails? _lastDrawDetails;
+  bool _transformRebuildScheduled = false;
+  double? _lastPersistedCanvasScale;
+  Rect? _lastViewportBucket;
+  Quad? _lastViewportQuad;
+  Size? _lastViewportSize;
+
+  static const double _viewportBucketSize = 360.0;
+
+  Rect _bucketViewport(Rect viewport) {
+    double bucket(double value) =>
+        (value / _viewportBucketSize).floorToDouble() * _viewportBucketSize;
+    return Rect.fromLTRB(
+      bucket(viewport.left),
+      bucket(viewport.top),
+      bucket(viewport.right),
+      bucket(viewport.bottom),
+    );
+  }
+
+  void _syncViewportForBuild(Rect viewportRect) {
+    final quad = _transformViewport(_transformer.value, viewportRect);
+    _lastViewportQuad = quad;
+    _lastViewportBucket = _bucketViewport(_quadAxisAlignedBounds(quad));
+    _lastViewportSize = viewportRect.size;
+  }
+
+  void _scheduleViewportRebuildIfNeeded() {
+    if (widget.builder == null || _parentKey.currentContext == null) return;
+    final viewportRect = _viewport;
+    final quad = _transformViewport(_transformer.value, viewportRect);
+    final bucket = _bucketViewport(_quadAxisAlignedBounds(quad));
+    if (_lastViewportBucket == bucket &&
+        _lastViewportSize == viewportRect.size) {
+      return;
+    }
+    _lastViewportBucket = bucket;
+    _lastViewportQuad = quad;
+    _lastViewportSize = viewportRect.size;
+
+    if (_transformRebuildScheduled) return;
+    _transformRebuildScheduled = true;
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _transformRebuildScheduled = false;
+      if (mounted) setState(() {});
+    });
+    SchedulerBinding.instance.ensureVisualUpdate();
+  }
 
   void _startPhysics() {
     if (_physicsTicker == null) {
@@ -783,13 +908,17 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   }
 
   void _stopPhysics() {
+    final wasTicking = _physicsTicker?.isTicking ?? false;
     _physicsTicker?.stop();
     _inertiaVelocity = Offset.zero;
     _autoPanVelocity = null;
+    // Fling / edge-auto-pan ended: allow stroke tiles to leave the moving path.
+    if (wasTicking && _viewportGestureActive && !isCurrentGestureADrawGesture) {
+      _finishViewportGesture();
+    }
   }
 
   void _updateAutoPanTarget(Offset localPosition) {
-
     const double edgeThreshold = 100.0;
 
     const double maxSpeedScreen = 1200.0;
@@ -823,7 +952,6 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     }
 
     if (dx != 0 || dy != 0) {
-
       final double scale = _transformer.value.getMaxScaleOnAxis();
       _autoPanVelocity = Offset(dx / scale, dy / scale);
       _startPhysics();
@@ -892,9 +1020,14 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   @override
   void didUpdateWidget(InteractiveCanvasViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.scrollPhysicsStopNotifier != oldWidget.scrollPhysicsStopNotifier) {
-      oldWidget.scrollPhysicsStopNotifier?.removeListener(_scrollPhysicsStopListener!);
-      widget.scrollPhysicsStopNotifier?.addListener(_scrollPhysicsStopListener!);
+    if (widget.scrollPhysicsStopNotifier !=
+        oldWidget.scrollPhysicsStopNotifier) {
+      oldWidget.scrollPhysicsStopNotifier?.removeListener(
+        _scrollPhysicsStopListener!,
+      );
+      widget.scrollPhysicsStopNotifier?.addListener(
+        _scrollPhysicsStopListener!,
+      );
     }
     final TransformationController? newController =
         widget.transformationController;
@@ -911,7 +1044,10 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
   @override
   void dispose() {
-    widget.scrollPhysicsStopNotifier?.removeListener(_scrollPhysicsStopListener!);
+    _wheelZoomSettleTimer?.cancel();
+    widget.scrollPhysicsStopNotifier?.removeListener(
+      _scrollPhysicsStopListener!,
+    );
     _physicsTicker?.dispose();
     _controller.dispose();
     _scaleController.dispose();
@@ -930,27 +1066,27 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
         childKey: _childKey,
         clipBehavior: widget.clipBehavior,
         constrained: widget.constrained,
-        matrix: _transformer.value,
+        transformer: _transformer,
         alignment: widget.alignment,
         child: widget.child!,
       );
     } else {
-
       assert(widget.builder != null);
       assert(!widget.constrained);
       child = LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
-          final Matrix4 matrix = _transformer.value;
+          final viewportRect = Offset.zero & constraints.biggest;
+          if (_lastViewportQuad == null ||
+              _lastViewportSize != viewportRect.size) {
+            _syncViewportForBuild(viewportRect);
+          }
           return _InteractiveCanvasViewerBuilt(
             childKey: _childKey,
             clipBehavior: widget.clipBehavior,
             constrained: widget.constrained,
             alignment: widget.alignment,
-            matrix: matrix,
-            child: widget.builder!(
-              context,
-              _transformViewport(matrix, Offset.zero & constraints.biggest),
-            ),
+            transformer: _transformer,
+            child: widget.builder!(context, _lastViewportQuad!),
           );
         },
       );
@@ -969,7 +1105,6 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
                 () => _ImmediateScaleGestureRecognizer(
                   debugOwner: this,
                   isDrawGesture: (PointerDownEvent event) {
-
                     final details = ScaleStartDetails(
                       focalPoint: event.position,
                       localFocalPoint: event.localPosition,
@@ -983,6 +1118,12 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
                     ..onStart = _onScaleStart
                     ..onUpdate = _onScaleUpdate
                     ..onEnd = _onScaleEnd
+                    // Milder slop at ~60 Hz so pan/zoom starts a frame sooner;
+                    // draw still wins the arena immediately via isDrawGesture.
+                    ..gestureSettings = DeviceGestureSettings(
+                      touchSlop:
+                          kTouchSlop * DisplayInkFeel.instance.panTouchSlopFactor,
+                    )
                     ..trackpadScrollCausesScale =
                         widget.trackpadScrollCausesScale
                     ..trackpadScrollToScaleFactor = Offset(
@@ -1004,7 +1145,7 @@ class _InteractiveCanvasViewerBuilt extends StatelessWidget {
     required this.childKey,
     required this.clipBehavior,
     required this.constrained,
-    required this.matrix,
+    required this.transformer,
     required this.alignment,
   });
 
@@ -1012,29 +1153,34 @@ class _InteractiveCanvasViewerBuilt extends StatelessWidget {
   final GlobalKey childKey;
   final Clip clipBehavior;
   final bool constrained;
-  final Matrix4 matrix;
+  final TransformationController transformer;
   final Alignment? alignment;
 
   @override
   Widget build(BuildContext context) {
-    Widget child = Transform(
-      transform: matrix,
-      alignment: alignment,
-      child: KeyedSubtree(key: childKey, child: this.child),
+    final transformedChild = KeyedSubtree(key: childKey, child: child);
+    Widget result = AnimatedBuilder(
+      animation: transformer,
+      child: transformedChild,
+      builder: (context, child) => Transform(
+        transform: transformer.value,
+        alignment: alignment,
+        child: child,
+      ),
     );
 
     if (!constrained) {
-      child = OverflowBox(
+      result = OverflowBox(
         alignment: .topLeft,
         minWidth: 0,
         minHeight: 0,
 
         maxHeight: double.infinity,
-        child: child,
+        child: result,
       );
     }
 
-    return ClipRect(clipBehavior: clipBehavior, child: child);
+    return ClipRect(clipBehavior: clipBehavior, child: result);
   }
 }
 
@@ -1078,6 +1224,22 @@ Quad _transformViewport(Matrix4 matrix, Rect viewport) {
       Vector3(viewport.bottomLeft.dx, viewport.bottomLeft.dy, 0),
     ),
   );
+}
+
+Rect _quadAxisAlignedBounds(Quad quad) {
+  final points = [quad.point0, quad.point1, quad.point2, quad.point3];
+  var left = points.first.x;
+  var right = points.first.x;
+  var top = points.first.y;
+  var bottom = points.first.y;
+  for (var i = 1; i < points.length; i++) {
+    final point = points[i];
+    left = math.min(left, point.x);
+    right = math.max(right, point.x);
+    top = math.min(top, point.y);
+    bottom = math.max(bottom, point.y);
+  }
+  return Rect.fromLTRB(left, top, right, bottom);
 }
 
 Quad _getAxisAlignedBoundingBoxWithRotation(Rect rect, double rotation) {

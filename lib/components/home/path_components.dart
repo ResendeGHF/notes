@@ -3,92 +3,154 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'package:flutter/material.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/prefs.dart';
 
 class PathComponents extends StatelessWidget {
-  PathComponents(String? path, {super.key, required this.onPathComponentTap})
-    : components = _splitPath(path);
+  PathComponents(
+    String? path, {
+    super.key,
+    required this.onPathComponentTap,
+    this.trailingSectionLabel,
+  }) : components = _splitPath(path);
 
   final List<String> components;
   final void Function(String? path) onPathComponentTap;
 
+  /// Optional label on the trailing edge (e.g. section title), same chrome as crumbs.
+  final String? trailingSectionLabel;
+
   @override
   Widget build(BuildContext context) {
-    final colorScheme = ColorScheme.of(context);
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
-    return Container(
-      height: 40,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        itemCount: components.length + 1,
-        separatorBuilder: (context, index) => Icon(
-          Icons.chevron_right,
-          size: 16,
-          color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-        ),
-        itemBuilder: (context, index) {
-          final isRoot = index == 0;
-          final String label = isRoot ? 'Notes' : components[index - 1];
-          final bool isLast = index == components.length;
-
-          final componentPath = isRoot
-              ? '/'
-              : '/${components.sublist(0, index).join('/')}';
-
-          return ValueListenableBuilder<Map<String, int>>(
-            valueListenable: stows.folderColors,
-            builder: (context, folderColors, _) {
-              Color itemColor;
-              if (isRoot) {
-                itemColor =
-                    colorScheme.primary;
-              } else {
-                final colorValue = folderColors[componentPath];
-
-                itemColor = colorValue != null
-                    ? Color(colorValue)
-                    : (isLast
-                          ? colorScheme.primary
-                          : colorScheme.onSurfaceVariant);
-              }
-
-              return InkWell(
-                onTap: () {
-                  if (isRoot) {
-                    onPathComponentTap(null);
-                  } else {
-                    onPathComponentTap(componentPath);
-                  }
-                },
-                borderRadius: BorderRadius.circular(16),
-                hoverColor: Colors.transparent,
-                focusColor: Colors.transparent,
-                highlightColor: Colors.transparent,
-                child: Padding(
+    return DecoratedBox(
+      decoration: homeRuggedPanelDecoration(context),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: SizedBox(
+                height: 40,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Center(
-                    child: Text(
-                      label,
-                      style: TextStyle(
-                        color: itemColor,
-                        fontWeight: isLast
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        fontSize: 14,
+                  itemCount: components.length + 1,
+                  separatorBuilder: (context, index) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: colorScheme.onSurfaceVariant.withValues(
+                        alpha: 0.45,
                       ),
                     ),
                   ),
+                  itemBuilder: (context, index) {
+                    final isRoot = index == 0;
+                    final String label = isRoot ? 'Notes' : components[index - 1];
+                    final bool isLast = index == components.length;
+
+                    final componentPath = isRoot
+                        ? '/'
+                        : '/${components.sublist(0, index).join('/')}';
+
+                    return ValueListenableBuilder<Map<String, int>>(
+                      valueListenable: stows.folderColors,
+                      builder: (context, folderColors, _) {
+                        Color itemColor;
+                        if (isRoot) {
+                          itemColor = colorScheme.primary;
+                        } else {
+                          final colorValue = folderColors[componentPath];
+
+                          itemColor = colorValue != null
+                              ? Color(colorValue)
+                              : (isLast
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurfaceVariant);
+                        }
+
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: () {
+                                if (isRoot) {
+                                  onPathComponentTap(null);
+                                } else {
+                                  onPathComponentTap(componentPath);
+                                }
+                              },
+                              borderRadius:
+                                  BorderRadius.circular(kSaberContainerRadius),
+                              hoverColor: Colors.transparent,
+                              focusColor: Colors.transparent,
+                              highlightColor: colorScheme.onSurface.withValues(
+                                alpha: 0.06,
+                              ),
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(
+                                    kSaberContainerRadius,
+                                  ),
+                                  border: Border.all(
+                                    color: colorScheme.outlineVariant.withValues(
+                                      alpha: isLast ? 0.28 : 0.14,
+                                    ),
+                                  ),
+                                  color: colorScheme.surfaceContainerHighest
+                                      .withValues(alpha: 0.35),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 8,
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      label,
+                                      style: theme.textTheme.labelLarge
+                                          ?.copyWith(
+                                        color: itemColor,
+                                        fontWeight: isLast
+                                            ? FontWeight.w600
+                                            : FontWeight.w500,
+                                        letterSpacing: -0.2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
-              );
-            },
-          );
-        },
+              ),
+            ),
+            if (trailingSectionLabel != null) ...[
+              const HomeToolbarDivider(),
+              Padding(
+                padding: const EdgeInsetsDirectional.only(end: 10, start: 4),
+                child: Text(
+                  trailingSectionLabel!,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: colorScheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.4,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

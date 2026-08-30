@@ -9,6 +9,8 @@ import 'package:go_router/go_router.dart';
 import 'package:logging/logging.dart';
 import 'package:saber/components/home/delete_note_button.dart';
 import 'package:saber/components/home/export_note_button.dart';
+import 'package:saber/components/home/home_selection_action_bar.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/home/masonry_files.dart';
 import 'package:saber/components/home/move_note_button.dart';
 import 'package:saber/components/home/new_note_button.dart';
@@ -18,9 +20,9 @@ import 'package:saber/components/home/sort_button.dart';
 import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
-import 'package:saber/data/tags_database.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
+import 'package:saber/data/tags_database.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/services/vault_adapter.dart';
 
@@ -86,15 +88,20 @@ class _SearchPageState extends State<SearchPage> {
     searchController.dispose();
     searchText.dispose();
     fileWriteSubscription?.cancel();
+    _fileWriteDebounce?.cancel();
     super.dispose();
   }
 
   StreamSubscription? fileWriteSubscription;
+  Timer? _fileWriteDebounce;
   void fileWriteListener(FileOperation event) {
-
     if (selectedFiles.value.isNotEmpty) return;
 
-    findAllNotes(fromFileListener: true);
+    _fileWriteDebounce?.cancel();
+    _fileWriteDebounce = Timer(const Duration(milliseconds: 320), () {
+      _fileWriteDebounce = null;
+      if (mounted) findAllNotes(fromFileListener: true);
+    });
   }
 
   void _setState() => setState(() {});
@@ -116,8 +123,11 @@ class _SearchPageState extends State<SearchPage> {
         return tags.any((tag) => tag.contains(search));
       }).toList();
     }
-    await SortNotes.sortNotes(filteredFiles,
-        context: SortContext.search, forced: true);
+    await SortNotes.sortNotes(
+      filteredFiles,
+      context: SortContext.search,
+      forced: true,
+    );
     if (mounted) setState(() {});
   }
 
@@ -227,10 +237,14 @@ class _SearchPageState extends State<SearchPage> {
                             physics: const AlwaysScrollableScrollPhysics(),
                             slivers: [
                               SliverAppBar(
+                                primary: false,
                                 collapsedHeight: kToolbarHeight,
                                 expandedHeight: 100,
                                 pinned: true,
                                 scrolledUnderElevation: 1,
+                                backgroundColor: homeAppBarBackgroundColor(
+                                  context,
+                                ),
                                 leading: null,
                                 title: ValueListenableBuilder<String>(
                                   valueListenable: searchText,
@@ -275,20 +289,32 @@ class _SearchPageState extends State<SearchPage> {
                                     },
                                   ),
                                   // Security: Lock Vault Button
-                                  if (stows.localEncryptionEnabled.value &&
-                                      VaultAdapter.isUnlocked)
-                                    IconButton(
-                                      tooltip: 'Lock Vault',
-                                      icon: const Icon(
-                                        Icons.power_settings_new,
-                                      ),
-                                      onPressed: () async {
-                                        await VaultAdapter.instance.lock();
-                                        if (context.mounted) {
-                                          context.go(RoutePaths.login);
-                                        }
-                                      },
-                                    ),
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable:
+                                        stows.localEncryptionEnabled,
+                                    builder: (context, encryptionOn, _) {
+                                      return ValueListenableBuilder<bool>(
+                                        valueListenable:
+                                            VaultAdapter.unlockListenable,
+                                        builder: (context, unlocked, _) {
+                                          if (!encryptionOn || !unlocked) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return IconButton(
+                                            tooltip: 'Lock Vault',
+                                            icon: const Icon(
+                                              Icons.power_settings_new,
+                                            ),
+                                            onPressed: () {
+                                              unawaited(
+                                                VaultAdapter.lockAndGoToLogin(),
+                                              );
+                                            },
+                                          );
+                                        },
+                                      );
+                                    },
+                                  ),
                                   SortButton(
                                     sortContext: SortContext.search,
                                     callback: () async {
@@ -318,9 +344,7 @@ class _SearchPageState extends State<SearchPage> {
                               ] else ...[
                                 SliverSafeArea(
                                   minimum: EdgeInsets.only(
-                                    bottom: isSelecting
-                                        ? 16
-                                        : 100,
+                                    bottom: isSelecting ? 16 : 100,
                                   ),
                                   sliver: MasonryFiles(
                                     key: const PageStorageKey(
@@ -342,58 +366,43 @@ class _SearchPageState extends State<SearchPage> {
         ),
         bottomNavigationBar: isSelecting
             ? SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-                        width: 1,
+                child: HomeSelectionActionBar(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      Collapsible(
+                        axis: CollapsibleAxis.horizontal,
+                        collapsed: selectedFiles.value.length != 1,
+                        child: RenameNoteButton(
+                          existingPath: selectedFiles.value.isEmpty
+                              ? ''
+                              : selectedFiles.value.first,
+                          unselectNotes: () => selectedFiles.value = [],
+                        ),
                       ),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
+                      MoveNoteButton(
+                        filesToMove: selectedFiles.value,
+                        unselectNotes: () => selectedFiles.value = [],
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          Collapsible(
-                            axis: CollapsibleAxis.horizontal,
-                            collapsed: selectedFiles.value.length != 1,
-                            child: RenameNoteButton(
-                              existingPath: selectedFiles.value.isEmpty
-                                  ? ''
-                                  : selectedFiles.value.first,
-                              unselectNotes: () => selectedFiles.value = [],
-                            ),
-                          ),
-                          MoveNoteButton(
-                            filesToMove: selectedFiles.value,
-                            unselectNotes: () => selectedFiles.value = [],
-                          ),
-                          DeleteNoteButton(
-                            selectedFiles: selectedFiles.value,
-                            unselectNotes: () => selectedFiles.value = [],
-                            onDeleted: findAllNotes,
-                          ),
-                          ExportNoteButton(selectedFiles: selectedFiles.value),
-                          SelectAllButton(
-                            selectedFiles: selectedFiles.value,
-                            allFiles: filteredFiles,
-                            selectAll: () {
-                              selectedFiles.value = List.from(filteredFiles);
-                            },
-                            deselectAll: () => selectedFiles.value = [],
-                          ),
-                        ],
+                      DeleteNoteButton(
+                        selectedFiles: selectedFiles.value,
+                        unselectNotes: () => selectedFiles.value = [],
+                        onDeleted: findAllNotes,
                       ),
-                    ),
+                      ExportNoteButton(
+                        selectedFiles: selectedFiles.value,
+                        exportHostContext: context,
+                        onExportStarted: () => selectedFiles.value = [],
+                      ),
+                      SelectAllButton(
+                        selectedFiles: selectedFiles.value,
+                        allFiles: filteredFiles,
+                        selectAll: () {
+                          selectedFiles.value = List.from(filteredFiles);
+                        },
+                        deselectAll: () => selectedFiles.value = [],
+                      ),
+                    ],
                   ),
                 ),
               )

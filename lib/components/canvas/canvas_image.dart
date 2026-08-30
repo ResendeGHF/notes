@@ -6,7 +6,9 @@ import 'dart:math' as math;
 import 'dart:async';
 
 import 'package:defer_pointer/defer_pointer.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_image_dialog.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
@@ -218,15 +220,32 @@ class _CanvasImageState extends State<CanvasImage> {
             cursor: (active || widget.selected) && !isCropMode
                 ? SystemMouseCursors.grab
                 : MouseCursor.defer,
-            child: GestureDetector(
+            child: RawGestureDetector(
+              behavior: HitTestBehavior.translucent,
+              gestures:
+                  (widget.isBackground &&
+                      (active || widget.selected) &&
+                      !isCropMode)
+                  ? <Type, GestureRecognizerFactory>{
+                      LongPressGestureRecognizer:
+                          GestureRecognizerFactoryWithHandlers<
+                            LongPressGestureRecognizer
+                          >(
+                            () => LongPressGestureRecognizer(
+                              duration: CanvasContextMenuFeel.longPressDuration,
+                            ),
+                            (LongPressGestureRecognizer instance) {
+                              instance.onLongPress = showModal;
+                            },
+                          ),
+                    }
+                  : const <Type, GestureRecognizerFactory>{},
+              child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: widget.isBackground && !isCropMode
                   ? () {
                       active = !active;
                     }
-                  : null,
-              onLongPress: (widget.isBackground && (active || widget.selected) && !isCropMode)
-                  ? showModal
                   : null,
               onSecondaryTap:
                   (widget.isBackground && (active || widget.selected) && !isCropMode)
@@ -293,12 +312,14 @@ class _CanvasImageState extends State<CanvasImage> {
                     ),
                   ),
                   child: Center(
-                    child: SizedBox(
-                      width: boxW,
-                      height: boxH,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
+                    child: ClipRect(
+                      child: SizedBox(
+                        width: boxW,
+                        height: boxH,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          clipBehavior: Clip.hardEdge,
+                          children: [
                           SizedOverflowBox(
                             size: effectiveSrcRect.size,
                             child: Transform.translate(
@@ -371,7 +392,9 @@ class _CanvasImageState extends State<CanvasImage> {
                 ),
               ),
             ),
+            ),
           ),
+        ),
           if (widget.isBackground &&
               !widget.readOnly &&
               (active || widget.selected) &&
@@ -466,24 +489,21 @@ class _CanvasImageState extends State<CanvasImage> {
         child: unpositioned,
       );
     }
+    // Keep a minimum hit target, but pad equally around [dstRect] so the
+    // painted image stays inside the selection box when the image is small.
+    final hitW = math.max(effectiveRect.width, CanvasImage.minInteractiveSize);
+    final hitH = math.max(effectiveRect.height, CanvasImage.minInteractiveSize);
+    final padX = (hitW - effectiveRect.width) / 2;
+    final padY = (hitH - effectiveRect.height) / 2;
     return AnimatedPositioned(
-
       duration: (panStartRect != .zero || widget.selected)
           ? Duration.zero
           : const Duration(milliseconds: 300),
       curve: Curves.fastLinearToSlowEaseIn,
-
-      left: effectiveRect.left,
-      top: effectiveRect.top,
-      width: math.max(
-        effectiveRect.width,
-        CanvasImage.minInteractiveSize,
-      ),
-      height: math.max(
-        effectiveRect.height,
-        CanvasImage.minInteractiveSize,
-      ),
-
+      left: effectiveRect.left - padX,
+      top: effectiveRect.top - padY,
+      width: hitW,
+      height: hitH,
       child: unpositioned,
     );
   }
@@ -501,9 +521,13 @@ class _CanvasImageState extends State<CanvasImage> {
     final isToolbarBottom =
         stows.editorToolbarAlignment.value == AxisDirection.down;
 
-    showDialog(
+    showGeneralDialog<void>(
       context: context,
-      builder: (context) {
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.transparent,
+      transitionDuration: CanvasContextMenuFeel.openDuration,
+      pageBuilder: (context, animation, secondaryAnimation) {
         final dialog = AdaptiveAlertDialog(
           title: Text(t.editor.imageOptions.title),
           content: CanvasImageDialog(
@@ -537,6 +561,12 @@ class _CanvasImageState extends State<CanvasImage> {
         }
 
         return dialog;
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        return CanvasContextMenuFeel.buildOpenTransition(
+          animation: animation,
+          child: child,
+        );
       },
     );
   }

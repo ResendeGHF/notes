@@ -3,7 +3,7 @@
 
 import 'dart:convert';
 
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
@@ -15,6 +15,7 @@ class NoteToolSettings {
   NoteToolSettings({
     this.toolbarColorSlots,
     this.toolbarColorSlotsCount,
+    this.penSizePresetSizes,
     this.lastTool,
     this.lastPenType,
 
@@ -37,12 +38,15 @@ class NoteToolSettings {
     this.advancedPenStartEasingId,
     this.advancedPenEndEasingId,
 
+    this.laserPointerSize,
+
     this.eraserSize,
     this.eraserMode,
   });
 
   final List<String>? toolbarColorSlots;
   final int? toolbarColorSlotsCount;
+  final List<double>? penSizePresetSizes;
   final String? lastTool;
   final String? lastPenType;
 
@@ -65,6 +69,8 @@ class NoteToolSettings {
   final String? advancedPenStartEasingId;
   final String? advancedPenEndEasingId;
 
+  final double? laserPointerSize;
+
   final double? eraserSize;
   final int? eraserMode;
 
@@ -72,6 +78,7 @@ class NoteToolSettings {
     return <String, dynamic>{
       if (toolbarColorSlots != null) 'cs': toolbarColorSlots,
       if (toolbarColorSlotsCount != null) 'csc': toolbarColorSlotsCount,
+      if (penSizePresetSizes != null) 'psp': penSizePresetSizes,
       if (lastTool != null) 'lt': lastTool,
       if (lastPenType != null) 'lpt': lastPenType,
       if (fountainPenOptions != null) 'fpo': fountainPenOptions,
@@ -93,6 +100,7 @@ class NoteToolSettings {
       if (advancedPenMainEasingId != null) 'ame': advancedPenMainEasingId,
       if (advancedPenStartEasingId != null) 'ase': advancedPenStartEasingId,
       if (advancedPenEndEasingId != null) 'aee': advancedPenEndEasingId,
+      if (laserPointerSize != null) 'lps': laserPointerSize,
       if (eraserSize != null) 'es': eraserSize,
       if (eraserMode != null) 'em': eraserMode,
     };
@@ -104,6 +112,9 @@ class NoteToolSettings {
           ?.map((e) => e.toString())
           .toList(),
       toolbarColorSlotsCount: (json['csc'] as num?)?.toInt(),
+      penSizePresetSizes: (json['psp'] as List<dynamic>?)
+          ?.map((e) => (e as num).toDouble())
+          .toList(),
       lastTool: json['lt'] as String?,
       lastPenType: json['lpt'] as String?,
       fountainPenOptions: json['fpo'] == null
@@ -136,6 +147,7 @@ class NoteToolSettings {
       advancedPenMainEasingId: json['ame'] as String?,
       advancedPenStartEasingId: json['ase'] as String?,
       advancedPenEndEasingId: json['aee'] as String?,
+      laserPointerSize: (json['lps'] as num?)?.toDouble(),
       eraserSize: (json['es'] as num?)?.toDouble(),
       eraserMode: (json['em'] as num?)?.toInt(),
     );
@@ -180,7 +192,8 @@ NoteToolSettings captureNoteToolSettings({
   } else if (cp.toolId == ToolId.calligraphyPen) {
     calligraphyOpts = cp.options;
     calligraphyColor = cp.color.value;
-  } else if (cp.toolId == ToolId.advancedPen) {
+  } else if (cp.toolId == ToolId.advancedPen ||
+      cp.toolId == ToolId.experimentalPen) {
     advancedOpts = cp.options;
     advancedColor = cp.color.value;
   }
@@ -191,6 +204,7 @@ NoteToolSettings captureNoteToolSettings({
   return NoteToolSettings(
     toolbarColorSlots: List<String>.from(stows.toolbarColorSlots.value),
     toolbarColorSlotsCount: stows.toolbarColorSlotsCount.value,
+    penSizePresetSizes: stows.penSizePresetSizesAsDoubles(),
     lastTool: lastToolId.id,
     lastPenType: lastPenTypeId.id,
     fountainPenOptions: fountainOpts.toJson(),
@@ -211,6 +225,7 @@ NoteToolSettings captureNoteToolSettings({
     advancedPenMainEasingId: stows.lastAdvancedPenMainEasingId.value,
     advancedPenStartEasingId: stows.lastAdvancedPenStartEasingId.value,
     advancedPenEndEasingId: stows.lastAdvancedPenEndEasingId.value,
+    laserPointerSize: stows.laserPointerSize.value,
     eraserSize: Eraser.currentEraser.size,
     eraserMode: Eraser.currentEraser.mode.index,
   );
@@ -224,6 +239,21 @@ void applyNoteToolSettings(NoteToolSettings settings) {
   }
   if (settings.toolbarColorSlotsCount != null) {
     stows.toolbarColorSlotsCount.value = settings.toolbarColorSlotsCount!;
+  }
+  if (settings.penSizePresetSizes != null) {
+    stows.normalizePenSizePresetList();
+    final n = stows.penSizePresetCount.value;
+    final incoming = settings.penSizePresetSizes!;
+    final merged = List<String>.generate(
+      n,
+      (i) => i < incoming.length
+          ? incoming[i].toString()
+          : stows.penSizePresetSizes.value.length > i
+          ? stows.penSizePresetSizes.value[i]
+          : '${2 + i}',
+    );
+    stows.penSizePresetSizes.value = merged;
+    stows.normalizePenSizePresetList();
   }
   if (settings.lastTool != null) {
     stows.lastTool.value = ToolId.parsePenType(
@@ -307,6 +337,11 @@ void applyNoteToolSettings(NoteToolSettings settings) {
     stows.lastAdvancedPenEndEasingId.value = settings.advancedPenEndEasingId!;
   }
 
+  if (settings.laserPointerSize != null) {
+    stows.laserPointerSize.value =
+        settings.laserPointerSize!.clamp(4.0, 10.0);
+  }
+
   if (settings.eraserSize != null) {
     Eraser.currentEraser.updateSize = settings.eraserSize!;
   }
@@ -331,12 +366,10 @@ Pen _penFromType(ToolId id) {
       return Pen.calligraphyPen();
     case ToolId.shapePen:
       return Pen.ballpointPen();
-    case ToolId.verticalSpacePen:
-      return Pen.verticalSpacePen();
-    case ToolId.horizontalSpacePen:
-      return Pen.horizontalSpacePen();
     case ToolId.advancedPen:
-      return AdvancedPen();
+      return Pen.advancedPen();
+    case ToolId.experimentalPen:
+      return Pen.advancedPen();
     default:
       return Pen.ballpointPen();
   }

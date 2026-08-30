@@ -7,7 +7,7 @@ This folder describes **architecture and algorithms** for the heaviest and most 
 | Document | Topics |
 |----------|--------|
 | [canvas-inner-preview-painter.md](canvas-inner-preview-painter.md) | `InnerCanvas`, `CanvasPreview`, `CanvasPainter`, spatial indexing, GPU batching, repaint strategy |
-| [canvas-stroke-and-shape.md](canvas-stroke-and-shape.md) | `_stroke.dart` (`Stroke`), mesh generation, `perfect_freehand`, splines, `QuadTree` / `SpatialGrid`, `ShapeStroke` |
+| [canvas-stroke-and-shape.md](canvas-stroke-and-shape.md) | `_stroke.dart` (`Stroke`), mesh generation, `stroke_geometry`, splines, `QuadTree` / `SpatialGrid`, `ShapeStroke` |
 | [file-manager.md](file-manager.md) | `FileManager`: vault vs plain disk, paths, backups, exports, directory watching |
 | [vault-adapter.md](vault-adapter.md) | `VaultAdapter`: SQLCipher index, encrypted blobs, caches, isolates |
 | [editor-and-menu.md](editor-and-menu.md) | `editor.dart`, `editor_menu.dart` (`ModernEditorMenu`): gesture pipeline, tools, history, menu surface |

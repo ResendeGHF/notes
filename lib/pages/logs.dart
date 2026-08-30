@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:logging/logging.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/theming/adaptive_icon.dart';
 import 'package:saber/components/theming/font_fallbacks.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -56,10 +57,12 @@ class LogsPage extends StatelessWidget {
           return CustomScrollView(
             slivers: [
               SliverAppBar(
+                primary: false,
                 collapsedHeight: kToolbarHeight,
                 expandedHeight: 200,
                 pinned: true,
                 scrolledUnderElevation: 1,
+                backgroundColor: homeAppBarBackgroundColor(context),
                 flexibleSpace: FlexibleSpaceBar(
                   title: Text(
                     t.logs.logs,

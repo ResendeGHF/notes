@@ -24,13 +24,13 @@ Default options for [AdvancedPen]; full control is in the toolbar.
 
 ### Block 3
 
-Pen with all perfect_freehand options exposed; configurable via Advanced Pen panel and presets.
+Pen with all stroke geometry options exposed; configurable via Advanced Pen panel and presets.
 
 ## Imports
 
 - `package:flutter/material.dart`
 - `package:font_awesome_flutter/font_awesome_flutter.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/canvas/_stroke.dart`
 - `package:saber/data/editor/page.dart`
 - `package:saber/data/prefs.dart`

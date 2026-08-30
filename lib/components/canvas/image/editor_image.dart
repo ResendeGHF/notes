@@ -14,16 +14,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
-import 'package:pdfrx/pdfrx.dart';
+import 'package:pdfrx/pdfrx.dart' hide PdfLink;
 import 'package:saber/components/canvas/_asset_cache.dart';
-import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/invert_widget.dart';
-import 'package:saber/components/editor/pdf_link_detector.dart'
-    as link_detector;
+import 'package:saber/components/editor/pdf_link_detector.dart';
+import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
-import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 
 part 'png_editor_image.dart';
@@ -31,7 +29,6 @@ part 'pdf_editor_image.dart';
 part 'svg_editor_image.dart';
 
 sealed class EditorImage extends ChangeNotifier {
-
   int id;
 
   final String extension;
@@ -61,9 +58,7 @@ sealed class EditorImage extends ChangeNotifier {
   );
   Rect get dstRect => _dstRect;
   set dstRect(Rect dstRect) {
-
     if (locked && _dstRect != Rect.zero) {
-
       if (dstRect.left != _dstRect.left || dstRect.top != _dstRect.top) {
         return;
       }
@@ -75,11 +70,10 @@ sealed class EditorImage extends ChangeNotifier {
         CanvasImage.minImageSize / _dstRect.width,
         CanvasImage.minImageSize / _dstRect.height,
       );
-      _dstRect = Rect.fromLTWH(
-        _dstRect.left,
-        _dstRect.top,
-        _dstRect.width * scale,
-        _dstRect.height * scale,
+      _dstRect = Rect.fromCenter(
+        center: _dstRect.center,
+        width: _dstRect.width * scale,
+        height: _dstRect.height * scale,
       );
     }
     notifyListeners();
@@ -214,7 +208,6 @@ sealed class EditorImage extends ChangeNotifier {
   @protected
   @mustCallSuper
   void writeBinary(BinaryWriter writer) {
-
     writer.writeInt(ImageBinaryKeys.version, 1);
     writer.writeString(ImageBinaryKeys.extension, extension);
     writer.writeInt(ImageBinaryKeys.pageIndex, pageIndex);
@@ -244,7 +237,6 @@ sealed class EditorImage extends ChangeNotifier {
   }
 
   static Map<String, dynamic> readBinary(BinaryReader reader) {
-
     int key;
     final int version;
     key = reader.readKey();
@@ -329,10 +321,8 @@ sealed class EditorImage extends ChangeNotifier {
     if (!reader.isEOF) {
       final peekKey = reader.peekKey();
       if (peekKey == 104) {
-
         reader.readKey();
-        rotation = reader
-            .readDoubleNoKey();
+        rotation = reader.readDoubleNoKey();
       }
 
       if (!reader.isEOF) {
@@ -342,7 +332,6 @@ sealed class EditorImage extends ChangeNotifier {
           locked = reader.readBoolNoKey();
         }
       }
-
     }
 
     return {
@@ -358,6 +347,36 @@ sealed class EditorImage extends ChangeNotifier {
       'rotation': rotation,
       'locked': locked,
     };
+  }
+
+  static void skipPayloadAfterHeader(BinaryReader reader, String extension) {
+    while (!reader.isEOF) {
+      final peekKey = reader.peekKey();
+      if (peekKey == ImageBinaryKeys.assetId) {
+        reader.readKey();
+        reader.readIntNoKey();
+      } else if (peekKey == ImageBinaryKeys.pdfi && extension == '.pdf') {
+        reader.readKey();
+        reader.readIntNoKey();
+      } else if (peekKey == 104) {
+        reader.readKey();
+        reader.readDoubleNoKey();
+      } else if (peekKey == ImageBinaryKeys.previewHash) {
+        reader.readKey();
+        reader.readUint32();
+      } else if (peekKey == ImageBinaryKeys.fileSize) {
+        reader.readKey();
+        reader.readUint32();
+      } else if (peekKey == ImageBinaryKeys.fullHash) {
+        reader.readKey();
+        reader.readUint32();
+      } else if (peekKey == ImageBinaryKeys.fileInfo) {
+        reader.readKey();
+        reader.readStringNoKey();
+      } else {
+        break;
+      }
+    }
   }
 
   factory EditorImage.fromBinary(
@@ -429,7 +448,6 @@ sealed class EditorImage extends ChangeNotifier {
         _shouldLoadOut!.complete(true);
       } else {
         Future.delayed(const Duration(seconds: 5)).then((_) {
-
           if (_shouldLoadOut == null) return;
           if (_shouldLoadOut!.isCompleted) return;
           _shouldLoadOut!.complete(true);

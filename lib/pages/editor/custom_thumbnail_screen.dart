@@ -99,6 +99,7 @@ class _CustomThumbnailScreenState extends State<CustomThumbnailScreen> {
     return Scaffold(
       backgroundColor: HuxTokens.surfacePrimary(context),
       appBar: AppBar(
+        primary: false,
         title: Text(
           'Adjust Thumbnail',
           style: TextStyle(
@@ -107,7 +108,7 @@ class _CustomThumbnailScreenState extends State<CustomThumbnailScreen> {
             fontWeight: FontWeight.w600,
           ),
         ),
-        backgroundColor: Colors.transparent,
+        backgroundColor: HuxTokens.surfacePrimary(context),
         elevation: 0,
         centerTitle: true,
         iconTheme: IconThemeData(color: HuxTokens.textPrimary(context)),

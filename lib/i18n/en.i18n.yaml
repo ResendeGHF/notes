@@ -52,6 +52,12 @@ home:
   invalidFormat: The file you selected is not supported. Please select an sbn, sbn2, sba, or pdf file.
   noFiles: No files found
   noPreviewAvailable: No preview available
+  fileList:
+    metaSize: Size
+    metaModified: Modified
+    metaAccessed: Accessed
+    metaNotesInside: Notes inside
+    accessedUnavailableVault: Not opened in the app yet
   createNewNote: Tap the + button to create a new note
   backFolder: Go back to the previous folder
   newFolder: 
@@ -144,6 +150,8 @@ settings:
     strokePrediction: Stroke prediction
     strokePredictionAmount: Prediction strength
     toolbarColorSlotsCount: Toolbar color slots
+    penSizePresetCount: Pen size presets
+    penSizePresetSlot: Preset
     themeVariant: Theme variant
     locale: Language
     appTheme: App theme
@@ -178,6 +186,7 @@ settings:
     strokePrediction: Draws a short ink tip slightly ahead of the stylus while you move (not saved in the note; reduces perceived lag)
     strokePredictionAmount: How far ahead to extrapolate while drawing
     toolbarColorSlotsCount: Number of colors to show in the toolbar
+    penSizePresetCount: Number of stroke-width presets shown in the editor toolbar
     themeVariant: Color scheme variant
     hyperlegibleFont: Increases legibility for users with low vision
     allowInsecureConnections: (Not recommended) Allow Saber to connect to servers with self-signed/untrusted certificates
@@ -212,6 +221,30 @@ settings:
     editor: Editor
     performance: Performance
     advanced: Advanced
+  noteInkDefaults:
+    sectionTitle: Note & ink defaults
+    changeNoteDefaults: Change note defaults
+    changeNoteDefaultsSubtitle: Pattern, spacing, colors, and margins for new notes
+    changeInkDefaults: Change ink defaults
+    changeInkDefaultsSubtitle: Toolbar colors, stroke widths, and palettes
+    noteDefaultsTitle: Note defaults
+    noteDefaultsSubtitle: Live preview — used when you create a note
+    inkDefaultsTitle: Ink defaults
+    inkDefaultsSubtitle: Palettes and toolbar colors
+    activePalette: Palette
+    palettePickerLabel: Palette
+    savePaletteAsNew: New palette from current
+    savePaletteAsNewShort: New palette
+    savePaletteAsNewTitle: Save palette
+    toolbarSlotsHint: Tap a swatch to recolor toolbar slots.
+    renamePalette: Rename palette
+    renamePaletteTitle: Rename palette
+    paletteNameHint: Name
+    deletePaletteConfirm: Remove this palette? Toolbar colors stay until you choose another palette.
+    toolbarSlotsDropdownLabel: Colors in toolbar
+    toolbarSlotColor: Toolbar slot $index
+    penSizePresetCountLabel: Stroke width presets
+
   themeModes: 
     system: System
     light: Light
@@ -350,7 +383,14 @@ update:
 editor:
   navigation:
     title: Notes
-    pdfOutlines: PDF Outlines
+    pdfOutlines: Outlines
+    noPdfOutlineEntries: No outline entries
+    noOutlineEntriesHint: Add outlines to bookmark pages in this note. They are included when you export as PDF.
+    addOutlineForPage: Add outline for current page
+    renameOutline: Rename outline
+    deleteOutline: Delete outline
+    outlineTitle: Title
+    outlineActions: Outline actions
     firstPage: First page
     lastPage: Last page
     goToPage: Go to page
@@ -360,6 +400,8 @@ editor:
     calligraphyPen: Calligraphy pen
     fountainPen: Fountain pen
     ballpointPen: Ballpoint pen
+    advancedPen: Advanced pen
+    advancedPencil: Advanced pencil
     highlighter: Highlighter
     shapePen: Shape pen
     laserPointer: Laser pointer
@@ -372,7 +414,10 @@ editor:
     duplicate: Duplicate
     share: Share
     shareAsSvg: Share as SVG
-  toolbar: 
+    changeColor: Change color
+    changeStrokeType: Change stroke type
+    changeStrokeTypeTitle: Change stroke type
+    changeStrokeTypeHint: Convert selected strokes to another pen.  toolbar: 
     toggleColors: Toggle colors
     select: Select
     toggleEraser: Toggle eraser
@@ -384,9 +429,47 @@ editor:
     export: Export
     exportAs: "Export as:"
     fullscreen: Toggle fullscreen
+    regionScreenshot: Region screenshot
+    regionScreenshotHint: Drag to select an area
+    regionScreenshotTitle: Share or copy screenshot?
+    regionScreenshotBody: Share with another app, or copy the image to the clipboard.
+    regionScreenshotShare: Share
+    regionScreenshotCopy: Copy to clipboard
+    regionScreenshotTooSmall: Selection too small
+    regionScreenshotFailed: Failed to capture screenshot
   penOptions: 
     size: Size
     opacity: Opacity
+    thinning: Thinning
+    smoothing: Smoothing
+    streamline: Streamline
+    pressureSensitivity: Pressure sensitivity
+    velocityThinning: Velocity thinning
+    minSizeRatio: Min width ratio
+    maxSizeRatio: Max width ratio
+    startTaper: Start taper
+    endTaper: End taper
+    easing: Width easing
+    startEasing: Start taper easing
+    endEasing: End taper easing
+    neonStroke: Neon stroke
+    presetNameHint: Preset name
+    pencilNoise: Pencil grain
+    pencilNoiseHint: Fast procedural noise (no image tiles). Defaults are tuned for smooth drawing.
+    noiseGrainScale: Grain size
+    noiseThreshold: Coverage
+    noiseContrast: Contrast
+    noiseFineMix: Fine speck mix
+    resetNoiseDefaults: Reset grain
+    pressureMapsTo: Stylus pressure
+    pressureToThickness: Thickness
+    pressureToCoverage: Coverage
+    pencilShadow: Shadow
+  penSizePresets:
+    editTitle(n): Pen preset $n
+    editSubtitle: Applies from editor toolbar presets (double tap a preset chip to tune it.)
+    sameAsPenSlider: Matches pen modal stroke scale; labels match the toolbar pen slider numbering (around 1.0 to 10.0).
+    tooltip: Tap once for preset stroke width; double tap (with editor open) adjusts it for that note.
   colors: 
     colorPicker: Color picker
     customBrightnessHue: Custom $b $h
@@ -492,7 +575,6 @@ editor:
   copyToClipboard: Copied to clipboard
   copy: Copy
   goBack: Go Back
-  areaEraserMemorySafeQueue: Large erase throttled to avoid running out of memory — finishing in the background
   add: Add
   close: Close
   imageSetAsBackground: Image set as background
@@ -582,7 +664,7 @@ export:
 vault:
   unlock: Unlock
   vaultLocked: Vault Locked
-  vaultLockedMessage: Your notes are encrypted. Please enter your password to access them.
+  vaultLockedMessage: Please enter your password.
   filesWaitingToImport: You have $count file(s) waiting to import. Unlock to continue.
   password: Password
   failedToInit: Failed to initialize vault. Please try again.
@@ -680,3 +762,4 @@ toolbar:
 backup:
   notificationTitle: Backing up notes...
   notificationBody: "$current / $total assets synced"
+  restoreProgressTitle: Restoring backup...

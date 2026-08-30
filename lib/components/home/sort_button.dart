@@ -2,15 +2,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'package:flutter/material.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 
-enum SortContext {
-  browse,
-  recent,
-  search,
+enum SortContext { browse, recent, search }
+
+class SortOverride {
+  SortOverride({
+    this.functionIdx = 1,
+    this.increasing = false,
+  });
+
+  /// 0 alphabetical, 1 last modified, 2 size.
+  int functionIdx;
+  bool increasing;
+
+  static const recentDefaultFunctionIdx = 1;
+  static const recentDefaultIncreasing = false;
+
+  void resetToRecentDefault() {
+    functionIdx = recentDefaultFunctionIdx;
+    increasing = recentDefaultIncreasing;
+  }
 }
 
 class SortNotes {
@@ -24,7 +40,8 @@ class SortNotes {
 
   static int _getSortFunctionIdx(SortContext context) {
     return switch (context) {
-      SortContext.browse || SortContext.search => stows.browseSortFunctionIdx.value,
+      SortContext.browse ||
+      SortContext.search => stows.browseSortFunctionIdx.value,
       SortContext.recent => stows.recentSortFunctionIdx.value,
     };
   }
@@ -43,7 +60,8 @@ class SortNotes {
 
   static bool _getIsIncreasingOrder(SortContext context) {
     return switch (context) {
-      SortContext.browse || SortContext.search => stows.browseIsSortIncreasing.value,
+      SortContext.browse ||
+      SortContext.search => stows.browseIsSortIncreasing.value,
       SortContext.recent => stows.recentIsSortIncreasing.value,
     };
   }
@@ -73,12 +91,43 @@ class SortNotes {
     List<String> filePaths, {
     required SortContext context,
     bool forced = false,
+    SortOverride? override,
   }) async {
-    if (_isNeeded || forced) {
-      final idx = _getSortFunctionIdx(context);
-      final increasing = _getIsIncreasingOrder(context);
-      await _sortFunctions[idx].call(filePaths, increasing);
-      _isNeeded = false;
+    if (override != null || _isNeeded || forced) {
+      final idx = override?.functionIdx ?? _getSortFunctionIdx(context);
+      final increasing = override?.increasing ?? _getIsIncreasingOrder(context);
+      await _sortFunctions[idx.clamp(0, _sortFunctions.length - 1)].call(
+        filePaths,
+        increasing,
+      );
+      if (override == null) _isNeeded = false;
+    }
+  }
+
+  static void sortNoteIndex(List<NoteIndexEntry> notes, SortOverride override) {
+    final idx = override.functionIdx.clamp(0, 2);
+    final increasing = override.increasing;
+    switch (idx) {
+      case 0:
+        notes.sort(
+          (a, b) => a.path
+              .split('/')
+              .last
+              .toLowerCase()
+              .compareTo(b.path.split('/').last.toLowerCase()),
+        );
+      case 1:
+        notes.sort((a, b) => a.modifiedMillis.compareTo(b.modifiedMillis));
+      case 2:
+        notes.sort((a, b) => a.sizeBytes.compareTo(b.sizeBytes));
+    }
+    if (!increasing) {
+      final n = notes.length;
+      for (var i = 0; i < n / 2; i++) {
+        final tmp = notes[i];
+        notes[i] = notes[n - i - 1];
+        notes[n - i - 1] = tmp;
+      }
     }
   }
 
@@ -151,11 +200,23 @@ class SortNotes {
       if (await FileManager.isDirectory(path)) {
         return await _getDirectorySize(path);
       }
-      final notePath = await _resolveNotePath(path);
-      return await FileManager.getFileSize(notePath);
+      final noteBasePath = _resolveNoteBasePath(path);
+      // Use getNoteListRowStats to ensure the sorted size matches the UI exactly (including assets)
+      final stats = await FileManager.getNoteListRowStats(noteBasePath);
+      return stats?.sizeBytes ?? 0;
     } catch (_) {
       return 0;
     }
+  }
+
+  static String _resolveNoteBasePath(String path) {
+    if (path.endsWith(Editor.extension)) {
+      return path.substring(0, path.length - Editor.extension.length);
+    }
+    if (path.endsWith(Editor.extensionOldJson)) {
+      return path.substring(0, path.length - Editor.extensionOldJson.length);
+    }
+    return path;
   }
 
   static Future<String> _resolveNotePath(String path) async {
@@ -181,12 +242,9 @@ class SortNotes {
   }
 
   static Future<int> _getDirectorySize(String directory) async {
-    final files = await _getDirectoryNoteFiles(directory);
-    int total = 0;
-    for (final file in files) {
-      total += await FileManager.getFileSize(file);
-    }
-    return total;
+    final props = await FileManager.getFolderProperties(directory);
+    final size = props?['total_size'];
+    return size is int ? size : 0;
   }
 
   static Future<List<String>> _getDirectoryNoteFiles(String directory) async {
@@ -208,10 +266,13 @@ class SortButton extends StatelessWidget {
     super.key,
     required this.callback,
     required this.sortContext,
+    this.sortOverride,
   });
 
   final Future<void> Function() callback;
   final SortContext sortContext;
+  /// When set (Recent Notes), sort is in-memory and does not persist.
+  final SortOverride? sortOverride;
 
   @override
   Widget build(BuildContext context) {
@@ -223,11 +284,12 @@ class SortButton extends StatelessWidget {
           context: context,
           barrierDismissible: true,
           barrierLabel: 'Dismiss',
-          barrierColor: Colors.black.withValues(alpha: 0.1),
+          barrierColor: Colors.black.withValues(alpha: 0.18),
           pageBuilder: (context, _, __) {
             return _SortButtonDialog(
               callback: callback,
               sortContext: sortContext,
+              sortOverride: sortOverride,
             );
           },
         );
@@ -240,10 +302,12 @@ class _SortButtonDialog extends StatefulWidget {
   const _SortButtonDialog({
     required this.callback,
     required this.sortContext,
+    this.sortOverride,
   });
 
   final Future<void> Function() callback;
   final SortContext sortContext;
+  final SortOverride? sortOverride;
 
   @override
   State<_SortButtonDialog> createState() => _SortButtonDialogState();
@@ -276,6 +340,37 @@ class _SortButtonDialogState extends State<_SortButtonDialog>
     super.dispose();
   }
 
+  int _functionIdx() {
+    return widget.sortOverride?.functionIdx ??
+        SortNotes._getSortFunctionIdx(widget.sortContext);
+  }
+
+  bool _isIncreasing() {
+    return widget.sortOverride?.increasing ??
+        SortNotes._getIsIncreasingOrder(widget.sortContext);
+  }
+
+  void _setFunctionIdx(int idx) {
+    final override = widget.sortOverride;
+    if (override != null) {
+      override.functionIdx = idx;
+    } else {
+      SortNotes._setSortFunctionIdx(widget.sortContext, idx);
+    }
+  }
+
+  void _toggleIncreasing() {
+    final override = widget.sortOverride;
+    if (override != null) {
+      override.increasing = !override.increasing;
+    } else {
+      SortNotes._setIsIncreasingOrder(
+        widget.sortContext,
+        !SortNotes._getIsIncreasingOrder(widget.sortContext),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<String> sortNames = [
@@ -284,7 +379,8 @@ class _SortButtonDialogState extends State<_SortButtonDialog>
       t.home.sortNames.sizeOnDisk,
     ];
 
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
     return Align(
       alignment: Alignment.topRight,
@@ -296,130 +392,124 @@ class _SortButtonDialogState extends State<_SortButtonDialog>
             position: _slideAnim,
             child: Material(
               color: Colors.transparent,
-              child: Container(
-                width: 250,
-                decoration: BoxDecoration(
-                  color: colorScheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                    width: 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.1),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                      child: Text(
-                        t.home.sortNames.sort,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: colorScheme.primary,
-                          letterSpacing: 0.5,
+              child: DecoratedBox(
+                decoration: homeRuggedPanelDecoration(context),
+                child: SizedBox(
+                  width: 272,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+                        child: Text(
+                          t.home.sortNames.sort,
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: colorScheme.onSurface,
+                            letterSpacing: -0.35,
+                          ),
                         ),
                       ),
-                    ),
-                    for (int idx = 0; idx < sortNames.length; idx++)
-                      InkWell(
-                        onTap: () async {
-                          SortNotes._setSortFunctionIdx(
-                            widget.sortContext,
-                            idx,
-                          );
-                          setState(() {});
-                          await widget.callback();
-                          if (mounted) Navigator.of(context).pop();
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: colorScheme.outlineVariant.withValues(
+                          alpha: 0.18,
+                        ),
+                      ),
+                      for (int idx = 0; idx < sortNames.length; idx++)
+                        Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: () async {
+                              _setFunctionIdx(idx);
+                              setState(() {});
+                              await widget.callback();
+                              if (mounted) Navigator.of(context).pop();
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      sortNames[idx],
+                                      style: theme.textTheme.bodyLarge
+                                          ?.copyWith(
+                                            fontSize: 15,
+                                            color:
+                                                _functionIdx() == idx
+                                                ? colorScheme.onSurface
+                                                : colorScheme.onSurfaceVariant,
+                                            fontWeight:
+                                                _functionIdx() == idx
+                                                ? FontWeight.w600
+                                                : FontWeight.w400,
+                                          ),
+                                    ),
+                                  ),
+                                  if (_functionIdx() == idx)
+                                    Icon(
+                                      Icons.check_rounded,
+                                      size: 20,
+                                      color: colorScheme.primary,
+                                    ),
+                                ],
+                              ),
+                            ),
                           ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  sortNames[idx],
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    color: SortNotes._getSortFunctionIdx(
-                                              widget.sortContext,
-                                            ) ==
-                                            idx
-                                        ? colorScheme.onSurface
-                                        : colorScheme.onSurfaceVariant,
-                                    fontWeight: SortNotes._getSortFunctionIdx(
-                                              widget.sortContext,
-                                            ) ==
-                                            idx
-                                        ? FontWeight.w600
-                                        : FontWeight.normal,
+                        ),
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: colorScheme.outlineVariant.withValues(
+                          alpha: 0.18,
+                        ),
+                      ),
+                      Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: () async {
+                            _toggleIncreasing();
+                            setState(() {});
+                            await widget.callback();
+                            if (mounted) Navigator.of(context).pop();
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    t.home.sortNames.increasing,
+                                    style: theme.textTheme.bodyLarge?.copyWith(
+                                      fontSize: 15,
+                                      color: colorScheme.onSurface,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              if (SortNotes._getSortFunctionIdx(
-                                    widget.sortContext,
-                                  ) ==
-                                  idx)
                                 Icon(
-                                  Icons.check,
-                                  size: 18,
-                                  color: colorScheme.primary,
+                                  _isIncreasing()
+                                      ? Icons.arrow_upward_rounded
+                                      : Icons.arrow_downward_rounded,
+                                  size: 20,
+                                  color: colorScheme.onSurfaceVariant,
                                 ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    const Divider(height: 1),
-                    InkWell(
-                      onTap: () async {
-                        SortNotes._setIsIncreasingOrder(
-                          widget.sortContext,
-                          !SortNotes._getIsIncreasingOrder(widget.sortContext),
-                        );
-                        setState(() {});
-                        await widget.callback();
-                        if (mounted) Navigator.of(context).pop();
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                t.home.sortNames.increasing,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  color: colorScheme.onSurface,
-                                ),
-                              ),
-                            ),
-                            Icon(
-                              SortNotes._getIsIncreasingOrder(widget.sortContext)
-                                  ? Icons.arrow_upward
-                                  : Icons.arrow_downward,
-                              size: 18,
-                              color: colorScheme.onSurfaceVariant,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
+                      const SizedBox(height: 4),
+                    ],
+                  ),
                 ),
               ),
             ),

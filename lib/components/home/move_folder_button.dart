@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
-import 'package:saber/components/theming/adaptive_alert_dialog.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 
 class MoveFolderDialog extends StatefulWidget {
@@ -79,11 +80,22 @@ class _MoveFolderDialogState extends State<MoveFolderDialog> {
     final isInvalidMove =
         p.join(widget.currentPath, widget.folderName) == currentDirectory;
 
-    return AdaptiveAlertDialog(
+    final h = (MediaQuery.sizeOf(context).height * 0.52).clamp(320.0, 620.0);
+    return AlertDialog(
+      backgroundColor: homeAppBarBackgroundColor(context),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(kSaberContainerRadius),
+        side: BorderSide(
+          color: Theme.of(
+            context,
+          ).colorScheme.outlineVariant.withValues(alpha: 0.18),
+        ),
+      ),
       title: Text(t.home.moveFolderTo(name: widget.folderName)),
       content: SizedBox(
         width: double.maxFinite,
-        height: 300,
+        height: h,
         child: Column(
           children: [
 
@@ -149,12 +161,20 @@ class _MoveFolderDialogState extends State<MoveFolderDialog> {
                       itemCount: subFolders.length,
                       itemBuilder: (context, index) {
                         final folder = subFolders[index];
+                        var destPath = p.join(currentDirectory, folder);
+                        if (!destPath.startsWith('/')) {
+                          destPath = '/$destPath';
+                        }
                         return ListTile(
-                          leading: Icon(
-                            Icons.folder,
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.primary.withValues(alpha: 0.8),
+                          leading: ValueListenableBuilder<Map<String, int>>(
+                            valueListenable: stows.folderColors,
+                            builder: (context, colors, _) {
+                              final v = colors[destPath];
+                              final folderColor = v != null
+                                  ? Color(v)
+                                  : Theme.of(context).colorScheme.primary;
+                              return Icon(Icons.folder, color: folderColor);
+                            },
                           ),
                           title: Text(
                             folder,
@@ -176,11 +196,11 @@ class _MoveFolderDialogState extends State<MoveFolderDialog> {
         ),
       ),
       actions: [
-        CupertinoDialogAction(
+        TextButton(
           onPressed: () => Navigator.pop(context),
           child: Text(t.common.cancel),
         ),
-        CupertinoDialogAction(
+        FilledButton(
           onPressed: (isOriginalLocation || isInvalidMove)
               ? null
               : () => Navigator.pop(context, currentDirectory),

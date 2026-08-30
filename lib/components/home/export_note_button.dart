@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:io' show File;
+import 'dart:isolate' show Isolate;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -9,6 +11,7 @@ import 'package:archive/archive_io.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
 import 'package:saber/services/sba_encryption.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:saber/components/theming/adaptive_circular_progress_indicator.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
@@ -18,10 +21,70 @@ import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 
+class _HomeExportFile {
+  _HomeExportFile._({required this.name, this.bytes, this.tempPath})
+      : assert(
+          (bytes != null) ^ (tempPath != null),
+          '_HomeExportFile: provide bytes or tempPath',
+        );
+
+  factory _HomeExportFile.bytes({required String name, required List<int> bytes}) =>
+      _HomeExportFile._(name: name, bytes: bytes);
+
+  factory _HomeExportFile.temp({required String name, required String tempPath}) =>
+      _HomeExportFile._(name: name, tempPath: tempPath);
+
+  final String name;
+  final List<int>? bytes;
+  final String? tempPath;
+}
+
+Uint8List _encodeHomeExportZip(List<_HomeExportFile> files) {
+  final archive = Archive();
+  for (final file in files) {
+    final List<int> data;
+    if (file.bytes != null) {
+      data = file.bytes!;
+    } else {
+      data = File(file.tempPath!).readAsBytesSync();
+    }
+    archive.addFile(ArchiveFile(file.name, data.length, data));
+  }
+  return Uint8List.fromList(ZipEncoder().encode(archive));
+}
+
+Future<Uint8List> _encodeHomeExportZipAsync(List<_HomeExportFile> files) async {
+  var total = 0;
+  for (final f in files) {
+    if (f.bytes != null) {
+      total += f.bytes!.length;
+    } else {
+      total += await File(f.tempPath!).length();
+    }
+  }
+  const threshold = 128 * 1024;
+  if (total >= threshold) {
+    return Isolate.run(() => _encodeHomeExportZip(files));
+  }
+  return compute(_encodeHomeExportZip, files);
+}
+
 class ExportNoteButton extends StatefulWidget {
-  const ExportNoteButton({super.key, required this.selectedFiles});
+  const ExportNoteButton({
+    super.key,
+    required this.selectedFiles,
+    required this.exportHostContext,
+    this.onExportStarted,
+  });
 
   final List<String> selectedFiles;
+
+  /// Must stay mounted after [onExportStarted] clears selection (e.g. page
+  /// [State]'s [BuildContext], not this button's).
+  final BuildContext exportHostContext;
+
+  /// Called once export is committed (dialogs done, path valid) and background export begins.
+  final VoidCallback? onExportStarted;
 
   @override
   State<ExportNoteButton> createState() => _ExportNoteButtonState();
@@ -37,16 +100,19 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
   }) async {
     setState(() => _currentlyExporting = true);
 
-    final files = <ArchiveFile>[];
+    final files = <_HomeExportFile>[];
     String? sharedPassword;
     bool shareLinks = false;
     var includeExportMetadata = true;
     bool hasExternalLinks = false;
     if (selectedFiles.length == 1) {
       try {
-        final first = await EditorCoreInfo.loadFromFilePath(selectedFiles.first);
-        hasExternalLinks =
-            first.links.any((l) => isExternalNoteLink(l, first.filePath));
+        final first = await EditorCoreInfo.loadFromFilePath(
+          selectedFiles.first,
+        );
+        hasExternalLinks = first.links.any(
+          (l) => isExternalNoteLink(l, first.filePath),
+        );
       } catch (_) {}
     }
     if (!exportPdf) {
@@ -54,8 +120,8 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
         context,
         hasExternalLinks: hasExternalLinks,
       );
-      if (!mode.ok || !mounted) {
-        setState(() => _currentlyExporting = false);
+      if (!mode.ok || !context.mounted) {
+        if (mounted) setState(() => _currentlyExporting = false);
         return;
       }
       sharedPassword = mode.password;
@@ -67,8 +133,8 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
         hasExternalLinks: true,
         encryptionApplicable: false,
       );
-      if (!mode.ok || !mounted) {
-        setState(() => _currentlyExporting = false);
+      if (!mode.ok || !context.mounted) {
+        if (mounted) setState(() => _currentlyExporting = false);
         return;
       }
       shareLinks = mode.shareLinks;
@@ -88,19 +154,28 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
         ? stows.defaultExportPath.value
         : null;
 
-    final screenshotContext = Navigator.of(context, rootNavigator: true)
-        .overlay
-        ?.context;
+    final screenshotContext = Navigator.of(
+      context,
+      rootNavigator: true,
+    ).overlay?.context;
 
-    Future<void> doExport(String? saveToPathArg) async {
+    Future<void> doExport(
+      String? saveToPathArg,
+      void Function(double progress, String message) onProgress,
+    ) async {
+      // Use [context] (host scaffold), not [State.mounted]: [onExportStarted]
+      // clears selection and removes this widget while export still runs.
+      if (!context.mounted) return;
+
       final filesToExport = List<String>.from(selectedFiles);
-      for (final filePath in filesToExport) {
+      for (var i = 0; i < filesToExport.length; i++) {
+        final filePath = filesToExport[i];
         var coreInfo = await EditorCoreInfo.loadFromFilePath(filePath);
-        if (!mounted) break;
+        if (!context.mounted) break;
 
         if (!exportPdf && shareLinks) {
           coreInfo = await expandLinksForShare(coreInfo, true);
-          if (!mounted) break;
+          if (!context.mounted) break;
         }
 
         final fileNameWithoutExtension = coreInfo.filePath.substring(
@@ -108,22 +183,38 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
         );
 
         if (exportPdf) {
-
           final ctxForPdf = screenshotContext ?? context;
           if (!ctxForPdf.mounted) break;
-          final pdfDoc = await EditorExporter.generatePdf(
+          final pdfData = await EditorExporter.generatePdfData(
             coreInfo,
             ctxForPdf,
+            invert: getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath),
             shareLinks: shareLinks && hasExternalLinks,
+            onProgress: (done, total) {
+              final fileBase = i / filesToExport.length;
+              final fileSpan = 0.8 / filesToExport.length;
+              onProgress(
+                0.05 + fileBase * 0.8 + fileSpan * (done / total),
+                '$fileNameWithoutExtension.pdf',
+              );
+            },
           );
-          final pdfBytes = await pdfDoc.save();
-          files.add(
-            ArchiveFile(
-              '$fileNameWithoutExtension.pdf',
-              pdfBytes.length,
-              pdfBytes,
-            ),
-          );
+          await Future<void>.delayed(Duration.zero);
+          if (pdfData.tempPdfPath != null) {
+            files.add(
+              _HomeExportFile.temp(
+                name: '$fileNameWithoutExtension.pdf',
+                tempPath: pdfData.tempPdfPath!,
+              ),
+            );
+          } else {
+            files.add(
+              _HomeExportFile.bytes(
+                name: '$fileNameWithoutExtension.pdf',
+                bytes: pdfData.bytes!,
+              ),
+            );
+          }
         } else {
           var sba = await coreInfo.saveToSba(
             currentPageIndex: null,
@@ -131,69 +222,107 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
             includeExportMetadata: includeExportMetadata,
           );
           if (sharedPassword != null) {
-            sba = SbaEncryption.encrypt(Uint8List.fromList(sba), sharedPassword);
+            sba = await SbaEncryption.encryptForExport(
+              Uint8List.fromList(sba),
+              sharedPassword,
+            );
           }
           files.add(
-            ArchiveFile('$fileNameWithoutExtension.sba', sba.length, sba),
+            _HomeExportFile.bytes(
+              name: '$fileNameWithoutExtension.sba',
+              bytes: sba,
+            ),
           );
         }
+        onProgress(
+          0.05 + 0.85 * ((i + 1) / filesToExport.length),
+          fileNameWithoutExtension,
+        );
+        await Future<void>.delayed(Duration.zero);
       }
 
-      if (!mounted) return;
-      if (selectedFiles.length == 1) {
-        await FileManager.exportFile(
-          files.single.name,
-          files.single.content,
-          saveToPath: saveToPathArg,
-          context: context,
-        );
-      } else if (selectedFiles.length > 1) {
-        final archive = Archive();
-        for (final archiveFile in files) {
-          archive.addFile(archiveFile);
+      if (!context.mounted) return;
+      if (files.length == 1) {
+        final f = files.first;
+        if (f.tempPath != null) {
+          await FileManager.exportPdfTempFile(
+            f.tempPath!,
+            f.name,
+            saveToPath: saveToPathArg,
+            context: context,
+          );
+        } else {
+          await FileManager.exportFile(
+            f.name,
+            f.bytes!,
+            saveToPath: saveToPathArg,
+            context: context,
+          );
         }
+      } else if (files.length > 1) {
         final zipFileName = '${files.first.name}.zip';
-        await FileManager.exportFile(
-          zipFileName,
-          Uint8List.fromList(ZipEncoder().encode(archive)),
-          saveToPath: saveToPathArg,
-          context: context,
-        );
+        try {
+          final zipBytes = await _encodeHomeExportZipAsync(files);
+          await FileManager.exportFile(
+            zipFileName,
+            zipBytes,
+            saveToPath: saveToPathArg,
+            context: context,
+          );
+        } finally {
+          for (final f in files) {
+            if (f.tempPath != null) {
+              try {
+                await File(f.tempPath!).delete();
+              } catch (_) {}
+            }
+          }
+        }
       }
     }
 
     try {
+      widget.onExportStarted?.call();
       if (saveToPath != null) {
-        await ExportManager.exportInBackground(
-          t.export.exportingNote,
-          (onProgress) async {
-            onProgress(0.5, selectedFiles.length == 1
+        await ExportManager.exportInBackground(t.export.exportingNote, (
+          onProgress,
+        ) async {
+          onProgress(
+            0.05,
+            selectedFiles.length == 1
                 ? (exportPdf ? '*.pdf' : '*.sba')
-                : '*.zip');
-            await doExport(saveToPath);
-            onProgress(1.0, t.export.exportComplete);
-          },
-        );
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(t.export.exportComplete)),
+                : '*.zip',
           );
+          await doExport(saveToPath, onProgress);
+          onProgress(1.0, t.export.exportComplete);
+        });
+        if (context.mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(t.export.exportComplete)));
         }
       } else {
-        await doExport(null);
+        await ExportManager.exportInBackground(t.export.exportingNote, (
+          onProgress,
+        ) async {
+          await doExport(null, onProgress);
+          onProgress(1.0, t.export.exportComplete);
+        });
       }
     } finally {
       if (mounted) setState(() => _currentlyExporting = false);
     }
   }
 
-  void _showExportOptions(BuildContext context) {
-    final theme = Theme.of(context);
+  void _showExportOptions() {
+    // Use [exportHostContext] so export survives [onExportStarted] removing this button.
+    final hostContext = widget.exportHostContext;
+    final theme = Theme.of(hostContext);
     final colorScheme = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
 
     showDialog(
-      context: context,
+      context: hostContext,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -234,7 +363,7 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
                     label: 'Export as PDF',
                     onTap: () {
                       Navigator.pop(ctx);
-                      exportFile(widget.selectedFiles, true, context: context);
+                      exportFile(widget.selectedFiles, true, context: hostContext);
                     },
                   ),
                   const SizedBox(height: 12),
@@ -244,7 +373,7 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
                     label: 'Export as SBA',
                     onTap: () {
                       Navigator.pop(ctx);
-                      exportFile(widget.selectedFiles, false, context: context);
+                      exportFile(widget.selectedFiles, false, context: hostContext);
                     },
                   ),
                   const SizedBox(height: 16),
@@ -314,7 +443,7 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
     return IconButton(
       tooltip: t.home.tooltips.exportNote,
       icon: const Icon(Icons.share),
-      onPressed: () => _showExportOptions(context),
+      onPressed: _showExportOptions,
     );
   }
 }

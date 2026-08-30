@@ -20,9 +20,6 @@ void main() {
       final undone = h.undo();
       expect(undone.type, EditorHistoryItemType.draw);
       expect(h.canUndo, isFalse);
-      // Editor sets [canRedo] after undo so redo is offered.
-      expect(h.canRedo, isFalse);
-      h.canRedo = true;
       expect(h.canRedo, isTrue);
       final redone = h.redo();
       expect(redone.type, EditorHistoryItemType.draw);
@@ -47,6 +44,29 @@ void main() {
         undos++;
       }
       expect(undos, EditorHistory.maxHistoryLength);
+    });
+
+    test('recordChange after undo discards redo branch', () {
+      final h = EditorHistory();
+      final first = EditorHistoryItem(
+        type: EditorHistoryItemType.draw,
+        pageIndex: 0,
+        strokes: <Stroke>[],
+        images: <EditorImage>[],
+      );
+      final second = EditorHistoryItem(
+        type: EditorHistoryItemType.erase,
+        pageIndex: 0,
+        strokes: <Stroke>[],
+        images: <EditorImage>[],
+      );
+      h.recordChange(first);
+      h.recordChange(second);
+      h.undo();
+      expect(h.canRedo, isTrue);
+      h.recordChange(first);
+      expect(h.canRedo, isFalse);
+      expect(() => h.redo(), throwsException);
     });
 
     test('undo throws when empty', () {

@@ -17,7 +17,7 @@ _No `///` or block comments were present before stripping._
 - `dart:typed_data`
 - `dart:ui`
 - `package:bson/bson.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/data/extensions/dynamic_extensions.dart`
 
 ## Symbols (heuristic scan)

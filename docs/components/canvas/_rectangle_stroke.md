@@ -28,7 +28,7 @@ Returns a [Path] with four lines for each side of the rectangle.
 - `package:fixnum/fixnum.dart`
 - `package:flutter/material.dart`
 - `package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/canvas/_stroke.dart`
 - `package:saber/data/editor/binary_writer.dart`
 - `package:saber/data/editor/page.dart`

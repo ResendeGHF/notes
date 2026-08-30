@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'dart:async';
+import 'dart:async' show Future, StreamSubscription, Timer;
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/cupertino.dart';
@@ -12,6 +13,9 @@ import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/components/canvas/invert_widget.dart';
 import 'package:saber/components/editor/export_dialog.dart';
+import 'package:saber/components/home/home_list_meta_formatters.dart';
+import 'package:saber/components/home/home_list_row_chrome.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/home/move_note_button.dart';
 import 'package:saber/components/home/rename_note_button.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
@@ -30,6 +34,7 @@ class PreviewCard extends StatefulWidget {
     required this.selected,
     required this.isAnythingSelected,
     this.listMode = false,
+    this.showListMetadata = true,
     this.targetPath,
     this.linkKey,
     this.onDeleteLink,
@@ -43,6 +48,9 @@ class PreviewCard extends StatefulWidget {
   final bool selected;
   final bool isAnythingSelected;
   final bool listMode;
+
+  /// When false, list rows show only thumbnail and name (Recent Notes).
+  final bool showListMetadata;
   final String? targetPath;
   final String? linkKey;
   final Future<void> Function(String)? onDeleteLink;
@@ -55,21 +63,21 @@ class PreviewCard extends StatefulWidget {
 class _PreviewCardState extends State<PreviewCard> {
   final expanded = ValueNotifier(false);
   final thumbnail = _ThumbnailState();
+  NoteListRowStats? _listRowStats;
+  bool _listRowStatsLoading = false;
 
   @override
   void initState() {
+    super.initState();
     fileWriteSubscription = FileManager.fileWriteStream.stream.listen(
       fileWriteListener,
     );
-
     expanded.value = widget.selected;
-    super.initState();
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
+    _primeThumbnailFromCache();
     _loadThumbnailWithRetry();
+    if (widget.listMode && widget.showListMetadata) {
+      _loadListRowStats();
+    }
   }
 
   @override
@@ -81,31 +89,47 @@ class _PreviewCardState extends State<PreviewCard> {
     }
 
     if (oldWidget.filePath != widget.filePath) {
+      _primeThumbnailFromCache();
       _loadThumbnailWithRetry();
+    }
+
+    if (widget.listMode &&
+        widget.showListMetadata &&
+        (oldWidget.listMode != widget.listMode ||
+            oldWidget.showListMetadata != widget.showListMetadata ||
+            oldWidget.filePath != widget.filePath ||
+            oldWidget.targetPath != widget.targetPath)) {
+      _loadListRowStats();
+    }
+    if ((!widget.listMode || !widget.showListMetadata) &&
+        (oldWidget.listMode || oldWidget.showListMetadata)) {
+      _listRowStats = null;
+      _listRowStatsLoading = false;
+    }
+  }
+
+  void _primeThumbnailFromCache() {
+    final cached = ThumbnailCache.instance.get(widget.filePath);
+    if (cached != null && cached.isNotEmpty) {
+      thumbnail.setBytes(cached);
     }
   }
 
   Future<void> _loadThumbnailWithRetry({int retryCount = 0}) async {
-    final cache = ThumbnailCache.instance;
     final thumbnailPath = '${widget.filePath}${Editor.extension}.p';
 
-    var bytes = cache.get(widget.filePath);
-    if (bytes == null) {
-      final read = await FileManager.readFile(
+    final bytes = await ThumbnailCache.instance.load(widget.filePath, () {
+      return FileManager.readFile(
         thumbnailPath,
         retries: 0,
         suppressLogs: true,
         allowMissing: true,
       );
-      if (read != null && read.isNotEmpty) {
-        cache.put(widget.filePath, read);
-      }
-      bytes = read;
-    }
+    });
 
     if (bytes != null && bytes.isNotEmpty) {
       if (mounted) {
-        thumbnail.image = MemoryImage(bytes);
+        thumbnail.setBytes(bytes);
       }
       return;
     }
@@ -114,8 +138,6 @@ class _PreviewCardState extends State<PreviewCard> {
       Future.delayed(Duration(milliseconds: 500 * (retryCount + 1)), () {
         if (mounted) _loadThumbnailWithRetry(retryCount: retryCount + 1);
       });
-    } else if (mounted) {
-      thumbnail.image = null;
     }
   }
 
@@ -123,15 +145,100 @@ class _PreviewCardState extends State<PreviewCard> {
   void fileWriteListener(FileOperation event) {
     if (event.filePath != widget.filePath) return;
     if (event.type == FileOperationType.delete) {
+      // Watcher delete (removal == null) is often a rewrite. Do not flash
+      // delete chrome or drop the cached thumbnail.
+      if (event.removal == null) return;
       ThumbnailCache.instance.invalidate(widget.filePath);
-      thumbnail.image = null;
-    } else if (event.type == FileOperationType.write) {
-      thumbnail.image?.evict();
-      ThumbnailCache.instance.invalidate(widget.filePath);
+      switch (event.removal) {
+        case FileRemovalCause.renamed:
+          thumbnail.chrome = _ThumbChrome.renaming;
+        case FileRemovalCause.moved:
+          thumbnail.chrome = _ThumbChrome.moving;
+        case FileRemovalCause.deleted:
+        case null:
+          thumbnail.chrome = _ThumbChrome.deleting;
+      }
+    } else if (event.isThumbnail) {
+      thumbnail.chrome = _ThumbChrome.none;
       _loadThumbnailWithRetry();
-    } else {
-
+      if (widget.listMode && widget.showListMetadata) {
+        _loadListRowStats();
+      }
+    } else if (event.type == FileOperationType.write) {
+      thumbnail.chrome = _ThumbChrome.none;
+      if (widget.listMode && widget.showListMetadata) {
+        _loadListRowStats();
+      }
     }
+  }
+
+  Future<void> _loadListRowStats() async {
+    if (!widget.listMode || !widget.showListMetadata || !mounted) return;
+    final base = widget.targetPath ?? widget.filePath;
+    setState(() {
+      _listRowStatsLoading = true;
+    });
+    final stats = await FileManager.getNoteListRowStats(base);
+    if (!mounted) return;
+    setState(() {
+      _listRowStatsLoading = false;
+      _listRowStats = stats;
+    });
+  }
+
+  Widget _buildListStatsMeta(ThemeData theme, ColorScheme colorScheme) {
+    final fl = t.home.fileList;
+
+    if (_listRowStatsLoading) {
+      return SizedBox(
+        height: 26,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: SizedBox(
+            height: 16,
+            width: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: colorScheme.primary.withValues(alpha: 0.85),
+            ),
+          ),
+        ),
+      );
+    }
+    final s = _listRowStats;
+    if (s == null) {
+      return const HomeListMetaChip(
+        icon: Icons.info_outline_rounded,
+        text: 'Metadata unavailable',
+        tooltip: 'Metadata unavailable',
+      );
+    }
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        HomeListMetaChip(
+          icon: Icons.sd_storage_outlined,
+          text: formatHomeListBytes(s.sizeBytes),
+          tooltip: fl.metaSize,
+        ),
+        HomeListMetaChip(
+          icon: Icons.event_note_outlined,
+          text: s.created != null
+              ? formatHomeListDate(context, s.created!)
+              : '—',
+          tooltip: 'Created',
+        ),
+        HomeListMetaChip(
+          icon: Icons.edit_calendar_outlined,
+          text: s.modified != null
+              ? formatHomeListDate(context, s.modified!)
+              : '—',
+          tooltip: fl.metaModified,
+        ),
+      ],
+    );
   }
 
   void _toggleCardSelection() {
@@ -156,9 +263,16 @@ class _PreviewCardState extends State<PreviewCard> {
       Offset.zero & overlay.size,
     );
 
+    final cs = Theme.of(context).colorScheme;
     final String? action = await showMenu<String>(
       context: context,
       position: position,
+      elevation: 4,
+      color: homeAppBarBackgroundColor(context),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(kSaberContainerRadius),
+        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.18)),
+      ),
       items: isLink
           ? [
               const PopupMenuItem(
@@ -290,25 +404,44 @@ class _PreviewCardState extends State<PreviewCard> {
         if (!mounted) return;
         showDialog(
           context: context,
-          builder: (context) => AlertDialog(
-            title: Text(t.home.properties),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Path: ${widget.filePath}'),
-                const SizedBox(height: 8),
-                Text('Last Modified: ${lastModified.toString().split('.')[0]}'),
-                const SizedBox(height: 8),
-                Text('Size: ${(size / 1024).toStringAsFixed(2)} KB'),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: Text(t.home.close),
+          builder: (context) => Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            insetPadding: const EdgeInsets.all(24),
+            child: RuggedDialogShell(
+              maxWidth: 400,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    t.home.properties,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.35,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SelectableText('Path: ${widget.filePath}'),
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    'Last modified: ${lastModified.toString().split('.')[0]}',
+                  ),
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    'Size: ${(size / 1024).toStringAsFixed(2)} KB',
+                  ),
+                  const SizedBox(height: 16),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: FilledButton.tonal(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text(t.home.close),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         );
       case 'delete':
@@ -348,13 +481,28 @@ class _PreviewCardState extends State<PreviewCard> {
     }
   }
 
+  Widget _buildThumbnailFace(
+    ColorScheme colorScheme, {
+    required Duration duration,
+    required bool compact,
+  }) {
+    return ListenableBuilder(
+      listenable: thumbnail,
+      builder: (context, _) {
+        return _ThumbnailFace(
+          image: thumbnail.image,
+          chrome: thumbnail.chrome,
+          duration: duration,
+          compact: compact,
+        );
+      },
+    );
+  }
+
   Timer? _refreshThumbnailTimer;
   void _refreshThumbnailAfterDelay() {
     _refreshThumbnailTimer?.cancel();
     _refreshThumbnailTimer = Timer(const Duration(milliseconds: 500), () {
-      thumbnail.image?.evict();
-      thumbnail.markAsChanged();
-
       _loadThumbnailWithRetry();
     });
   }
@@ -365,16 +513,19 @@ class _PreviewCardState extends State<PreviewCard> {
     final colorScheme = theme.colorScheme;
     final disableAnimations = MediaQuery.disableAnimationsOf(context);
     final transitionDuration = Duration(
-      milliseconds: disableAnimations ? 0 : 300,
+      milliseconds: disableAnimations ? 0 : 100,
     );
+    final thumbFade = Duration(milliseconds: disableAnimations ? 0 : 320);
 
     const invert = false;
 
-    final borderColor = widget.selected
+    final borderColor = widget.listMode
+        ? Colors.transparent
+        : widget.selected
         ? colorScheme.primary
         : colorScheme.outlineVariant.withValues(alpha: 0.5);
 
-    const borderWidth = 2.0;
+    final borderWidth = widget.listMode ? 0.0 : 2.0;
 
     Widget buildCardContent(VoidCallback openAction) {
       final isLink = widget.linkKey != null;
@@ -410,93 +561,102 @@ class _PreviewCardState extends State<PreviewCard> {
               : _showContextMenu,
           onLongPress: isLink ? _showContextMenu : _toggleCardSelection,
           child: widget.listMode
-              ? Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
+              ? HomeListRowSurface(
+                  selected: widget.selected,
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       SizedBox(
-                        width: 44,
-                        height: 56,
+                        width: 68,
+                        height: 84,
                         child: ListenableBuilder(
                           listenable: thumbnail,
-                          builder: (context, _) => Container(
+                          builder: (context, _) => DecoratedBox(
                             decoration: BoxDecoration(
                               color: colorScheme.surfaceContainerLowest,
-                              borderRadius: BorderRadius.circular(4),
+                              borderRadius: BorderRadius.circular(13),
                               border: Border.all(
                                 color: colorScheme.outlineVariant.withValues(
-                                  alpha: 0.5,
+                                  alpha: 0.32,
                                 ),
                               ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(
+                                    alpha: theme.brightness == Brightness.dark
+                                        ? 0.22
+                                        : 0.06,
+                                  ),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
                             ),
-                            clipBehavior: Clip.antiAlias,
-                            child: InvertWidget(
-                              invert: invert,
-                              child: AnimatedSwitcher(
-                                duration: Duration(
-                                  milliseconds: disableAnimations ? 0 : 250,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: InvertWidget(
+                                invert: invert,
+                                child: _buildThumbnailFace(
+                                  colorScheme,
+                                  duration: thumbFade,
+                                  compact: true,
                                 ),
-                                switchInCurve: Curves.easeIn,
-                                switchOutCurve: Curves.easeOut,
-                                transitionBuilder: (child, animation) =>
-                                    FadeTransition(
-                                  opacity: animation,
-                                  child: child,
-                                ),
-                                child: thumbnail.doesImageExist
-                                    ? Image(
-                                        key: ValueKey(
-                                          'img_${thumbnail.updateCount}',
-                                        ),
-                                        image: thumbnail.image!,
-                                        fit: BoxFit.cover,
-                                      )
-                                    : KeyedSubtree(
-                                        key: ValueKey(
-                                          'fb_${thumbnail.updateCount}',
-                                        ),
-                                        child: const _FallbackThumbnail(),
-                                      ),
                               ),
                             ),
                           ),
                         ),
                       ),
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 14),
                       Expanded(
-                        child: Text(
-                          widget.linkKey ??
-                              widget.filePath.substring(
-                                widget.filePath.lastIndexOf('/') + 1,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              widget.linkKey ??
+                                  widget.filePath.substring(
+                                    widget.filePath.lastIndexOf('/') + 1,
+                                  ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15,
+                                letterSpacing: -0.25,
+                                color: widget.selected
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface,
                               ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleMedium?.copyWith(
-
-                            fontWeight: FontWeight.normal,
-                            fontSize: 14,
-
-                            color: widget.selected ? colorScheme.primary : null,
-                          ),
+                            ),
+                            if (widget.showListMetadata) ...[
+                              const SizedBox(height: 8),
+                              _buildListStatsMeta(theme, colorScheme),
+                            ],
+                          ],
                         ),
                       ),
+                      const SizedBox(width: 8),
                       AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 300),
+                        duration: const Duration(milliseconds: 100),
                         transitionBuilder: (child, anim) =>
                             ScaleTransition(scale: anim, child: child),
                         child: widget.selected
                             ? Icon(
-                                Icons.check_circle,
+                                Icons.check_circle_rounded,
                                 key: const ValueKey('check'),
                                 color: colorScheme.primary,
-                                size: 20,
+                                size: 24,
                               )
-                            : const SizedBox(width: 20, key: ValueKey('empty')),
+                            : Icon(
+                                Icons.chevron_right_rounded,
+                                key: const ValueKey('chevron'),
+                                color: colorScheme.onSurfaceVariant.withValues(
+                                  alpha: 0.48,
+                                ),
+                                size: 24,
+                              ),
                       ),
-                      const SizedBox(width: 8),
                     ],
                   ),
                 )
@@ -522,32 +682,10 @@ class _PreviewCardState extends State<PreviewCard> {
                                 ),
                                 child: InvertWidget(
                                   invert: invert,
-                                  child: AnimatedSwitcher(
-                                    duration: Duration(
-                                      milliseconds:
-                                          disableAnimations ? 0 : 250,
-                                    ),
-                                    switchInCurve: Curves.easeIn,
-                                    switchOutCurve: Curves.easeOut,
-                                    transitionBuilder: (child, animation) =>
-                                        FadeTransition(
-                                      opacity: animation,
-                                      child: child,
-                                    ),
-                                    child: thumbnail.doesImageExist
-                                        ? Image(
-                                            key: ValueKey(
-                                              'img_${thumbnail.updateCount}',
-                                            ),
-                                            image: thumbnail.image!,
-                                            fit: BoxFit.cover,
-                                          )
-                                        : KeyedSubtree(
-                                            key: ValueKey(
-                                              'fb_${thumbnail.updateCount}',
-                                            ),
-                                            child: const _FallbackThumbnail(),
-                                          ),
+                                  child: _buildThumbnailFace(
+                                    colorScheme,
+                                    duration: thumbFade,
+                                    compact: false,
                                   ),
                                 ),
                               ),
@@ -557,8 +695,8 @@ class _PreviewCardState extends State<PreviewCard> {
                             child: IgnorePointer(
                               child: AnimatedOpacity(
                                 opacity: widget.selected ? 1.0 : 0.0,
-                                duration: const Duration(milliseconds: 300),
-                                curve: Curves.easeOutCubic,
+                                duration: const Duration(milliseconds: 100),
+                                curve: Curves.easeOut,
                                 child: ClipRRect(
                                   borderRadius: const BorderRadius.vertical(
                                     top: Radius.circular(
@@ -581,9 +719,9 @@ class _PreviewCardState extends State<PreviewCard> {
                                             end: widget.selected ? 1.0 : 0.0,
                                           ),
                                           duration: const Duration(
-                                            milliseconds: 400,
+                                            milliseconds: 140,
                                           ),
-                                          curve: Curves.elasticOut,
+                                          curve: Curves.easeOutCubic,
                                           builder: (context, value, child) {
                                             return Transform.scale(
                                               scale: value,
@@ -626,10 +764,6 @@ class _PreviewCardState extends State<PreviewCard> {
                     ),
                     Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           begin: Alignment.topCenter,
@@ -646,20 +780,7 @@ class _PreviewCardState extends State<PreviewCard> {
                         borderRadius: const BorderRadius.vertical(
                           bottom: Radius.circular(kSaberContainerRadius / 1.5),
                         ),
-                        border: Border(
-                          top: BorderSide(
-                            color: colorScheme.outlineVariant.withValues(
-                              alpha: 0.1,
-                            ),
-                            width: 1,
-                          ),
-                          left: widget.selected
-                              ? BorderSide(
-                                  color: colorScheme.primary,
-                                  width: 2.5,
-                                )
-                              : BorderSide.none,
-                        ),
+                        // Removed the buggy Border() property entirely
                         boxShadow: [
                           BoxShadow(
                             color: colorScheme.shadow.withValues(alpha: 0.035),
@@ -668,24 +789,50 @@ class _PreviewCardState extends State<PreviewCard> {
                           ),
                         ],
                       ),
-                      child: Text(
-                        widget.linkKey ??
-                            widget.filePath.substring(
-                              widget.filePath.lastIndexOf('/') + 1,
+                      child: Stack(
+                        children: [
+                          // Independent Top Border Line
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            child: Container(
+                              height: 1,
+                              color: colorScheme.outlineVariant.withValues(
+                                alpha: 0.1,
+                              ),
                             ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w500,
-                          fontSize: 11,
-                          letterSpacing: 0.2,
-                          height: 1.3,
-                          color: widget.selected
-                              ? colorScheme.primary
-                              : colorScheme.onSurfaceVariant.withValues(
-                                  alpha: 0.9,
+                          ),
+                          // Text Content with static padding
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12.0,
+                              vertical: 10.0,
+                            ),
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: Text(
+                                widget.linkKey ??
+                                    widget.filePath.substring(
+                                      widget.filePath.lastIndexOf('/') + 1,
+                                    ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 11,
+                                  letterSpacing: 0.2,
+                                  height: 1.3,
+                                  color: widget.selected
+                                      ? colorScheme.primary
+                                      : colorScheme.onSurfaceVariant.withValues(
+                                          alpha: 0.9,
+                                        ),
                                 ),
-                        ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -707,19 +854,21 @@ class _PreviewCardState extends State<PreviewCard> {
     }
 
     return RepaintBoundary(
-      child: AnimatedContainer(
-        duration: transitionDuration,
-        curve: Curves.easeOutCubic,
-        decoration: BoxDecoration(
+      child: Hero(
+        tag: 'note_hero_$editPath',
+        child: AnimatedContainer(
+          duration: transitionDuration,
+          curve: Curves.easeOutCubic,
+          decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(
-            widget.listMode ? 12 : kSaberContainerRadius / 1.5,
+            widget.listMode ? 14 : kSaberContainerRadius / 1.5,
           ),
           border: Border.all(
             color: borderColor,
             width: borderWidth,
             strokeAlign: BorderSide.strokeAlignInside,
           ),
-          boxShadow: widget.selected
+          boxShadow: widget.selected && !widget.listMode
               ? [
                   BoxShadow(
                     color: colorScheme.primary.withValues(alpha: 0.25),
@@ -752,6 +901,7 @@ class _PreviewCardState extends State<PreviewCard> {
                 ],
               )
             : buildCardContent(openAction),
+        ),
       ),
     );
   }
@@ -785,20 +935,190 @@ class _FallbackThumbnail extends StatelessWidget {
   }
 }
 
-class _ThumbnailState extends ChangeNotifier {
-  var updateCount = 0;
-  ImageProvider? _image;
+enum _ThumbChrome { none, deleting, renaming, moving }
 
-  void markAsChanged() {
-    ++updateCount;
+class _ThumbnailChrome extends StatelessWidget {
+  const _ThumbnailChrome({required this.chrome, required this.compact});
+
+  final _ThumbChrome chrome;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = (isDark ? cs.surfaceContainerHigh : cs.surfaceContainerHighest)
+        .withValues(alpha: 0.78);
+    final icon = switch (chrome) {
+      _ThumbChrome.deleting => Icons.delete_outline_rounded,
+      _ThumbChrome.renaming => Icons.drive_file_rename_outline,
+      _ThumbChrome.moving => Icons.drive_file_move_outlined,
+      _ThumbChrome.none => Icons.delete_outline_rounded,
+    };
+    return ColoredBox(
+      color: bg,
+      child: Center(
+        child: Icon(
+          icon,
+          size: compact ? 26 : 40,
+          color: cs.onSurfaceVariant.withValues(alpha: 0.88),
+        ),
+      ),
+    );
+  }
+}
+
+class _ThumbnailFace extends StatefulWidget {
+  const _ThumbnailFace({
+    required this.image,
+    required this.chrome,
+    required this.duration,
+    required this.compact,
+  });
+
+  final ImageProvider? image;
+  final _ThumbChrome chrome;
+  final Duration duration;
+  final bool compact;
+
+  @override
+  State<_ThumbnailFace> createState() => _ThumbnailFaceState();
+}
+
+class _ThumbnailFaceState extends State<_ThumbnailFace>
+    with SingleTickerProviderStateMixin {
+  ImageProvider? _bottom;
+  ImageProvider? _top;
+  _ThumbChrome _overlayChrome = _ThumbChrome.none;
+  late final AnimationController _crossfade;
+
+  @override
+  void initState() {
+    super.initState();
+    _bottom = widget.image;
+    _overlayChrome = widget.chrome;
+    _crossfade = AnimationController(vsync: this, duration: widget.duration)
+      ..value = 1;
+    _crossfade.addStatusListener(_onCrossfadeStatus);
+  }
+
+  void _onCrossfadeStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed || _top == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _bottom = _top;
+      _top = null;
+    });
+  }
+
+  @override
+  void didUpdateWidget(_ThumbnailFace oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.duration != oldWidget.duration) {
+      _crossfade.duration = widget.duration;
+    }
+    if (widget.chrome != _ThumbChrome.none) {
+      _overlayChrome = widget.chrome;
+    }
+    if (widget.image == oldWidget.image) return;
+    if (widget.image == null) {
+      _bottom = oldWidget.image ?? _bottom;
+      _top = null;
+      if (widget.duration == Duration.zero) {
+        _crossfade.value = 1;
+      } else {
+        _crossfade.forward(from: 0);
+      }
+    } else if (_bottom == null || widget.duration == Duration.zero) {
+      _bottom = widget.image;
+      _top = null;
+      _crossfade.value = 1;
+    } else {
+      _bottom = oldWidget.image ?? _bottom;
+      _top = widget.image;
+      _crossfade.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _crossfade.dispose();
+    super.dispose();
+  }
+
+  Widget _imageLayer(ImageProvider image) {
+    return Image(
+      image: image,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      filterQuality: FilterQuality.low,
+      width: double.infinity,
+      height: double.infinity,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _crossfade,
+      builder: (context, _) {
+        final t = Curves.easeInOutCubic.transform(_crossfade.value);
+        final bottom = _bottom;
+        final top = _top;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            if (bottom != null)
+              _imageLayer(bottom)
+            else
+              const _FallbackThumbnail(),
+            if (top != null) Opacity(opacity: t, child: _imageLayer(top)),
+            IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: widget.chrome == _ThumbChrome.none ? 0 : 1,
+                duration: widget.duration,
+                curve: Curves.easeInOutCubic,
+                child: _overlayChrome == _ThumbChrome.none
+                    ? const SizedBox.expand()
+                    : _ThumbnailChrome(
+                        chrome: _overlayChrome,
+                        compact: widget.compact,
+                      ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ThumbnailState extends ChangeNotifier {
+  ImageProvider? _image;
+  Uint8List? _bytes;
+  _ThumbChrome _chrome = _ThumbChrome.none;
+
+  _ThumbChrome get chrome => _chrome;
+  set chrome(_ThumbChrome value) {
+    if (_chrome == value) return;
+    _chrome = value;
     notifyListeners();
   }
 
   ImageProvider? get image => _image;
-  set image(ImageProvider? image) {
-    _image = image;
-    markAsChanged();
-  }
 
-  bool get doesImageExist => _image != null;
+  void setBytes(Uint8List bytes) {
+    if (_bytes != null && _bytes!.length == bytes.length && _bytes == bytes) {
+      if (_chrome != _ThumbChrome.none) {
+        _chrome = _ThumbChrome.none;
+        notifyListeners();
+      }
+      return;
+    }
+    _bytes = bytes;
+    _image = MemoryImage(bytes);
+    _chrome = _ThumbChrome.none;
+    notifyListeners();
+  }
 }

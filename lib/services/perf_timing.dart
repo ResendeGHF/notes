@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:logging/logging.dart';
 
 class PerfTiming {
@@ -12,6 +13,11 @@ class PerfTiming {
 
   static bool get enabled => kDebugMode && _enabledByDefine;
   static final Logger _log = Logger('PerfTiming');
+
+  static int _vaultAutosaveWindows = 0;
+  static int _vaultAutosaveDroppedFrames = 0;
+  static int _vaultAutosaveSlowFrames = 0;
+  static bool _frameCallbackRegistered = false;
 
   static PerfSpan? start(
     String name, {
@@ -29,6 +35,47 @@ class PerfTiming {
   static void logLine(String message) {
     if (!enabled) return;
     _log.info(message);
+  }
+
+  /// Begin capturing [FrameTiming] while a vault autosave is in flight.
+  /// Always cheap; logs only when [enabled] or when frames are dropped.
+  static void beginVaultAutosaveWindow() {
+    _ensureFrameCallback();
+    _vaultAutosaveWindows++;
+  }
+
+  static void endVaultAutosaveWindow() {
+    if (_vaultAutosaveWindows > 0) _vaultAutosaveWindows--;
+    if (_vaultAutosaveWindows == 0 &&
+        (_vaultAutosaveDroppedFrames > 0 || _vaultAutosaveSlowFrames > 0)) {
+      final msg =
+          '[PERF][VaultAutosave.frames] dropped=$_vaultAutosaveDroppedFrames '
+          'slow=$_vaultAutosaveSlowFrames';
+      if (enabled || _vaultAutosaveDroppedFrames > 0) {
+        _log.info(msg);
+      }
+      _vaultAutosaveDroppedFrames = 0;
+      _vaultAutosaveSlowFrames = 0;
+    }
+  }
+
+  static void _ensureFrameCallback() {
+    if (_frameCallbackRegistered) return;
+    _frameCallbackRegistered = true;
+    SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
+  }
+
+  static void _onFrameTimings(List<FrameTiming> timings) {
+    if (_vaultAutosaveWindows <= 0) return;
+    for (final t in timings) {
+      final totalUs = t.totalSpan.inMicroseconds;
+      // ~1 frame at 120Hz is 8333µs; count as dropped if build+raster > 16.6ms.
+      if (totalUs > 16667) {
+        _vaultAutosaveDroppedFrames++;
+      } else if (totalUs > 10000) {
+        _vaultAutosaveSlowFrames++;
+      }
+    }
   }
 }
 

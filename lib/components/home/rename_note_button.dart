@@ -5,6 +5,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
@@ -152,21 +153,7 @@ class _RenameNoteDialogState extends State<RenameNoteDialog>
               color: Colors.transparent,
               child: Container(
                 width: 320,
-                decoration: BoxDecoration(
-                  color: colorScheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                    width: 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.1),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
+                decoration: homeRuggedPanelDecoration(context),
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Form(

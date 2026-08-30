@@ -7,7 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
+import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
+import 'package:saber/components/canvas/selection_handles_layout.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';
@@ -23,6 +25,7 @@ class ImageCropState {
 class Canvas extends StatelessWidget {
   const Canvas({
     super.key,
+    this.overrideInvert,
     required this.path,
     required this.page,
     required this.pageIndex,
@@ -39,6 +42,7 @@ class Canvas extends StatelessWidget {
     this.onNoteLinkTap,
     this.placeholder = false,
     this.eraserPosition,
+    this.eraserPositionListenable,
     this.eraserSize,
     this.eraserDeltaRemoved,
     this.eraserDeltaAdded,
@@ -48,6 +52,8 @@ class Canvas extends StatelessWidget {
     this.lineColor,
     this.imageCropState,
     this.onCropRectChanged,
+    this.selectionHandlesInteractionMode = SelectionHandlesInteractionMode.resize,
+    this.pageRasterCache,
   });
 
   final int? lineHeight;
@@ -72,14 +78,18 @@ class Canvas extends StatelessWidget {
   final double currentScale;
   final bool placeholder;
   final Offset? eraserPosition;
+  final ValueListenable<Offset?>? eraserPositionListenable;
   final double? eraserSize;
   final List<Stroke>? eraserDeltaRemoved;
   final List<Stroke>? eraserDeltaAdded;
   final bool doneSelecting;
   final void Function(NoteLink link)? onNoteLinkTap;
 
+  final bool? overrideInvert;
   final ImageCropState? imageCropState;
   final void Function(Rect normalizedCrop)? onCropRectChanged;
+  final SelectionHandlesInteractionMode selectionHandlesInteractionMode;
+  final PageRasterCacheManager? pageRasterCache;
 
   Color getOnyxColor() {
     if (currentTool is Pen) {
@@ -122,6 +132,7 @@ class Canvas extends StatelessWidget {
                         height: page.size.height,
                         textEditing: textEditing,
                         coreInfo: coreInfo,
+                        overrideInvert: overrideInvert,
                         currentStroke: currentStroke,
                         currentStrokeDetectedShape: currentStrokeDetectedShape,
                         currentSelection: currentSelection,
@@ -129,9 +140,11 @@ class Canvas extends StatelessWidget {
                         setAsBackground: setAsBackground,
                         currentToolIsSelect:
                             currentTool.toolId == ToolId.select,
-                        interactionRepaintListenable: interactionRepaintListenable,
+                        interactionRepaintListenable:
+                            interactionRepaintListenable,
                         currentScale: currentScale,
                         eraserPosition: eraserPosition,
+                        eraserPositionListenable: eraserPositionListenable,
                         eraserSize: eraserSize,
                         eraserDeltaRemoved: eraserDeltaRemoved,
                         eraserDeltaAdded: eraserDeltaAdded,
@@ -147,6 +160,9 @@ class Canvas extends StatelessWidget {
                               )
                             : null,
                         onCropRectChanged: onCropRectChanged,
+                        selectionHandlesInteractionMode:
+                            selectionHandlesInteractionMode,
+                        pageRasterCache: pageRasterCache,
                       ),
                     ),
                   ),

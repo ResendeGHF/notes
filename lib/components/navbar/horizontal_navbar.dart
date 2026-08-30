@@ -36,6 +36,7 @@ class HorizontalNavbar extends StatelessWidget {
     final platform = Theme.of(context).platform;
 
     return SafeArea(
+      top: false,
       child: Padding(
         padding: const .all(16),
         child: Align(

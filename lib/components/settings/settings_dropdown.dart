@@ -4,6 +4,7 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:saber/components/settings/settings_icon.dart';
 import 'package:saber/components/theming/adaptive_toggle_buttons.dart';
 import 'package:saber/pages/home/settings.dart';
 import 'package:stow/stow.dart';
@@ -25,8 +26,8 @@ class SettingsDropdown<T> extends StatefulWidget {
 
   final String title;
   final String? subtitle;
-  final IconData? icon;
-  final IconData? Function(T)? iconBuilder;
+  final Object? icon;
+  final Object? Function(T)? iconBuilder;
 
   final Stow<dynamic, T, dynamic> pref;
   final List<ToggleButtonsOption<T>> options;
@@ -65,7 +66,7 @@ class _SettingsDropdownState<T> extends State<SettingsDropdown<T>> {
       widget.pref.value = widget.options.first.value;
     }
 
-    IconData? icon = widget.icon;
+    Object? icon = widget.icon;
     icon ??= widget.iconBuilder?.call(widget.pref.value);
     icon ??= Icons.settings;
 
@@ -81,7 +82,7 @@ class _SettingsDropdownState<T> extends State<SettingsDropdown<T>> {
         contentPadding: const .symmetric(vertical: 4, horizontal: 16),
         leading: AnimatedSwitcher(
           duration: const Duration(milliseconds: 100),
-          child: Icon(icon, key: ValueKey(icon)),
+          child: settingsLeadingIcon(icon, key: ValueKey(icon)),
         ),
         title: Text(
           widget.title,

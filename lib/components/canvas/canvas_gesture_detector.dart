@@ -9,14 +9,20 @@ import 'dart:ui';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:keybinder/keybinder.dart';
 import 'package:saber/components/canvas/hud/canvas_hud.dart';
+import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
+import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
+import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
 import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/prefs.dart';
+import 'package:saber/data/tools/eraser.dart';
+import 'package:saber/data/tools/pen.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:vector_math/vector_math_64.dart';
 
@@ -31,6 +37,7 @@ class CanvasGestureDetector extends StatefulWidget {
     required this.onDrawEnd,
     required this.updatePointerData,
     this.onPointerDown,
+    this.onPointerUpOrCancel,
     this.shouldInjectRawPointerSamplesForDraw,
     this.onRawPointerMoveForDraw,
     required this.onHovering,
@@ -48,7 +55,12 @@ class CanvasGestureDetector extends StatefulWidget {
     required this.isTextEditing,
     this.isInfinite = false,
     this.skipTransformClampForExpansion,
+    this.suppressTransformClamp,
+    this.onContainerBoundsChanged,
+    this.pageLayoutWidthOverride,
     this.scrollPhysicsStopNotifier,
+    this.tryHydratePage,
+    this.onMaintainPageRasterBand,
     TransformationController? transformationController,
   }) : _transformationController =
            transformationController ?? TransformationController();
@@ -68,6 +80,7 @@ class CanvasGestureDetector extends StatefulWidget {
   )
   updatePointerData;
   final ValueChanged<PointerEvent>? onPointerDown;
+  final ValueChanged<PointerEvent>? onPointerUpOrCancel;
 
   final bool Function()? shouldInjectRawPointerSamplesForDraw;
   final void Function(PointerMoveEvent event)? onRawPointerMoveForDraw;
@@ -93,7 +106,27 @@ class CanvasGestureDetector extends StatefulWidget {
 
   final ValueNotifier<bool>? skipTransformClampForExpansion;
 
+  /// When true, skip pan/zoom clamping until cleared (viewport resize sessions).
+  final ValueNotifier<bool>? suppressTransformClamp;
+
+  /// Fired when the interactive canvas layout size changes.
+  final ValueChanged<Size>? onContainerBoundsChanged;
+
+  /// When set, page geometry (fitted width/height/offsets) uses this width
+  /// instead of the live viewport width. Used while a sidebar/split resize is
+  /// animating so pages do not reflow every frame (avoids a "scrolling" look).
+  /// The HUD stays outside the transform and is unaffected.
+  final double? pageLayoutWidthOverride;
+
   final ValueNotifier<int>? scrollPhysicsStopNotifier;
+
+  /// Idle-path BSON hydrate. Must not run inside [pageBuilder] / `build`.
+  /// Returns true when this call replaced a shell.
+  final bool Function(int pageIndex)? tryHydratePage;
+
+  /// Prefetch/evict page raster caches for the visible band ± neighbors.
+  final void Function(int visibleStart, int visibleEnd)?
+  onMaintainPageRasterBand;
 
   late final TransformationController _transformationController;
 
@@ -102,7 +135,7 @@ class CanvasGestureDetector extends StatefulWidget {
   @override
   State<CanvasGestureDetector> createState() => CanvasGestureDetectorState();
 
-  static const kMinScale = 0.3;
+  static const kMinScale = 0.6;
   static const kMaxScale = 10.0;
 
   static double getTopOfPage({
@@ -125,10 +158,12 @@ class CanvasGestureDetector extends StatefulWidget {
     );
     transformationController.value = Matrix4.translationValues(
       0,
-
       topOfPage + 50,
       0,
     );
+    // Programmatic jumps are not finger gestures — clear moving so idle
+    // BSON hydrate is not stuck waiting for _finishViewportGesture.
+    PageRasterCacheManager.endProgrammaticViewportJump();
   }
 
   static int getPageIndex({
@@ -320,7 +355,6 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void initState() {
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _recalculatePageOffsets();
@@ -342,20 +376,28 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void didUpdateWidget(CanvasGestureDetector oldWidget) {
-
-    if (widget.pages != oldWidget.pages) {
+    if (widget.pages != oldWidget.pages ||
+        widget.pageLayoutWidthOverride != oldWidget.pageLayoutWidthOverride) {
       _recalculatePageOffsets();
     }
 
     if (oldWidget.initialPageIndex != widget.initialPageIndex ||
         oldWidget.filePath != widget.filePath) {
-      setInitialTransform();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setInitialTransform();
+      });
     }
     super.didUpdateWidget(oldWidget);
   }
 
-  void _recalculatePageOffsets() {
-    final screenWidth = MediaQuery.sizeOf(context).width;
+  void _recalculatePageOffsets({double? widthOverride}) {
+    final screenWidth =
+        widthOverride ??
+        widget.pageLayoutWidthOverride ??
+        (containerBounds.maxWidth > 0
+            ? containerBounds.maxWidth
+            : MediaQuery.sizeOf(context).width);
 
     if (screenWidth == _lastCachedScreenWidth &&
         _pageVerticalOffsets.length == widget.pages.length &&
@@ -365,22 +407,20 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
     _lastCachedScreenWidth = screenWidth;
     _pageVerticalOffsets.clear();
-    double currentTop = 0;
+    // Keep in sync with Editor._generatePageOffsets / _PagesBuilder.
+    double currentTop = widget.isInfinite ? 0 : Editor.gapBetweenPages * 2;
 
     for (final page in widget.pages) {
       _pageVerticalOffsets.add(currentTop);
 
       final pageSize = page.size;
-
       final pageWidthFitted = min(pageSize.width, screenWidth);
-
-      currentTop += 16;
+      currentTop += widget.isInfinite ? 0 : Editor.gapBetweenPages;
       currentTop += pageSize.height * (pageWidthFitted / pageSize.width);
     }
   }
 
   void setInitialTransform() {
-
     if (widget.filePath.isEmpty) return;
 
     if (_pageVerticalOffsets.isEmpty) _recalculatePageOffsets();
@@ -390,13 +430,11 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     final transformCacheItem = CanvasTransformCache.get(widget.filePath);
 
     if (transformCacheItem != null) {
-
       widget._transformationController.value = transformCacheItem.transform;
       if (zoomLockedValue != null) {
         zoomLockedValue = transformCacheItem.transform.approxScale;
       }
     } else if (widget.initialPageIndex != null) {
-
       CanvasGestureDetector.scrollToPage(
         pageIndex: widget.initialPageIndex!,
         pageOffsets: _pageVerticalOffsets,
@@ -408,11 +446,29 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   Timer? _snapZoomTimer;
 
   void onTransformChanged() {
-
+    // Transform updates every pan/zoom frame via AnimatedBuilder, but the
+    // page builder is bucket-throttled. Push scale here so zoom LOD rasters
+    // do not wait for a widget rebuild (or a new stroke).
+    PageRasterCacheManager.setViewportScale(
+      widget._transformationController.value.approxScale,
+    );
+    if (widget.suppressTransformClamp?.value ?? false) {
+      return;
+    }
     if (widget.skipTransformClampForExpansion?.value ?? false) {
       widget.skipTransformClampForExpansion!.value = false;
       return;
     }
+    _clampTransform();
+  }
+
+  /// Re-run pan bounds clamping (e.g. after a viewport resize session ends).
+  void reclampTransform() {
+    if (!mounted) return;
+    _clampTransform();
+  }
+
+  void _clampTransform() {
     final scale = widget._transformationController.value.approxScale;
     final translation = widget._transformationController.value.getTranslation();
 
@@ -422,34 +478,65 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     _snapZoomTimer?.cancel();
     final diffFrom1 = (scale - 1).abs();
 
-    if (diffFrom1 < 0.05 && diffFrom1 > 0.001)
+    if (diffFrom1 < 0.05 && diffFrom1 > 0.001) {
       _snapZoomTimer = Timer(const Duration(milliseconds: 200), resetZoom);
-
-    if (scale < 1) {
-
-      final center = containerBounds.maxWidth * (1 - scale) / 2;
-      adjustmentX = center - translation.x;
-    } else {
-
-      late final minX = containerBounds.maxWidth * (1 - scale);
-      if (translation.x > 0) {
-        adjustmentX = -translation.x;
-      } else if (translation.x < minX) {
-        adjustmentX = minX - translation.x;
-      }
-
-      if (translation.y > 0) {
-        adjustmentY = -translation.y;
-      }
     }
 
+    if (scale < 1) {
+            final center = containerBounds.maxWidth * (1 - scale) / 2;
+            adjustmentX = center - translation.x;
+          } else {
+            if (widget.isInfinite) {
+              late final minX = containerBounds.maxWidth * (1 - scale);
+              if (translation.x > 0) {
+                adjustmentX = -translation.x;
+              } else if (translation.x < minX) {
+                adjustmentX = minX - translation.x;
+              }
+            } else {
+              final cWidth = containerBounds.maxWidth;
+              final leftOffset = widget.pages.isEmpty ? 0.0 : (cWidth - min(widget.pages.first.size.width, cWidth)) / 2.0;
+              final pageWidth = cWidth - 2 * leftOffset;
+
+              final scaledPageWidth = pageWidth * scale;
+              
+              if (scaledPageWidth <= cWidth) {
+                final center = cWidth * (1 - scale) / 2;
+                adjustmentX = center - translation.x;
+              } else {
+                final naturalMargin = leftOffset * scale;
+                
+                double allowedMargin;
+                if (scale < 1.5) {
+                    final t = (scale - 1.0) / 0.5;
+                    allowedMargin = naturalMargin * (1 - t) + min(naturalMargin, 64.0) * t;
+                } else {
+                    allowedMargin = min(naturalMargin, 64.0);
+                }
+
+                final maxX = allowedMargin - leftOffset * scale;
+                final minX = cWidth - allowedMargin - leftOffset * scale - scaledPageWidth;
+
+                if (translation.x > maxX) {
+                  adjustmentX = maxX - translation.x;
+                } else if (translation.x < minX) {
+                  adjustmentX = minX - translation.x;
+                }
+              }
+            }
+
+            if (translation.y > 0) {
+              adjustmentY = -translation.y;
+            }
+          }
+
     if (adjustmentX.abs() > 0.1 || adjustmentY.abs() > 0.1) {
-      widget._transformationController.value.leftTranslateByDouble(
-        adjustmentX,
-        adjustmentY,
-        0,
-        1,
-      );
+      // Assign a new matrix so TransformationController notifies listeners.
+      // In-place leftTranslateByDouble does not, which left the canvas visually
+      // uncentered after sidebar/split resize until the user panned.
+      final next = Matrix4.copy(widget._transformationController.value);
+      next.leftTranslateByDouble(adjustmentX, adjustmentY, 0, 1);
+      widget._transformationController.value = next;
     }
   }
 
@@ -481,7 +568,6 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
       if (event.pressureMin != event.pressureMax) {
         pressure = event.pressure;
       } else {
-
         pressure = null;
       }
 
@@ -499,7 +585,6 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
         widget.shouldInjectRawPointerSamplesForDraw?.call() == true) {
       widget.onRawPointerMoveForDraw?.call(event);
     }
-
   }
 
   var stylusButtonWasPressed = false;
@@ -521,6 +606,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   void _listenerPointerUpEvent(PointerEvent event) {
     widget.updatePointerData(event.kind, null, event.timeStamp);
+    widget.onPointerUpOrCancel?.call(event);
     stylusButtonWasPressed = false;
     widget.onStylusButtonChanged(false);
   }
@@ -535,18 +621,67 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
           onPointerDown: _listenerPointerEvent,
           onPointerMove: _listenerPointerEvent,
           onPointerUp: _listenerPointerUpEvent,
+          onPointerCancel: _listenerPointerUpEvent,
           onPointerHover: _listenerPointerHoverEvent,
-          child: GestureDetector(
+          child: RawGestureDetector(
             behavior: HitTestBehavior.opaque,
-            onLongPressStart: (details) =>
-                widget.onLongPress(details.globalPosition),
-            onSecondaryTapDown: (details) =>
-                widget.onSecondaryTapDown?.call(details.globalPosition),
-            onTapDown: (details) =>
-                widget.onTapDown?.call(details.globalPosition),
+            gestures: <Type, GestureRecognizerFactory>{
+              LongPressGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                    LongPressGestureRecognizer
+                  >(
+                    () => LongPressGestureRecognizer(
+                      duration: CanvasContextMenuFeel.longPressDuration,
+                    ),
+                    (LongPressGestureRecognizer instance) {
+                      instance.onLongPressStart = (details) {
+                        widget.onLongPress(details.globalPosition);
+                      };
+                    },
+                  ),
+              TapGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+                    () => TapGestureRecognizer(),
+                    (TapGestureRecognizer instance) {
+                      instance
+                        ..onSecondaryTapDown = (details) {
+                          widget.onSecondaryTapDown?.call(details.globalPosition);
+                        }
+                        ..onTapDown = (details) {
+                          widget.onTapDown?.call(details.globalPosition);
+                        };
+                    },
+                  ),
+            },
             child: LayoutBuilder(
               builder: (BuildContext context, BoxConstraints containerBounds) {
+                final previous = this.containerBounds;
                 this.containerBounds = containerBounds;
+                final pageLayoutWidth =
+                    widget.pageLayoutWidthOverride ?? containerBounds.maxWidth;
+                final lastWidth = _lastCachedScreenWidth;
+                if (pageLayoutWidth > 0 &&
+                    (lastWidth == null ||
+                        (pageLayoutWidth - lastWidth).abs() > 0.5)) {
+                  _recalculatePageOffsets(widthOverride: pageLayoutWidth);
+                }
+
+                final sizeChanged =
+                    (previous.maxWidth - containerBounds.maxWidth).abs() >
+                        0.5 ||
+                    (previous.maxHeight - containerBounds.maxHeight).abs() >
+                        0.5;
+                if (sizeChanged &&
+                    containerBounds.maxWidth > 0 &&
+                    containerBounds.maxHeight > 0) {
+                  final size = Size(
+                    containerBounds.maxWidth,
+                    containerBounds.maxHeight,
+                  );
+                  // Synchronous: update scroll anchors before this frame paints
+                  // so sidebar/split resize does not flash a wrong transform.
+                  widget.onContainerBoundsChanged?.call(size);
+                }
 
                 return InteractiveCanvasViewer.builder(
                   minScale: zoomLockedValue ?? CanvasGestureDetector.kMinScale,
@@ -579,13 +714,19 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                   onDrawEnd: widget.onDrawEnd,
 
                   builder: (BuildContext context, Quad viewport) {
+                    PageRasterCacheManager.setViewportScale(
+                      widget._transformationController.value.approxScale,
+                    );
                     return _PagesBuilder(
                       pages: widget.pages,
                       pageBuilder: widget.pageBuilder,
                       placeholderPageBuilder: widget.placeholderPageBuilder,
                       boundingBox: _axisAlignedBoundingBox(viewport),
-                      containerWidth: containerBounds.maxWidth,
+                      containerWidth: pageLayoutWidth,
                       isInfinite: widget.isInfinite,
+                      tryHydratePage: widget.tryHydratePage,
+                      onMaintainPageRasterBand:
+                          widget.onMaintainPageRasterBand,
                     );
                   },
                 );
@@ -657,6 +798,8 @@ class _PagesBuilder extends StatefulWidget {
     required this.boundingBox,
     required this.containerWidth,
     this.isInfinite = false,
+    this.tryHydratePage,
+    this.onMaintainPageRasterBand,
   });
 
   final List<EditorPage> pages;
@@ -666,12 +809,19 @@ class _PagesBuilder extends StatefulWidget {
   final Rect boundingBox;
   final double containerWidth;
   final bool isInfinite;
+  final bool Function(int pageIndex)? tryHydratePage;
+  final void Function(int visibleStart, int visibleEnd)?
+  onMaintainPageRasterBand;
 
   @override
   State<_PagesBuilder> createState() => _PagesBuilderState();
 }
 
 class _PagesBuilderState extends State<_PagesBuilder> {
+  static const double _renderCacheExtent = 500;
+  static const double _pdfRenderCacheExtent = 120;
+  static const int _minHydrateRadius = 2;
+  static const int _maxShellsPerIdleFrame = 3;
 
   final List<double> _pageOffsets = [];
   final List<double> _pageHeights = [];
@@ -680,6 +830,12 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   double? _cachedContainerWidth;
   int _cachedPagesLength = 0;
   double _totalHeight = 0;
+  bool _idleWorkScheduled = false;
+  bool _hasPdfBackedPages = false;
+  double _viewportBoxTop = 0;
+  double _viewportBoxLeft = 0;
+  bool _viewportBoxReady = false;
+  int _viewportMovingBlockedFrames = 0;
 
   @override
   void didUpdateWidget(_PagesBuilder oldWidget) {
@@ -690,7 +846,6 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       for (int i = 0; i < widget.pages.length; i++) {
         if (widget.pages[i].size != oldWidget.pages[i].size) {
           pageSizesChanged = true;
-          break;
         }
       }
     } else {
@@ -698,7 +853,6 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     }
     if (widget.containerWidth != _cachedContainerWidth ||
         widget.pages.length != _cachedPagesLength ||
-        widget.pages != oldWidget.pages ||
         pageSizesChanged) {
       _recalculateLayout();
     }
@@ -725,7 +879,8 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       _pageHeights.add(pageHeight);
       _pageWidths.add(pageWidth);
 
-      currentTop += pageHeight + (widget.isInfinite ? 0 : Editor.gapBetweenPages);
+      currentTop +=
+          pageHeight + (widget.isInfinite ? 0 : Editor.gapBetweenPages);
     }
 
     if (!widget.isInfinite) {
@@ -735,6 +890,83 @@ class _PagesBuilderState extends State<_PagesBuilder> {
 
     _cachedContainerWidth = widget.containerWidth;
     _cachedPagesLength = widget.pages.length;
+    _hasPdfBackedPages = widget.pages
+        .take(24)
+        .any((page) => page.backgroundImage?.extension == '.pdf');
+  }
+
+  /// Do not cache the built page subtree: caching the same [Widget] instance
+  /// makes [Element.updateChild] skip updating descendants (`child.widget ==
+  /// newWidget`), so [Canvas] stays frozen with stale `currentStroke` and the
+  /// live-stroke overlay never mounts. Rebuilding here is cheap relative to
+  /// paint work; [RepaintBoundary] still contains ink invalidations per page.
+  Widget _pageChild(BuildContext context, int pageIndex) {
+    final page = widget.pages[pageIndex];
+    final child = page.isLazyShell
+        ? widget.placeholderPageBuilder(context, pageIndex)
+        : widget.pageBuilder(context, pageIndex);
+    return RepaintBoundary(child: child);
+  }
+
+  void _scheduleIdlePageWork(int startIndex, int endIndex) {
+    if (_idleWorkScheduled || widget.pages.isEmpty) return;
+    _idleWorkScheduled = true;
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _idleWorkScheduled = false;
+      if (!mounted) return;
+      _runIdlePageWork(startIndex, endIndex);
+    });
+  }
+
+  void _runIdlePageWork(int visibleStart, int visibleEnd) {
+    if (Pen.currentStroke != null || Eraser.isDragging) {
+      return;
+    }
+    if (PageRasterCacheManager.viewportMoving) {
+      // Safety net: programmatic jumps clear moving, but if something else
+      // left the flag stuck, still allow hydrate after a short deferral.
+      _viewportMovingBlockedFrames++;
+      if (_viewportMovingBlockedFrames < 6) {
+        _scheduleIdlePageWork(visibleStart, visibleEnd);
+        return;
+      }
+      PageRasterCacheManager.endProgrammaticViewportJump();
+      _viewportMovingBlockedFrames = 0;
+    } else {
+      _viewportMovingBlockedFrames = 0;
+    }
+
+    final visibleCount = (visibleEnd - visibleStart + 1).clamp(1, 64);
+    // xnotes-style keep-set: ±N where N ≈ number of visible pages (min 2).
+    final radius = max(_minHydrateRadius, visibleCount);
+    final start = (visibleStart - radius).clamp(0, widget.pages.length - 1);
+    final end = (visibleEnd + radius).clamp(0, widget.pages.length - 1);
+    widget.onMaintainPageRasterBand?.call(start, end);
+    final center = ((visibleStart + visibleEnd) / 2).round().clamp(
+      0,
+      widget.pages.length - 1,
+    );
+
+    if (widget.tryHydratePage == null) return;
+
+    // Nearest-first: walk by distance from viewport center.
+    var hydrated = 0;
+    final maxDist = max(center - start, end - center);
+    for (var dist = 0; dist <= maxDist; dist++) {
+      for (final i in <int>{center - dist, if (dist > 0) center + dist}) {
+        if (i < start || i > end) continue;
+        if (!widget.pages[i].isLazyShell) continue;
+        if (widget.tryHydratePage!(i)) {
+          hydrated++;
+          if (hydrated >= _maxShellsPerIdleFrame) {
+            if (mounted) setState(() {});
+            _scheduleIdlePageWork(visibleStart, visibleEnd);
+            return;
+          }
+        }
+      }
+    }
+    if (hydrated > 0 && mounted) setState(() {});
   }
 
   int _findFirstVisiblePageIndex(double viewportTop) {
@@ -753,13 +985,10 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       final height = _pageHeights[mid];
 
       if (offset + height < viewportTop) {
-
         min = mid + 1;
       } else if (offset > viewportTop) {
-
         max = mid - 1;
       } else {
-
         return mid;
       }
     }
@@ -767,20 +996,45 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     return max >= 0 ? max : 0;
   }
 
+  void _syncViewportMoving() {
+    final box = widget.boundingBox;
+    if (!_viewportBoxReady) {
+      _viewportBoxTop = box.top;
+      _viewportBoxLeft = box.left;
+      _viewportBoxReady = true;
+      return;
+    }
+    final dy = (box.top - _viewportBoxTop).abs();
+    final dx = (box.left - _viewportBoxLeft).abs();
+    // Only promote on translation. Zoom changes the viewport quad size (dSize)
+    // but must not latch viewportMoving — zoom settle handles HQ raster rebuilds.
+    if (dy > 8 || dx > 8) {
+      PageRasterCacheManager.updateViewportMoving(true);
+    }
+    _viewportBoxTop = box.top;
+    _viewportBoxLeft = box.left;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.pages.isEmpty) return const SizedBox();
+    _syncViewportMoving();
 
     final visibleWidgets = <Widget>[];
 
-    final renderZone = widget.boundingBox.inflate(3000);
+    final renderCacheExtent = _hasPdfBackedPages
+        ? _pdfRenderCacheExtent
+        : _renderCacheExtent;
+    final renderZone = widget.boundingBox.inflate(renderCacheExtent);
 
     final startIndex = _findFirstVisiblePageIndex(renderZone.top);
+    var endIndex = startIndex;
 
     for (int i = startIndex; i < widget.pages.length; i++) {
       final offset = _pageOffsets[i];
 
       if (offset > renderZone.bottom) break;
+      endIndex = i;
 
       final height = _pageHeights[i];
       final width = _pageWidths[i];
@@ -796,13 +1050,11 @@ class _PagesBuilderState extends State<_PagesBuilder> {
           width: width,
           height: height,
 
-          child: RepaintBoundary(
-            child: widget.pageBuilder(context, i),
-
-          ),
+          child: _pageChild(context, i),
         ),
       );
     }
+    _scheduleIdlePageWork(startIndex, endIndex);
 
     final content = SizedBox(
       height: _totalHeight,

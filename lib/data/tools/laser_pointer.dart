@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/material.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/list_extensions.dart';
 import 'package:saber/data/prefs.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/pen.dart';
 
@@ -23,16 +25,12 @@ class LaserPointer extends Tool {
   ToolId get toolId => .laserPointer;
 
   final pressureEnabled = false;
-  final options = StrokeOptions(smoothing: 0.7, streamline: 0.7);
+  final options = StrokeOptions(smoothing: 0.52, streamline: 0.32);
 
   Color get color => stows.laserPointerColor.value;
 
   static const double maxSize = 10.0;
   double get size => (stows.laserPointerSize.value).clamp(4.0, maxSize);
-
-  List<Duration> strokePointDelays = [];
-
-  final _stopwatch = Stopwatch();
 
   static var isDrawing = false;
 
@@ -47,17 +45,12 @@ class LaserPointer extends Tool {
       toolId: toolId,
     );
 
-    strokePointDelays = [];
-    _stopwatch.reset();
     onDragUpdate(position);
-    _stopwatch.start();
   }
 
   void onDragUpdate(Offset position, {@visibleForTesting Duration? elapsed}) {
     isDrawing = true;
     Pen.currentStroke?.addPoint(position);
-    strokePointDelays.add(elapsed ?? _stopwatch.elapsed);
-    _stopwatch.reset();
   }
 
   LaserStroke? onDragEnd(
@@ -70,10 +63,11 @@ class LaserPointer extends Tool {
     Pen.currentStroke = null;
     if (stroke is! LaserStroke) return null;
 
+    stroke.clearLivePrediction();
+
     unawaited(
       fadeOutStroke(
         stroke: stroke,
-        strokePointDelays: strokePointDelays,
         redrawPage: redrawPage,
         deleteStroke: deleteStroke,
       ),
@@ -84,35 +78,51 @@ class LaserPointer extends Tool {
       ..markPolygonNeedsUpdating();
   }
 
+  /// Brief hold at full opacity after stylus-up, then fade.
   @visibleForTesting
-  static const fadeOutDelay = Duration(seconds: 2);
+  static const fadeOutDelay = Duration(milliseconds: 200);
+
+  /// Total fade length after the hold (~3s visible trail overall).
+  @visibleForTesting
+  static const fadeOutDuration = Duration(milliseconds: 2800);
+
   @visibleForTesting
   static Future<void> fadeOutStroke({
     required LaserStroke stroke,
-    required List<Duration> strokePointDelays,
     required VoidCallback redrawPage,
     required void Function(LaserStroke) deleteStroke,
     @visibleForTesting Future<void> Function(Duration) wait = Future.delayed,
   }) async {
     await wait(fadeOutDelay);
 
-    for (final delay in strokePointDelays) {
-      await wait(delay);
-
-      if (stroke.length <= 1) break;
-
-      stroke.popFirstPoint();
-      redrawPage();
-
-      if (isDrawing) {
-
-        const waitTime = Duration(milliseconds: 100);
-        while (isDrawing) await wait(waitTime);
-
-        await wait(fadeOutDelay - waitTime);
+    // Pause while the user is drawing another laser stroke.
+    if (isDrawing) {
+      const waitTime = Duration(milliseconds: 50);
+      while (isDrawing) {
+        await wait(waitTime);
       }
+      await wait(fadeOutDelay);
     }
 
+    final completer = Completer<void>();
+    late final Ticker ticker;
+    ticker = Ticker((elapsed) {
+      final t = (elapsed.inMilliseconds / fadeOutDuration.inMilliseconds)
+          .clamp(0.0, 1.0);
+      // Ease-out so it lingers brightly then softens away.
+      final eased = Curves.easeOutCubic.transform(t);
+      stroke.fadeOpacity = lerpDouble(1.0, 0.0, eased) ?? 0.0;
+      redrawPage();
+      if (t >= 1.0) {
+        ticker.stop();
+        ticker.dispose();
+        if (!completer.isCompleted) completer.complete();
+      }
+    }, debugLabel: 'LaserFade');
+    ticker.start();
+    await completer.future;
+
+    stroke.fadeOpacity = 0.0;
     deleteStroke(stroke);
     redrawPage();
   }
@@ -133,8 +143,8 @@ class LaserStroke extends Stroke {
         color: stroke.color,
         pressureEnabled: stroke.pressureEnabled,
         options: stroke.options
-          ..streamline = 0.7
-          ..smoothing = 0.7,
+          ..streamline = 0.32
+          ..smoothing = 0.52,
         pageIndex: stroke.pageIndex,
         page: stroke.page,
         toolId: stroke.toolId,
@@ -142,11 +152,16 @@ class LaserStroke extends Stroke {
     points.addAll(stroke.points);
   }
 
+  /// 1 = fully visible, 0 = fully faded (about to be removed).
+  double fadeOpacity = 1.0;
+
+  /// Neon white core: same ballpoint adaptive-spine + outline at ~40% size.
   @protected
-  List<Offset> get innerPolygon => _innerPolygon ??= getStroke(
-    points,
-    options: options.copyWith(size: options.size * 0.4),
-  );
+  List<Offset> get innerPolygon =>
+      _innerPolygon ??= Stroke.buildBallpointStylePolygon(
+        points,
+        size: options.size * 0.4,
+      );
   List<Offset>? _innerPolygon;
 
   Path get innerPath =>
@@ -154,10 +169,7 @@ class LaserStroke extends Stroke {
   Path? _innerPath;
 
   @override
-  List<Offset> get highQualityPolygon => super.highQualityPolygon;
-
-  @override
-  List<Offset> get lowQualityPolygon => super.highQualityPolygon;
+  List<Offset> get lowQualityPolygon => highQualityPolygon;
 
   @override
   void shift(Offset offset) {

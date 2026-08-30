@@ -11,7 +11,7 @@ import 'package:google_mlkit_digital_ink_recognition/google_mlkit_digital_ink_re
     as ml;
 import 'package:logging/logging.dart';
 import 'package:math_expressions/math_expressions.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';

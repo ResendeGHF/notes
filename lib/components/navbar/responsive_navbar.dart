@@ -4,6 +4,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:saber/components/navbar/home_shell_layout.dart';
 import 'package:saber/components/navbar/horizontal_navbar.dart';
 import 'package:saber/components/navbar/vertical_navbar.dart';
 import 'package:saber/data/prefs.dart';
@@ -55,26 +56,44 @@ class _ResponsiveNavbarState extends State<ResponsiveNavbar> {
     };
 
     if (ResponsiveNavbar.isLargeScreen) {
+      // All home tabs follow expandT so content scales with the rail.
       return Scaffold(
-        body: Row(
-
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        body: Stack(
+          clipBehavior: Clip.hardEdge,
           children: [
-            VerticalNavbar(
-              destinations: HomeRoutes.navigationRailDestinations,
-              selectedIndex: widget.selectedIndex,
-              onDestinationSelected: onDestinationSelected,
+            Positioned.fill(
+              child: ValueListenableBuilder<double>(
+                valueListenable: HomeShellLayout.verticalNavExpandT,
+                builder: (context, t, child) {
+                  final inset = VerticalNavbar.collapsedWidth +
+                      VerticalNavbar.panelWidth * t.clamp(0.0, 1.0);
+                  return Padding(
+                    padding: EdgeInsetsDirectional.only(start: inset),
+                    child: child,
+                  );
+                },
+                child: RepaintBoundary(child: widget.body),
+              ),
             ),
-            Expanded(child: widget.body),
+            PositionedDirectional(
+              start: 0,
+              top: 0,
+              bottom: 0,
+              child: VerticalNavbar(
+                destinations: HomeRoutes.navigationRailDestinations,
+                selectedIndex: widget.selectedIndex,
+                onDestinationSelected: onDestinationSelected,
+              ),
+            ),
           ],
         ),
       );
     }
 
     final navbarClearance = HorizontalNavbar.clearanceHeightOf(context);
-    return ColoredBox(
-      color: Theme.of(context).scaffoldBackgroundColor,
-      child: Stack(
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      body: Stack(
         children: [
           MediaQuery(
             data: mediaQuery.copyWith(

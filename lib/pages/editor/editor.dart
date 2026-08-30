@@ -17,8 +17,10 @@ import 'package:collapsible/collapsible.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart' as flutter_quill;
@@ -28,6 +30,7 @@ import 'package:keybinder/keybinder.dart';
 import 'package:logging/logging.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
 import 'package:pdfrx/pdfrx.dart' hide PdfLink;
+import 'package:saber/components/canvas/_asset_cache.dart';
 import 'package:saber/components/canvas/_canvas_background_painter.dart';
 import 'package:saber/components/canvas/_canvas_painter.dart';
 import 'package:saber/components/canvas/_circle_stroke.dart';
@@ -36,43 +39,55 @@ import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas.dart' show Canvas;
 import 'package:saber/components/canvas/canvas_background_preview.dart';
+import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_gesture_detector.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/canvas_preview.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
+import 'package:saber/components/canvas/page_raster_cache.dart';
+import 'package:saber/components/canvas/selection_handles_layout.dart';
+import 'package:saber/components/canvas/shape_control_points_overlay.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
 import 'package:saber/components/canvas/save_indicator.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/editor/export_dialog.dart';
 import 'package:saber/components/editor/note_properties_dialog.dart';
 import 'package:saber/components/editor/pdf_equation_preview.dart';
 import 'package:saber/components/editor/pdf_link_detector.dart';
-import 'package:saber/components/editor/pdf_outline_navigator.dart';
 import 'package:saber/components/editor/pdf_page_picker_dialog.dart';
+import 'package:saber/components/editor/region_screenshot_overlay.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/components/theming/glassmorphic_confirm_dialog.dart';
+import 'package:saber/components/theming/throttled_listenable_builder.dart';
 import 'package:saber/components/theming/adaptive_icon.dart';
 import 'package:saber/components/theming/dynamic_material_app.dart';
 import 'package:saber/components/toolbar/color_bar.dart';
 import 'package:saber/components/toolbar/editor_page_manager.dart';
 import 'package:saber/components/toolbar/enhanced_toolbar.dart';
+import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/floating_calculator.dart';
-import 'package:saber/components/toolbar/function_plotter_dialog.dart';
 import 'package:saber/components/toolbar/plot_animation_metadata.dart';
 import 'package:saber/data/editor/_color_change.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
+import 'package:saber/data/editor/editor_recovery_journal.dart';
 import 'package:saber/data/editor/link_export_expander.dart';
 import 'package:saber/data/editor/editor_history.dart';
 import 'package:saber/data/editor/note_tool_settings.dart';
 import 'package:saber/data/editor/page.dart';
+import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
 import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
+import 'package:saber/data/file_tree_cache.dart';
+import 'package:saber/data/ink_preset_profiles.dart';
 import 'package:saber/data/note_links_database.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
@@ -82,16 +97,21 @@ import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/laser_pointer.dart';
 import 'package:saber/data/tools/pen.dart';
+import 'package:saber/data/tools/pen_size_preset_support.dart';
 import 'package:saber/data/tools/select.dart';
+import 'package:saber/data/tools/shape_geometry.dart';
 import 'package:saber/data/tools/shape_recognition.dart';
 import 'package:saber/data/tools/shape_tool.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/custom_thumbnail_screen.dart';
+import 'package:saber/pages/editor/editor_page_settings_body.dart';
 import 'package:saber/pages/home/home.dart';
-import 'package:saber/services/function_plotter.dart';
+import 'package:saber/pages/home/note_and_ink_defaults_pages.dart';
+import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/math_solver_service.dart';
 import 'package:saber/services/recognition_service.dart';
 import 'package:saber/services/sba_encryption.dart';
+import 'package:saber/services/thumbnail_cache.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -133,10 +153,19 @@ enum _CropHandle {
   inside,
 }
 
+enum _EditorDockedSidePanel { none, pages, settings }
+
+class _NoteLinkHistoryEntry {
+  const _NoteLinkHistoryEntry({required this.path, this.pageIndex});
+
+  final String path;
+  final int? pageIndex;
+}
+
 class Editor extends StatefulWidget {
   Editor({
     super.key,
-    String? path,
+    this.path,
     this.customTitle,
     this.pdfPath,
     this.embedded = false,
@@ -152,11 +181,13 @@ class Editor extends StatefulWidget {
     this.viewportWidthOverride,
     this.viewportHeightOverride,
     this.initialPageIndexOverride,
+    this.onEmbeddedChromeChanged,
   }) : initialPath = path != null
            ? Future.value(path)
            : FileManager.newFilePath('/'),
        needsNaming = path == null;
 
+  final String? path;
   final Future<String> initialPath;
   final bool needsNaming;
 
@@ -176,6 +207,9 @@ class Editor extends StatefulWidget {
   final double? viewportWidthOverride;
   final double? viewportHeightOverride;
   final int? initialPageIndexOverride;
+
+  /// Split host should rebuild its chrome (app bar) when link-back stack changes.
+  final VoidCallback? onEmbeddedChromeChanged;
 
   static const extension = '.sbn2';
 
@@ -208,6 +242,12 @@ class EditorState extends State<Editor>
   final log = Logger('EditorState');
 
   late final AnimationController _keepAliveController;
+  late final AnimationController _dockedSidePanelController;
+
+  /// Docked Pages / ⋯ menus (non-modal; canvas resizes beside them).
+  _EditorDockedSidePanel _dockedSidePanel = _EditorDockedSidePanel.none;
+  int _pagesSidePanelIndexAtOpen = 0;
+  bool _dockedSidePanelOcclusionActive = false;
 
   late var coreInfo = EditorCoreInfo(filePath: '');
 
@@ -217,8 +257,97 @@ class EditorState extends State<Editor>
   final _canvasGestureDetectorKey = GlobalKey<CanvasGestureDetectorState>();
   final _transformationController = TransformationController();
   final _skipTransformClampForExpansion = ValueNotifier<bool>(false);
+  final _suppressTransformClamp = ValueNotifier<bool>(false);
+  bool _resizeAnchorApplyScheduled = false;
+  double? _pendingResizeAnchorWidthOverride;
+  double? _pendingResizeAnchorHeightOverride;
+  bool _applyingResizeAnchor = false;
+  /// True while [didChangeMetrics] owns the active resize-anchor session.
+  bool _metricsOwnsResizeSession = false;
+  /// Coalesces [didChangeMetrics] settle callbacks (orientation / window size).
+  int _metricsSettleEpoch = 0;
+  /// Last logical window size — ignore keyboard-only [didChangeMetrics].
+  Size? _lastMetricsLogicalSize;
+
+  /// Invalidates stale [AnimationController] completion callbacks when a newer
+  /// open/close starts (prevents panel state getting stuck mid-animation).
+  int _dockedSidePanelAnimEpoch = 0;
+  bool _canvasGestureActive = false;
 
   final _scrollPhysicsStopNotifier = ValueNotifier<int>(0);
+  late final PageRasterCacheManager _pageRasterCache = PageRasterCacheManager(
+    onRepaintRequested: _onPageRasterRepaint,
+  );
+  int? _lastPageRasterBandStart;
+  int? _lastPageRasterBandEnd;
+
+  void _onPageRasterRepaint() {
+    if (mounted) setState(() {});
+  }
+
+  double _canvasDevicePixelRatio() {
+    final view = View.maybeOf(context);
+    if (view != null) {
+      return view.devicePixelRatio.clamp(1.0, 4.0);
+    }
+    return MediaQuery.devicePixelRatioOf(context).clamp(1.0, 4.0);
+  }
+
+  void _onPageRasterLodSettled() {
+    if (!mounted || coreInfo.pages.isEmpty) return;
+    final scale =
+        PageRasterCacheManager.liveViewportScale ?? _quantizedCanvasScale;
+    final dpr = _canvasDevicePixelRatio();
+    _pageRasterCache.prepareForSettledScale(scale: scale, devicePixelRatio: dpr);
+    final center = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
+    final radius = 2;
+    final bandStart =
+        _lastPageRasterBandStart ??
+        (center - radius).clamp(0, coreInfo.pages.length - 1);
+    final bandEnd =
+        _lastPageRasterBandEnd ??
+        (center + radius).clamp(0, coreInfo.pages.length - 1);
+    _maintainPageRasterBand(
+      bandStart,
+      bandEnd,
+      forceSchedule: true,
+      scale: scale,
+    );
+    setState(() {});
+  }
+
+  void _maintainPageRasterBand(
+    int bandStart,
+    int bandEnd, {
+    bool forceSchedule = false,
+    double? scale,
+  }) {
+    if (coreInfo.pages.isEmpty) return;
+    _lastPageRasterBandStart = bandStart;
+    _lastPageRasterBandEnd = bandEnd;
+    final theme = _cachedTheme ?? ThemeData.light();
+    final invert = theme.brightness == Brightness.dark
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        : false;
+    _pageRasterCache.maintainVisibleBand(
+      coreInfo: coreInfo,
+      visibleStart: bandStart,
+      visibleEnd: bandEnd,
+      scale: scale ?? _quantizedCanvasScale,
+      devicePixelRatio: _canvasDevicePixelRatio(),
+      forceSchedule: forceSchedule,
+      invert: invert,
+      primaryColor: theme.colorScheme.primary,
+      secondaryColor: theme.colorScheme.secondary,
+      defaultTextStyle: theme.textTheme.bodyMedium ?? const TextStyle(),
+      defaultLineHeight: coreInfo.lineHeight,
+      defaultLineThickness: coreInfo.lineThickness.toDouble(),
+      defaultPattern: coreInfo.backgroundPattern,
+      defaultBackgroundColor:
+          coreInfo.backgroundColor ?? InnerCanvas.defaultBackgroundColor,
+    );
+  }
+
   double get scrollY {
     final transformation = _transformationController.value;
     final scale = transformation.approxScale;
@@ -226,7 +355,6 @@ class EditorState extends State<Editor>
     final gestureDetector = _canvasGestureDetectorKey.currentState;
 
     if (gestureDetector == null) {
-
       return translation.y / scale;
     } else {
       final middle = gestureDetector.containerBounds.maxHeight / 2;
@@ -240,7 +368,6 @@ class EditorState extends State<Editor>
   late bool needsNaming = widget.needsNaming && stows.editorPromptRename.value;
 
   late Tool _currentTool = () {
-
     switch (stows.lastPenType.value) {
       case ToolId.ballpointPen:
         Pen.currentPen = Pen.ballpointPen();
@@ -249,17 +376,16 @@ class EditorState extends State<Editor>
         Pen.currentPen = Pen.calligraphyPen();
         break;
       case ToolId.shapePen:
-
         Pen.currentPen = Pen.ballpointPen();
         break;
-      case ToolId.verticalSpacePen:
-        Pen.currentPen = Pen.verticalSpacePen();
-        break;
-      case ToolId.horizontalSpacePen:
-        Pen.currentPen = Pen.horizontalSpacePen();
-        break;
       case ToolId.advancedPen:
-        Pen.currentPen = AdvancedPen();
+        Pen.currentPen = Pen.advancedPen();
+        break;
+      case ToolId.advancedPencil:
+        Pen.currentPen = Pen.advancedPencil();
+        break;
+      case ToolId.experimentalPen:
+        Pen.currentPen = Pen.advancedPen();
         break;
       case ToolId.fountainPen:
       default:
@@ -272,9 +398,9 @@ class EditorState extends State<Editor>
       case .ballpointPen:
       case .calligraphyPen:
       case .shapePen:
-      case .verticalSpacePen:
-      case .horizontalSpacePen:
       case .advancedPen:
+      case .advancedPencil:
+      case .experimentalPen:
         return Pen.currentPen;
       case .highlighter:
         return Highlighter.currentHighlighter;
@@ -292,7 +418,6 @@ class EditorState extends State<Editor>
   }();
   Tool get currentTool => _currentTool;
   set currentTool(Tool tool) {
-
     if (tool != Select.currentSelect && tool != ShapeTool.currentShapeTool) {
       _autoSwitchBackToShapeTool = false;
     }
@@ -301,7 +426,6 @@ class EditorState extends State<Editor>
         _currentTool is Pen) {
       _lastPenTool = _currentTool;
     } else if (tool is Pen || tool is ShapeTool) {
-
       _lastPenTool = tool;
     }
 
@@ -315,6 +439,10 @@ class EditorState extends State<Editor>
 
     if (tool is! Eraser) {
       eraserPosition = null;
+      _eraserPositionRepaint.value = null;
+      Eraser.isDragging = false;
+      _rawPenSampleSeenThisStroke = false;
+      _lastRawPenSampleTimestamp = null;
     }
     _bumpInteractionRepaint();
   }
@@ -326,29 +454,89 @@ class EditorState extends State<Editor>
 
   ValueNotifier<SavingState> savingState = ValueNotifier(SavingState.saved);
 
-  final ValueNotifier<bool> isOpeningNote = ValueNotifier(false);
   Timer? _delayedSaveTimer;
   DateTime? _lastUserActivityForAutosave;
 
   DateTime _lastSaveTime = DateTime.now();
   DateTime _lastTimeSpentUpdate = DateTime.now();
+  EditorRecoveryJournal? _recoveryJournal;
 
   bool _isDisposed = false;
+  String _lastWrittenThumbnailHash = '';
 
   Future<void>? _pendingSaveFuture;
 
   static final Map<String, Future<void>> _pendingSavesByPath = {};
 
+  /// Bumped when a note path is deleted so in-flight saves for a prior note
+  /// identity cannot recreate the file after "New note" reuses the name.
+  static final Map<String, int> _notePathEpoch = {};
+
+  static String _normalizeNotePathKey(String path) {
+    var normalized = path.replaceAll('\\', '/');
+    if (normalized.endsWith(Editor.extension)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extension.length,
+      );
+    } else if (normalized.endsWith(Editor.extensionOldJson)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extensionOldJson.length,
+      );
+    }
+    if (!normalized.startsWith('/')) normalized = '/$normalized';
+    if (normalized.length > 1 && normalized.endsWith('/')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
+  }
+
+  static int notePathEpoch(String noteBasePath) {
+    return _notePathEpoch[_normalizeNotePathKey(noteBasePath)] ?? 0;
+  }
+
+  static void invalidateDeletedNotePath(String noteBasePath) {
+    final key = _normalizeNotePathKey(noteBasePath);
+    _notePathEpoch[key] = (_notePathEpoch[key] ?? 0) + 1;
+  }
+
+  /// While [_pendingSaveFuture] runs, new edits must queue a follow-up save
+  /// (-setting [savingState] to waiting would start a second concurrent
+  /// [_runBackgroundSave] and corrupt the on-disk note).
+  bool _saveFollowUpRequested = false;
+
   bool _isDeleted = false;
+  bool _isUndoRedoInProgress = false;
 
   _ImageCropState? _imageCropState;
   _CropHandle? _activeCropHandle;
+
+  void _appendRecoveryStroke(Stroke stroke) {
+    if (coreInfo.readOnly || _isDeleted) return;
+    final journal = _recoveryJournal ??= EditorRecoveryJournal(
+      coreInfo.filePath,
+      noteId: coreInfo.noteId,
+    );
+    unawaited(journal.appendDrawStroke(stroke.copy()));
+  }
+
+  Future<void> _flushRecoveryWrites() async {
+    try {
+      await _recoveryJournal?.flush();
+    } catch (_) {}
+  }
 
   PdfDocument? _previewPdfDocument;
   int? _previewPageIndex;
   Rect? _previewRegion;
   int? _lastPreviewGoToOriginPageIndex;
   bool _showGoBackAfterPreviewJump = false;
+
+  /// Stack of notes replaced by tapping an internal note link. Popping restores
+  /// the previous note in this same editor (single or split pane).
+  final List<_NoteLinkHistoryEntry> _noteLinkBackStack = [];
+  bool _noteLinkNavBusy = false;
 
   final _mathSolver = MathSolverService();
   final _recognitionService = RecognitionService();
@@ -357,8 +545,7 @@ class EditorState extends State<Editor>
   Offset _longPressStartPosition = Offset.zero;
   bool _ignoreDragForMenu = false;
   bool _isCanvasMenuOpen = false;
-  static const double _longPressMoveThreshold =
-      10.0;
+  static const double _longPressMoveThreshold = 10.0;
   static const List<double> _rotationSnapAngles = <double>[
     0,
     30,
@@ -383,7 +570,6 @@ class EditorState extends State<Editor>
 
   Future<void> _handlePotentialPdfLinkTap(Offset globalPos) async {
     try {
-
       final pageIndex = onWhichPageIsFocalPoint(globalPos);
       if (pageIndex == null) return;
 
@@ -393,8 +579,7 @@ class EditorState extends State<Editor>
       final pdfImg = page.backgroundImage as PdfEditorImage;
 
       final renderBox = page.renderBox;
-      if (renderBox == null || !renderBox.attached)
-        return;
+      if (renderBox == null || !renderBox.attached) return;
       final localPos = renderBox.globalToLocal(globalPos);
 
       final pdfNotifier = coreInfo.assetCacheAll.getPdfNotifier(pdfImg.assetId);
@@ -424,13 +609,11 @@ class EditorState extends State<Editor>
 
       if (link != null) {
         if (link.targetPageIndex != null) {
-
           Rect regionToShow;
 
           if (link.targetRegion != null) {
             regionToShow = link.targetRegion!;
           } else {
-
             final targetPageObj = pdfDocument.pages[link.targetPageIndex!];
             regionToShow = Rect.fromLTWH(
               0,
@@ -446,15 +629,12 @@ class EditorState extends State<Editor>
             region: regionToShow,
           );
         } else if (link.uri != null) {
-
           final Uri url = Uri.parse(link.uri!);
           if (await canLaunchUrl(url)) {
             await launchUrl(url, mode: LaunchMode.externalApplication);
           }
         }
-      } else {
-
-      }
+      } else {}
     } catch (e, stackTrace) {
       log.warning('Error handling potential PDF link tap: $e', e, stackTrace);
     }
@@ -469,7 +649,6 @@ class EditorState extends State<Editor>
     File? pdfFile,
   ) async {
     try {
-
       final pdfPosition = PdfLinkDetector.widgetToPdfCoordinates(
         localPosition,
         pdfPageSize,
@@ -483,7 +662,6 @@ class EditorState extends State<Editor>
       );
 
       if (link != null && link.targetPageIndex != null) {
-
         final targetRegion =
             link.targetRegion ??
             Rect.fromLTWH(
@@ -550,12 +728,10 @@ class EditorState extends State<Editor>
 
   void _onPreviewLinkTapped(PdfLink link) {
     if (link.targetPageIndex != null && _previewPdfDocument != null) {
-
       Rect regionToShow;
       if (link.targetRegion != null) {
         regionToShow = link.targetRegion!;
       } else {
-
         final targetPageObj = _previewPdfDocument!.pages[link.targetPageIndex!];
         regionToShow = Rect.fromLTWH(
           0,
@@ -575,28 +751,49 @@ class EditorState extends State<Editor>
 
   void _onGoToLocation(int pageIndex) {
     _lastPreviewGoToOriginPageIndex = currentPageIndex;
-
-    final screenWidth = _currentViewportWidth();
-    CanvasGestureDetector.scrollToPage(
-      pageIndex: pageIndex,
-      pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-      transformationController: _transformationController,
-    );
+    _navigateToPage(pageIndex, neighborWindow: 1);
     setState(() {
       _showGoBackAfterPreviewJump = true;
     });
+  }
+
+  /// User-initiated page jump: hydrate landing window, prime assets, scroll,
+  /// then unblock idle prefetch (outline / page list / PDF links).
+  void _navigateToPage(int pageIndex, {int neighborWindow = 1}) {
+    if (coreInfo.pages.isEmpty) return;
+    final target = pageIndex.clamp(0, coreInfo.pages.length - 1);
+    final from = (target - neighborWindow).clamp(0, coreInfo.pages.length - 1);
+    final to = (target + neighborWindow).clamp(0, coreInfo.pages.length - 1);
+
+    for (var i = from; i <= to; i++) {
+      if (!coreInfo.isLazyShellPage(i)) {
+        coreInfo.ensurePageHydrated(i);
+        _wirePageImageCallbacks(i);
+      }
+    }
+    _maintainPageRasterBand(from, to);
+
+    final screenWidth = _currentViewportWidth();
+    CanvasGestureDetector.scrollToPage(
+      pageIndex: target,
+      pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
+      transformationController: _transformationController,
+    );
+    PageRasterCacheManager.endProgrammaticViewportJump();
+    if (mounted) setState(() {});
   }
 
   void _startSelectionLongPressTimer(Offset globalPos) {
     _selectionLongPressTimer?.cancel();
     _longPressStartPosition = globalPos;
 
-    _selectionLongPressTimer = Timer(const Duration(milliseconds: 500), () {
+    // Match canvas long-press. Flutter's 500ms default feels sluggish.
+    _selectionLongPressTimer = Timer(CanvasContextMenuFeel.longPressDuration, () {
       if (mounted) {
         _selectionLongPressTimer = null;
 
         _ignoreDragForMenu = true;
-        HapticFeedback.mediumImpact();
+        HapticFeedback.selectionClick();
         unawaited(
           _showCanvasMenu(globalPos).whenComplete(() {
             if (!mounted) return;
@@ -687,8 +884,7 @@ class EditorState extends State<Editor>
           ..style = PaintingStyle.fill;
         canvas.drawPath(path, fillPaint);
       }
-      final outlinePath =
-          stroke is ShapeStroke ? stroke.strokeDrawPath : path;
+      final outlinePath = stroke is ShapeStroke ? stroke.strokeDrawPath : path;
       canvas.drawPath(outlinePath, paint);
     }
 
@@ -717,7 +913,6 @@ class EditorState extends State<Editor>
 
     for (final img in images) {
       try {
-
         int assetId;
         if (img is PngEditorImage) {
           assetId = img.assetId;
@@ -936,13 +1131,10 @@ class EditorState extends State<Editor>
 
     history.recordChange(
       EditorHistoryItem(
-        type:
-            .move,
+        type: .move,
         pageIndex: imagesToModify.first.pageIndex,
         strokes: [],
-        images: List.from(
-          imagesToModify.map((e) => e.copy()),
-        ),
+        images: List.from(imagesToModify.map((e) => e.copy())),
       ),
     );
 
@@ -976,7 +1168,6 @@ class EditorState extends State<Editor>
     }
 
     setState(() {
-
       if (page.backgroundImage != null) {
         page.images.add(page.backgroundImage!);
       }
@@ -1263,26 +1454,30 @@ class EditorState extends State<Editor>
   OverlayEntry? _calculatorOverlay;
   Offset _calculatorOffset = const Offset(40, 80);
 
+  /// Drag-to-select region screenshot mode (toolbar crop_free button).
+  bool _regionScreenshotMode = false;
+  final GlobalKey _regionScreenshotBoundaryKey = GlobalKey();
+
   @override
   void initState() {
-    if (stows.editorFullScreen.value) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    }
-    stows.editorFullScreen.addListener(_onFullscreenPrefChanged);
     WidgetsBinding.instance.addObserver(this);
 
-    _keepAliveController =
-        AnimationController(
-          vsync: this,
-          duration: const Duration(
-            seconds: 2,
-          ),
-        )..addListener(() {
+    _keepAliveController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..addListener(() {});
 
-        });
+    _dockedSidePanelController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    )..addListener(_onDockedSidePanelAnimTick);
 
     _initAsync();
     _assignKeybindings();
+
+    NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
+
+    PageRasterCacheManager.addLodSettledListener(_onPageRasterLodSettled);
 
     if (coreInfo.pages.isNotEmpty) {
     } else {}
@@ -1295,15 +1490,25 @@ class EditorState extends State<Editor>
     super.didChangeDependencies();
 
     try {
-      _cachedTheme = Theme.of(context);
+      final newTheme = Theme.of(context);
+      if (_cachedTheme != null && _cachedTheme!.brightness != newTheme.brightness) {
+        _pageRasterCache.invalidateForZoom();
+        _bumpInteractionRepaint();
+      }
+      _cachedTheme = newTheme;
       _cachedMediaQuery = MediaQuery.of(context);
+      final view = View.maybeOf(context);
+      if (view != null) {
+        _lastMetricsLogicalSize =
+            view.physicalSize / view.devicePixelRatio;
+        DisplayInkFeel.instance.updateFromView(view);
+      }
     } catch (e) {
       log.warning('Failed to cache UI dependencies: $e');
     }
   }
 
   void _initAsync() async {
-
     coreInfo.filePath = await widget.initialPath;
     filenameTextEditingController.text = coreInfo.fileName;
 
@@ -1316,13 +1521,11 @@ class EditorState extends State<Editor>
 
     final hasPendingSave = _pendingSavesByPath[coreInfo.filePath] != null;
     if (!hasPendingSave) {
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future<void>.delayed(const Duration(milliseconds: 16));
     }
     if (!mounted) return;
 
-    _mathSolver.init().then((_) {
-
-    });
+    _mathSolver.init().then((_) {});
 
     await _initStrokes();
 
@@ -1346,10 +1549,7 @@ class EditorState extends State<Editor>
   }
 
   Future _initStrokes() async {
-    isOpeningNote.value = true;
-    if (mounted) setState(() {});
     try {
-
       final pending = _pendingSavesByPath[coreInfo.filePath];
       if (pending != null) {
         log.info(
@@ -1358,19 +1558,40 @@ class EditorState extends State<Editor>
         await pending;
       }
       coreInfo = await EditorCoreInfo.loadFromFilePath(coreInfo.filePath);
-    } finally {
-      isOpeningNote.value = false;
-      if (mounted) setState(() {});
-    }
-    try {
-      await NoteLinksDatabase.instance.setLinksForPath(
+      coreInfo.ensureNoteId();
+      _lastWrittenThumbnailHash = coreInfo.firstPageHash ?? '';
+      _recoveryJournal = EditorRecoveryJournal(
         coreInfo.filePath,
-        coreInfo.links,
-        rootDirectory: FileManager.documentsDirectory,
+        noteId: coreInfo.noteId,
       );
-    } catch (e) {
-      log.warning('Failed to sync links metadata after load: $e');
+      final recovered = await _recoveryJournal!.replayInto(coreInfo);
+      final shouldPersistId = coreInfo.noteIdWasAssigned;
+      if ((recovered || shouldPersistId) && !coreInfo.readOnly) {
+        savingState.value = SavingState.waitingToSave;
+        unawaited(
+          saveToFile(force: true, updateThumbnail: false).catchError((e) {
+            log.warning('Recovery/noteId snapshot save failed: $e');
+          }),
+        );
+      }
+      // First paint with strokes as soon as the body is parsed (low-quality
+      // paths). Opening chrome stays until this frame can schedule.
+      if (mounted) setState(() {});
+      await Future<void>.delayed(Duration.zero);
+    } finally {
+      // Setup complete
     }
+
+    final int savedPageIndex = coreInfo.initialPageIndex ?? 0;
+    // Força para 0 temporariamente para que a animação do Hero encaixe perfeitamente
+    if (widget.initialPageIndexOverride == null) {
+      coreInfo.initialPageIndex = 0;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_syncNoteLinksAfterOpen());
+      unawaited(_repairTruncatedPdfBackedNoteIfNeeded());
+    });
     if (widget.initialPageIndexOverride != null &&
         widget.initialPageIndexOverride! >= 0) {
       coreInfo.initialPageIndex = widget.initialPageIndexOverride!;
@@ -1382,59 +1603,25 @@ class EditorState extends State<Editor>
     }
 
     if (coreInfo.pages.isNotEmpty) {
-      final idx = (coreInfo.initialPageIndex ?? 0).clamp(
-        0,
-        coreInfo.pages.length - 1,
-      );
-      final bg = coreInfo.pages[idx].backgroundImage;
-      if (bg is PdfEditorImage) {
-        coreInfo.assetCacheAll.getPdfNotifier(bg.assetId);
-      }
-    }
-
-    if (coreInfo.pages.isNotEmpty) {
       final initIdx = (coreInfo.initialPageIndex ?? 0).clamp(
         0,
         coreInfo.pages.length - 1,
       );
-      const quillWindow = 3;
-      final qFrom = (initIdx - quillWindow).clamp(0, coreInfo.pages.length - 1);
-      final qTo = (initIdx + quillWindow).clamp(0, coreInfo.pages.length - 1);
-      for (int i = qFrom; i <= qTo; i++) {
-        listenToQuillChanges(coreInfo.pages[i].quill, i);
-      }
-      _deferQuillListeners(coreInfo, qFrom, qTo);
+      coreInfo.ensurePageHydrated(initIdx);
+      listenToQuillChanges(coreInfo.pages[initIdx].quill, initIdx);
+      _deferQuillListeners(coreInfo, initIdx, initIdx);
     }
 
-    int buildFrom = 0;
-    int buildTo = 0;
     if (coreInfo.isEmpty) {
       createPage(-1);
-
-      if (coreInfo.pages.isNotEmpty) {
-        coreInfo.pages.last.buildSpatialIndex();
-      }
     } else {
-
       if (coreInfo.pages.isNotEmpty) {
-        final initIdx = (coreInfo.initialPageIndex ?? 0).clamp(
-          0,
-          coreInfo.pages.length - 1,
-        );
-        const buildWindow = 2;
-        buildFrom = (initIdx - buildWindow).clamp(0, coreInfo.pages.length - 1);
-        buildTo = (initIdx + buildWindow).clamp(0, coreInfo.pages.length - 1);
         for (int i = 0; i < coreInfo.pages.length; i++) {
-          final page = coreInfo.pages[i];
-
           if (coreInfo.isInfinite) {
-            page.ensureMinimumSize(infinitePageSize);
+            coreInfo.pages[i].ensureMinimumSize(infinitePageSize);
           }
 
-          if (i >= buildFrom && i <= buildTo) {
-            page.buildSpatialIndex();
-          }
-
+          final page = coreInfo.pages[i];
           page.backgroundImage?.onMoveImage = onMoveImage;
           page.backgroundImage?.onDeleteImage = onDeleteImage;
           page.backgroundImage?.onMiscChange = autosaveAfterDelay;
@@ -1447,30 +1634,280 @@ class EditorState extends State<Editor>
       }
     }
 
-    if (currentTool == Tool.textEditing) {
-      int pageIndex;
-      if (coreInfo.initialPageIndex != null &&
-          coreInfo.initialPageIndex! < coreInfo.pages.length) {
-        pageIndex = coreInfo.initialPageIndex!;
-      } else {
-        pageIndex = 0;
-      }
-
-      if (pageIndex >= 0 && pageIndex < coreInfo.pages.length) {
-        quillFocus.value = coreInfo.pages[pageIndex].quill
-          ..focusNode.requestFocus();
-      }
+    if (currentTool == Tool.textEditing && coreInfo.pages.isNotEmpty) {
+      final pageIndex = (coreInfo.initialPageIndex ?? 0).clamp(
+        0,
+        coreInfo.pages.length - 1,
+      );
+      quillFocus.value = coreInfo.pages[pageIndex].quill
+        ..focusNode.requestFocus();
     }
 
     if (coreInfo.noteToolSettings != null) {
       applyNoteToolSettings(coreInfo.noteToolSettings!);
       _currentTool = _toolFromLastTool();
+    } else {
+      InkPresetLibrary.applyActive(stows);
     }
-
-    _buildDeferredSpatialIndices(coreInfo, buildFrom, buildTo);
 
     if (mounted) {
       setState(() {});
+    }
+
+    if (savedPageIndex > 0 && widget.initialPageIndexOverride == null) {
+      _scheduleSmoothScroll(savedPageIndex);
+    }
+  }
+
+  AnimationController? _smoothScrollController;
+  bool _isSmoothScrolling = false;
+
+  void _scheduleSmoothScroll(int targetPage) {
+    if (!mounted) return;
+    final width = _currentViewportWidth();
+    if (width < 10) {
+      Future.delayed(const Duration(milliseconds: 200), () => _scheduleSmoothScroll(targetPage));
+      return;
+    }
+    
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      _animateScrollToPage(targetPage);
+    });
+  }
+
+
+  void _animateScrollToPage(int targetPage) {
+    if (!mounted || coreInfo.pages.isEmpty) return;
+    
+    final safeTargetPage = targetPage.clamp(0, coreInfo.pages.length - 1);
+    final screenWidth = _currentViewportWidth();
+    final targetOffsets = _generatePageOffsets(coreInfo.pages, screenWidth);
+    final targetLayoutY = CanvasGestureDetector.getTopOfPage(
+      pageIndex: safeTargetPage,
+      pageOffsets: targetOffsets,
+    );
+
+    final currentMatrix = _transformationController.value;
+    final scale = currentMatrix.getMaxScaleOnAxis();
+    final targetY = -targetLayoutY * scale;
+
+    final currentY = currentMatrix.getTranslation().y;
+
+    if ((currentY - targetY).abs() < 1.0) {
+      _lastCurrentPageIndex = safeTargetPage;
+      return;
+    }
+
+    _isSmoothScrolling = true;
+    _suppressTransformClamp.value = true;
+    InteractiveCanvasViewer.isAutoPanningEnabled = false; 
+
+    _smoothScrollController?.dispose();
+    _smoothScrollController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    );
+
+    final startMatrix = currentMatrix.clone();
+    final endMatrix = startMatrix.clone()..setTranslationRaw(startMatrix.getTranslation().x, targetY, startMatrix.getTranslation().z);
+
+    final anim = Matrix4Tween(begin: startMatrix, end: endMatrix).animate(
+      CurvedAnimation(parent: _smoothScrollController!, curve: Curves.easeInOutCubic),
+    );
+
+    anim.addListener(() {
+      if (!mounted) return;
+      _transformationController.value = anim.value;
+    });
+
+    _smoothScrollController!.forward().then((_) {
+      if (mounted) {
+        _isSmoothScrolling = false;
+        _suppressTransformClamp.value = false;
+        InteractiveCanvasViewer.isAutoPanningEnabled = true;
+        _maintainPageRasterBand(safeTargetPage, safeTargetPage);
+        _lastCurrentPageIndex = safeTargetPage;
+        setState(() {});
+      }
+    });
+
+    Future.microtask(() async {
+      final from = (safeTargetPage - 1).clamp(0, coreInfo.pages.length - 1);
+      final to = (safeTargetPage + 1).clamp(0, coreInfo.pages.length - 1);
+      for (var i = from; i <= to; i++) {
+         if (coreInfo.isLazyShellPage(i)) {
+           await coreInfo.hydratePageAtIndexAsync(i);
+           _wirePageImageCallbacks(i);
+         }
+      }
+    });
+  }
+
+  Future<void> _syncNoteLinksAfterOpen() async {
+    try {
+      await NoteLinksDatabase.instance.setLinksForPath(
+        coreInfo.filePath,
+        coreInfo.links,
+        rootDirectory: FileManager.documentsDirectory,
+      );
+    } catch (e) {
+      log.warning('Failed to sync links metadata after load: $e');
+    }
+  }
+
+  Future<PdfDocument?> _waitForPdfDocument(int assetId) async {
+    final notifier = coreInfo.assetCacheAll.getPdfNotifier(assetId);
+    if (notifier.value != null) return notifier.value;
+
+    final completer = Completer<PdfDocument?>();
+    Timer? timeout;
+    late VoidCallback listener;
+
+    void complete(PdfDocument? document) {
+      if (completer.isCompleted) return;
+      timeout?.cancel();
+      notifier.removeListener(listener);
+      completer.complete(document);
+    }
+
+    listener = () {
+      final document = notifier.value;
+      if (document != null) complete(document);
+    };
+
+    notifier.addListener(listener);
+    timeout = Timer(const Duration(seconds: 10), () => complete(null));
+    return completer.future;
+  }
+
+  Future<void> _repairTruncatedPdfBackedNoteIfNeeded() async {
+    // A failed lazy save can leave only the first few imported PDF pages in the
+    // note body while the original PDF asset (`.sbn2.0`) is still present.
+    // Repair only catastrophic prefix truncation to avoid undoing intentional
+    // page deletions in ordinary notes.
+    const maxSuspiciousPrefixPages = 12;
+    if (coreInfo.readOnly ||
+        coreInfo.isInfinite ||
+        coreInfo.pages.isEmpty ||
+        coreInfo.pages.length > maxSuspiciousPrefixPages) {
+      return;
+    }
+
+    final firstBackground = coreInfo.pages.first.backgroundImage;
+    if (firstBackground is! PdfEditorImage || firstBackground.pdfPage != 0) {
+      return;
+    }
+
+    final assetId = firstBackground.assetId;
+    final pdfFile = firstBackground.pdfFile;
+    for (var i = 0; i < coreInfo.pages.length; i++) {
+      final background = coreInfo.pages[i].backgroundImage;
+      if (background is! PdfEditorImage ||
+          background.assetId != assetId ||
+          background.pdfPage != i ||
+          coreInfo.pages[i].allImagesInDrawOrder.isNotEmpty) {
+        return;
+      }
+    }
+
+    final pdfDocument = await _waitForPdfDocument(assetId);
+    if (!mounted || pdfDocument == null) return;
+
+    final totalPdfPages = pdfDocument.pages.length;
+    if (totalPdfPages <= coreInfo.pages.length ||
+        totalPdfPages < coreInfo.pages.length * 4) {
+      return;
+    }
+
+    log.warning(
+      'Repairing truncated PDF-backed note: ${coreInfo.pages.length} / '
+      '$totalPdfPages pages present for ${coreInfo.filePath}',
+    );
+
+    for (var i = coreInfo.pages.length; i < totalPdfPages; i++) {
+      final pdfPage = pdfDocument.pages[i];
+      final naturalSize = Size(
+        pdfPage.width.toDouble(),
+        pdfPage.height.toDouble(),
+      );
+      final pageSize = Size(
+        EditorPage.defaultWidth,
+        EditorPage.defaultWidth * naturalSize.height / naturalSize.width,
+      );
+      final editorPage = EditorPage(
+        id: coreInfo.allocatePageId(),
+        width: pageSize.width,
+        height: pageSize.height,
+        // Prevent white edge artifacts around PDF background images
+        hasLocalBorderColor: true,
+        borderColor: Colors.transparent,
+      );
+
+      editorPage.backgroundImage = PdfEditorImage(
+        id: coreInfo.nextImageId++,
+        pdfFile: pdfFile,
+        pdfPage: i,
+        pageIndex: i,
+        pageSize: pageSize,
+        naturalSize: naturalSize,
+        dstRect: Rect.fromLTWH(0, 0, pageSize.width, pageSize.height),
+        onMoveImage: onMoveImage,
+        onDeleteImage: onDeleteImage,
+        onMiscChange: autosaveAfterDelay,
+        onLoad: () {
+          if (mounted) setState(() {});
+        },
+        assetCacheAll: coreInfo.assetCacheAll,
+        assetId: assetId,
+        onPdfTap: (localPosition, pdfDocument, pdfPage, pdfFile) {
+          _onPdfTap(
+            localPosition,
+            pdfDocument,
+            pdfPage,
+            pageSize,
+            naturalSize,
+            pdfFile,
+          );
+        },
+      );
+
+      coreInfo.assetCacheAll.addUse(assetId);
+      coreInfo.pages.add(editorPage);
+    }
+
+    coreInfo.invalidatePageBinaryEncodeCaches();
+    autosaveAfterDelay();
+    if (mounted) setState(() {});
+  }
+
+  void _primeVisibleCanvasAssets(
+    EditorCoreInfo info,
+    int centerPageIndex,
+    int buildFrom,
+    int buildTo,
+  ) {
+    final cache = info.assetCacheAll;
+    for (var i = buildFrom; i <= buildTo; i++) {
+      final distance = (i - centerPageIndex).abs();
+      final imagePri =
+          AssetCacheAll.kImageDecodePriorityVisible - distance * 8000;
+      final page = info.pages[i];
+
+      void consider(EditorImage? img) {
+        if (img == null) return;
+        if (img is PngEditorImage) {
+          cache.prioritizeImageDecode(img.assetId, imagePri);
+          cache.getImageProviderNotifier(img.assetId);
+        } else if (img is PdfEditorImage) {
+          cache.getPdfNotifier(img.assetId);
+        }
+      }
+
+      consider(page.backgroundImage);
+      for (final im in page.images) {
+        consider(im);
+      }
     }
   }
 
@@ -1485,9 +1922,18 @@ class EditorState extends State<Editor>
       const batch = 8;
       for (int i = 0; i < info.pages.length; i++) {
         if (i >= excludeFrom && i <= excludeTo) continue;
+        if (info.isLazyShellPage(i)) continue;
         final page = info.pages[i];
         if (page.strokeSpatialIndex == null && page.strokes.isNotEmpty) {
           page.buildSpatialIndex();
+        }
+        page.backgroundImage?.onMoveImage = onMoveImage;
+        page.backgroundImage?.onDeleteImage = onDeleteImage;
+        page.backgroundImage?.onMiscChange = autosaveAfterDelay;
+        for (final image in page.images) {
+          image.onMoveImage = onMoveImage;
+          image.onDeleteImage = onDeleteImage;
+          image.onMiscChange = autosaveAfterDelay;
         }
         if ((i + 1) % batch == 0) await Future<void>.delayed(Duration.zero);
         if (!mounted) return;
@@ -1495,22 +1941,25 @@ class EditorState extends State<Editor>
     });
   }
 
-  void _onFullscreenPrefChanged() {
-    if (stows.editorFullScreen.value) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } else {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    }
-  }
-
   void _deferQuillListeners(EditorCoreInfo info, int doneFrom, int doneTo) {
     if (info.pages.length <= doneTo - doneFrom + 1) return;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
+      if (!mounted || !identical(info, coreInfo)) return;
       const batch = 16;
       for (int i = 0; i < info.pages.length; i++) {
         if (i >= doneFrom && i <= doneTo) continue;
+        if (info.isLazyShellPage(i)) continue;
+        if (!identical(info, coreInfo)) return;
         listenToQuillChanges(info.pages[i].quill, i);
+        final page = info.pages[i];
+        page.backgroundImage?.onMoveImage = onMoveImage;
+        page.backgroundImage?.onDeleteImage = onDeleteImage;
+        page.backgroundImage?.onMiscChange = autosaveAfterDelay;
+        for (final image in page.images) {
+          image.onMoveImage = onMoveImage;
+          image.onDeleteImage = onDeleteImage;
+          image.onMiscChange = autosaveAfterDelay;
+        }
         if ((i + 1) % batch == 0) await Future<void>.delayed(Duration.zero);
         if (!mounted) return;
       }
@@ -1523,9 +1972,11 @@ class EditorState extends State<Editor>
       case ToolId.ballpointPen:
       case ToolId.calligraphyPen:
       case ToolId.shapePen:
-      case ToolId.verticalSpacePen:
-      case ToolId.horizontalSpacePen:
       case ToolId.advancedPen:
+        return Pen.currentPen;
+      case ToolId.advancedPencil:
+        return Pen.currentPen;
+      case ToolId.experimentalPen:
         return Pen.currentPen;
       case ToolId.highlighter:
         return Highlighter.currentHighlighter;
@@ -1606,7 +2057,6 @@ class EditorState extends State<Editor>
     Color? borderColor,
   })
   _newPageDefaults() {
-
     coreInfo.ensureDocumentDefaultsFromGlobal();
 
     final pattern = coreInfo.noteDefaultPattern!;
@@ -1647,8 +2097,7 @@ class EditorState extends State<Editor>
 
   void createPage(int pageIndex) {
     if (coreInfo.isInfinite) {
-      coreInfo
-          .enforceSinglePage();
+      coreInfo.enforceSinglePage();
       if (coreInfo.pages.isEmpty) {
         final d = _newPageDefaults();
         final hasMargins =
@@ -1731,6 +2180,23 @@ class EditorState extends State<Editor>
       currentTop += pageSize.height * (pageWidthFitted / pageSize.width);
     }
     return offsets;
+  }
+
+  /// Total stacked height of [pages] in layout space. Must match
+  /// [_PagesBuilderState._recalculateLayout] in canvas_gesture_detector.dart.
+  static double totalPagedDocumentHeight(
+    List<EditorPage> pages,
+    double containerWidth,
+  ) {
+    if (pages.isEmpty) return 0.0;
+    double currentTop = Editor.gapBetweenPages * 2;
+    for (final page in pages) {
+      final pageWidth = math.min(page.size.width, containerWidth);
+      final pageHeight = (pageWidth / page.size.width) * page.size.height;
+      currentTop += pageHeight + Editor.gapBetweenPages;
+    }
+    currentTop += Editor.gapBetweenPages;
+    return currentTop;
   }
 
   void _fitInfiniteCanvasToContent(
@@ -1891,6 +2357,7 @@ class EditorState extends State<Editor>
 
   void removeExcessPages() {
     if (coreInfo.isInfinite) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
 
     bool removedAPage = false;
 
@@ -1951,20 +2418,15 @@ class EditorState extends State<Editor>
   }
 
   void undo([EditorHistoryItem? item]) {
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     if (item == null) {
       if (!history.canUndo) return;
-
-      if (!history.canRedo) {
-
-        history.clearRedo();
-
-        history.canRedo = true;
-      }
 
       item = history.undo();
     }
 
-    Eraser.currentEraser.clearState();
+    _isUndoRedoInProgress = true;
+    _releaseAreaEraserQueueAndSessions();
 
     setState(() {
       switch (item!.type) {
@@ -1999,8 +2461,10 @@ class EditorState extends State<Editor>
               currentTool = ShapeTool.currentShapeTool;
             }
           }
+          break;
 
         case .erase:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -2008,6 +2472,7 @@ class EditorState extends State<Editor>
             if (coreInfo.isInfinite) stroke.pageIndex = 0;
             page.insertStroke(stroke);
             page.strokeSpatialIndex?.insert(stroke);
+            affectedPageIndices.add(idx);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
@@ -2015,15 +2480,23 @@ class EditorState extends State<Editor>
             coreInfo.pages[idx].images.add(image);
             if (coreInfo.isInfinite) image.pageIndex = 0;
             image.newImage = true;
+            affectedPageIndices.add(idx);
           }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
 
         case .areaErase:
+        case .changeStrokeType:
+          final affectedPageIndices = <int>{};
           final added = item.strokesAdded!;
           for (final stroke in added) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
             final page = coreInfo.pages[idx];
             page.removeStrokeFromAnyLayer(stroke);
             page.strokeSpatialIndex?.remove(stroke);
+            affectedPageIndices.add(idx);
           }
           for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
@@ -2032,6 +2505,7 @@ class EditorState extends State<Editor>
             if (coreInfo.isInfinite) stroke.pageIndex = 0;
             page.insertStroke(stroke);
             page.strokeSpatialIndex?.insert(stroke);
+            affectedPageIndices.add(idx);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
@@ -2039,10 +2513,14 @@ class EditorState extends State<Editor>
             coreInfo.pages[idx].images.add(image);
             if (coreInfo.isInfinite) image.pageIndex = 0;
             image.newImage = true;
+            affectedPageIndices.add(idx);
           }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
 
         case .deletePage:
-
           createPage(item.pageIndex - 1);
 
           if (item.pages != null) {
@@ -2061,9 +2539,9 @@ class EditorState extends State<Editor>
             }
             page.backgroundImage?.pageIndex = i;
           }
+          break;
 
         case .insertPage:
-
           if (item.pages != null) {
             coreInfo.pages.removeRange(
               item.pageIndex,
@@ -2083,6 +2561,7 @@ class EditorState extends State<Editor>
             }
             page.backgroundImage?.pageIndex = i;
           }
+          break;
 
         case .move:
           final select = Select.currentSelect;
@@ -2090,12 +2569,24 @@ class EditorState extends State<Editor>
               select.doneSelecting &&
               item.strokes.any((s) => select.selectResult.strokes.contains(s));
 
+          final affectedPageIndices = <int>{};
+
           if (item.offset != null) {
             final shiftOffset = Offset(-item.offset!.left, -item.offset!.top);
             for (final stroke in item.strokes) {
+              final page = coreInfo.pages[stroke.pageIndex];
+              page.strokeSpatialIndex?.remove(stroke);
               stroke.shift(shiftOffset);
               if (item.pageIndex != item.pageIndexStart) {
                 moveStrokeToPage(stroke, item.pageIndex, item.pageIndexStart!);
+                affectedPageIndices.add(item.pageIndex);
+                affectedPageIndices.add(item.pageIndexStart!);
+                coreInfo.pages[item.pageIndexStart!].strokeSpatialIndex?.insert(
+                  stroke,
+                );
+              } else {
+                affectedPageIndices.add(stroke.pageIndex);
+                page.strokeSpatialIndex?.insert(stroke);
               }
             }
             if (select.doneSelecting && isCurrentSelection) {
@@ -2103,7 +2594,6 @@ class EditorState extends State<Editor>
                 shiftOffset,
               );
               if (item.pageIndex != item.pageIndexStart) {
-
                 select.selectResult.pageIndex = item.pageIndexStart!;
               }
             }
@@ -2111,6 +2601,10 @@ class EditorState extends State<Editor>
               image.dstRect = image.dstRect.shift(shiftOffset);
               if (item.pageIndex != item.pageIndexStart) {
                 moveImageToPage(image, item.pageIndex, item.pageIndexStart!);
+                affectedPageIndices.add(item.pageIndex);
+                affectedPageIndices.add(item.pageIndexStart!);
+              } else {
+                affectedPageIndices.add(image.pageIndex);
               }
             }
           }
@@ -2119,10 +2613,15 @@ class EditorState extends State<Editor>
             final rotationDeg = -item.rotation!;
             final rotationRad = rotationDeg * math.pi / 180.0;
             for (final stroke in item.strokes) {
+              final page = coreInfo.pages[stroke.pageIndex];
+              page.strokeSpatialIndex?.remove(stroke);
               stroke.rotate(rotationRad, item.centroid!);
+              page.strokeSpatialIndex?.insert(stroke);
+              affectedPageIndices.add(stroke.pageIndex);
             }
             for (final image in item.images) {
               image.rotate(rotationRad, item.centroid!);
+              affectedPageIndices.add(image.pageIndex);
             }
             if (isCurrentSelection) {
               select.selectResult.path = select.selectResult.path.transform(
@@ -2141,13 +2640,15 @@ class EditorState extends State<Editor>
             final scale = 1.0 / item.scale!;
             for (int i = 0; i < item.strokes.length; i++) {
               final stroke = item.strokes[i];
+              final page = coreInfo.pages[stroke.pageIndex];
               if (stroke is ShapeStroke) {
                 final scaled = stroke.scaled(scale, item.centroid!);
 
-                final page = coreInfo.pages[item.pageIndex];
                 final idx = page.strokes.indexOf(stroke);
                 if (idx >= 0) {
+                  page.strokeSpatialIndex?.remove(stroke);
                   page.strokes[idx] = scaled;
+                  page.strokeSpatialIndex?.insert(scaled);
                 }
 
                 if (isCurrentSelection) {
@@ -2157,11 +2658,15 @@ class EditorState extends State<Editor>
                   }
                 }
               } else {
+                page.strokeSpatialIndex?.remove(stroke);
                 stroke.scale(scale, item.centroid!);
+                page.strokeSpatialIndex?.insert(stroke);
               }
+              affectedPageIndices.add(stroke.pageIndex);
             }
             for (final image in item.images) {
               image.scale(scale, item.centroid!);
+              affectedPageIndices.add(image.pageIndex);
             }
             if (isCurrentSelection) {
               select.selectResult.path = select.selectResult.path.transform(
@@ -2175,26 +2680,38 @@ class EditorState extends State<Editor>
           }
 
           if (isCurrentSelection) {
-
             select.selectResult.displayBounds = null;
           }
+
+          for (final idx in affectedPageIndices) {
+            coreInfo.pages[idx].redrawStrokes();
+          }
+          break;
 
         case .quillChange:
           final quill = coreInfo.pages[item.pageIndex].quill;
           quill.controller.undo();
+          break;
 
         case .quillUndoneChange:
           final quill = coreInfo.pages[item.pageIndex].quill;
           quill.controller.redo();
+          break;
+
         case .changeColor:
           for (final stroke in item.strokes) {
             stroke.color = item.colorChange![stroke]!.previous;
           }
+          break;
       }
 
-      if (item.type != .move) {
-        Select.currentSelect.unselect();
-      }
+      Select.currentSelect.unselect();
+    });
+
+    _bumpInteractionRepaint();
+
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) _isUndoRedoInProgress = false;
     });
 
     autosaveAfterDelay();
@@ -2202,21 +2719,64 @@ class EditorState extends State<Editor>
 
   void redo() {
     if (!history.canRedo) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     final item = history.redo();
 
-    Eraser.currentEraser.clearState();
+    _isUndoRedoInProgress = true;
+    _releaseAreaEraserQueueAndSessions();
 
-    switch (item.type) {
-      case .draw:
-        undo(item.copyWith(type: .erase));
-      case .erase:
-        undo(item.copyWith(type: .draw));
-      case .areaErase:
-        setState(() {
+    setState(() {
+      switch (item.type) {
+        case .draw:
+          final affectedPageIndices = <int>{};
+          for (final stroke in item.strokes) {
+            createPage(stroke.pageIndex);
+            final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            final page = coreInfo.pages[idx];
+            if (coreInfo.isInfinite) stroke.pageIndex = 0;
+            page.insertStroke(stroke);
+            page.strokeSpatialIndex?.insert(stroke);
+            affectedPageIndices.add(idx);
+          }
+          for (final image in item.images) {
+            createPage(image.pageIndex);
+            final idx = image.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            coreInfo.pages[idx].images.add(image);
+            if (coreInfo.isInfinite) image.pageIndex = 0;
+            image.newImage = true;
+            affectedPageIndices.add(idx);
+          }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
+
+        case .erase:
+          final affectedPageIndices = <int>{};
+          for (final stroke in item.strokes) {
+            final page = coreInfo.pages[stroke.pageIndex];
+            page.removeStrokeFromAnyLayer(stroke);
+            page.strokeSpatialIndex?.remove(stroke);
+            affectedPageIndices.add(stroke.pageIndex);
+          }
+          for (final image in item.images) {
+            coreInfo.pages[image.pageIndex].removeImageFromAnyLayer(image);
+            affectedPageIndices.add(image.pageIndex);
+          }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          removeExcessPages();
+          break;
+
+        case .areaErase:
+        case .changeStrokeType:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
             coreInfo.pages[idx].removeStrokeFromAnyLayer(stroke);
             coreInfo.pages[idx].strokeSpatialIndex?.remove(stroke);
+            affectedPageIndices.add(idx);
           }
           for (final stroke in item.strokesAdded!) {
             createPage(stroke.pageIndex);
@@ -2224,13 +2784,14 @@ class EditorState extends State<Editor>
             final page = coreInfo.pages[idx];
             page.insertStroke(stroke);
             page.strokeSpatialIndex?.insert(stroke);
+            affectedPageIndices.add(idx);
           }
-          Select.currentSelect.unselect();
-        });
-        autosaveAfterDelay();
-        break;
-      case .deletePage:
-        setState(() {
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
+
+        case .deletePage:
           if (item.pageIndex >= 0 && item.pageIndex < coreInfo.pages.length) {
             final page = coreInfo.pages.removeAt(item.pageIndex);
             coreInfo.links = coreInfo.links
@@ -2254,49 +2815,176 @@ class EditorState extends State<Editor>
               log.warning('Failed to update note links metadata: $e');
             }
           }
-        });
-        autosaveAfterDelay();
-        break;
-      case .insertPage:
-        undo(item.copyWith(type: .deletePage));
-      case .move:
-        undo(
-          item.copyWith(
+          break;
 
-            pageIndex: item.pageIndexStart,
-            pageIndexStart: item.pageIndex,
-            offset: item.offset != null
-                ? Rect.fromLTRB(
-                    -item.offset!.left,
-                    -item.offset!.top,
-                    -item.offset!.right,
-                    -item.offset!.bottom,
-                  )
-                : null,
-            rotation: item.rotation != null ? -item.rotation! : null,
-            scale: item.scale != null ? 1.0 / item.scale! : null,
-          ),
-        );
-      case .quillChange:
-        undo(item.copyWith(type: .quillUndoneChange));
-      case .quillUndoneChange:
-        throw Exception('history should not contain quillUndoneChange items');
-      case .changeColor:
-        undo(
-          item.copyWith(
-            colorChange: item.colorChange!.map(
-              (key, value) => MapEntry(key, value.swap()),
-            ),
-          ),
-        );
-    }
+        case .insertPage:
+          createPage(item.pageIndex - 1);
+          if (item.pages != null) {
+            coreInfo.pages.insertAll(item.pageIndex, item.pages!);
+          } else {
+            coreInfo.pages.insert(item.pageIndex, item.page!);
+          }
+          for (int i = item.pageIndex; i < coreInfo.pages.length; ++i) {
+            final page = coreInfo.pages[i];
+            for (final stroke in page.strokes) {
+              stroke.pageIndex = i;
+            }
+            for (final image in page.images) {
+              image.pageIndex = i;
+            }
+            page.backgroundImage?.pageIndex = i;
+          }
+          break;
+
+        case .move:
+          final select = Select.currentSelect;
+          final isCurrentSelection =
+              select.doneSelecting &&
+              item.strokes.any((s) => select.selectResult.strokes.contains(s));
+          final affectedPageIndices = <int>{};
+
+          if (item.offset != null) {
+            final shiftOffset = Offset(item.offset!.left, item.offset!.top);
+            for (final stroke in item.strokes) {
+              final page = coreInfo.pages[stroke.pageIndex];
+              page.strokeSpatialIndex?.remove(stroke);
+              stroke.shift(shiftOffset);
+              if (item.pageIndexStart != item.pageIndex) {
+                moveStrokeToPage(stroke, item.pageIndexStart!, item.pageIndex);
+                affectedPageIndices.add(item.pageIndexStart!);
+                affectedPageIndices.add(item.pageIndex);
+                coreInfo.pages[item.pageIndex].strokeSpatialIndex?.insert(
+                  stroke,
+                );
+              } else {
+                affectedPageIndices.add(stroke.pageIndex);
+                page.strokeSpatialIndex?.insert(stroke);
+              }
+            }
+            if (select.doneSelecting && isCurrentSelection) {
+              select.selectResult.path = select.selectResult.path.shift(
+                shiftOffset,
+              );
+              if (item.pageIndexStart != item.pageIndex) {
+                select.selectResult.pageIndex = item.pageIndex;
+              }
+            }
+            for (final image in item.images) {
+              image.dstRect = image.dstRect.shift(shiftOffset);
+              if (item.pageIndexStart != item.pageIndex) {
+                moveImageToPage(image, item.pageIndexStart!, item.pageIndex);
+                affectedPageIndices.add(item.pageIndexStart!);
+                affectedPageIndices.add(item.pageIndex);
+              } else {
+                affectedPageIndices.add(image.pageIndex);
+              }
+            }
+          }
+
+          if (item.rotation != null && item.centroid != null) {
+            final rotationDeg = item.rotation!;
+            final rotationRad = rotationDeg * math.pi / 180.0;
+            for (final stroke in item.strokes) {
+              final page = coreInfo.pages[stroke.pageIndex];
+              page.strokeSpatialIndex?.remove(stroke);
+              stroke.rotate(rotationRad, item.centroid!);
+              page.strokeSpatialIndex?.insert(stroke);
+              affectedPageIndices.add(stroke.pageIndex);
+            }
+            for (final image in item.images) {
+              image.rotate(rotationRad, item.centroid!);
+              affectedPageIndices.add(image.pageIndex);
+            }
+            if (isCurrentSelection) {
+              select.selectResult.path = select.selectResult.path.transform(
+                (vmath.Matrix4.identity()
+                      ..translate(item.centroid!.dx, item.centroid!.dy)
+                      ..rotateZ(rotationRad)
+                      ..translate(-item.centroid!.dx, -item.centroid!.dy))
+                    .storage,
+              );
+              select.selectResult.rotationDeg =
+                  (select.selectResult.rotationDeg + rotationDeg) % 360.0;
+            }
+          }
+
+          if (item.scale != null && item.centroid != null) {
+            final scale = item.scale!;
+            for (int i = 0; i < item.strokes.length; i++) {
+              final stroke = item.strokes[i];
+              final page = coreInfo.pages[stroke.pageIndex];
+              if (stroke is ShapeStroke) {
+                final scaled = stroke.scaled(scale, item.centroid!);
+                final idx = page.strokes.indexOf(stroke);
+                if (idx >= 0) {
+                  page.strokeSpatialIndex?.remove(stroke);
+                  page.strokes[idx] = scaled;
+                  page.strokeSpatialIndex?.insert(scaled);
+                }
+                if (isCurrentSelection) {
+                  final sIdx = select.selectResult.strokes.indexOf(stroke);
+                  if (sIdx >= 0) select.selectResult.strokes[sIdx] = scaled;
+                }
+              } else {
+                page.strokeSpatialIndex?.remove(stroke);
+                stroke.scale(scale, item.centroid!);
+                page.strokeSpatialIndex?.insert(stroke);
+              }
+              affectedPageIndices.add(stroke.pageIndex);
+            }
+            for (final image in item.images) {
+              image.scale(scale, item.centroid!);
+              affectedPageIndices.add(image.pageIndex);
+            }
+            if (isCurrentSelection) {
+              select.selectResult.path = select.selectResult.path.transform(
+                (vmath.Matrix4.identity()
+                      ..translate(item.centroid!.dx, item.centroid!.dy)
+                      ..scale(scale, scale)
+                      ..translate(-item.centroid!.dx, -item.centroid!.dy))
+                    .storage,
+              );
+            }
+          }
+
+          if (isCurrentSelection) {
+            select.selectResult.displayBounds = null;
+          }
+
+          for (final idx in affectedPageIndices) {
+            coreInfo.pages[idx].redrawStrokes();
+          }
+          break;
+
+        case .quillChange:
+        case .quillUndoneChange:
+          final quill = coreInfo.pages[item.pageIndex].quill;
+          quill.controller.redo();
+          break;
+
+        case .changeColor:
+          for (final stroke in item.strokes) {
+            stroke.color = item.colorChange![stroke]!.current;
+          }
+          break;
+      }
+
+      Select.currentSelect.unselect();
+    });
+
+    _bumpInteractionRepaint();
+
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) _isUndoRedoInProgress = false;
+    });
+
+    autosaveAfterDelay();
   }
 
   Offset _safelyGetLocalPosition(int pageIndex, Offset globalPoint) {
     final page = coreInfo.pages[pageIndex];
 
     if (coreInfo.isInfinite && coreInfo.pages.isNotEmpty) {
-
       final infinitePage = coreInfo.pages.first;
       final box = infinitePage.renderBox;
       if (box != null && box.attached) {
@@ -2431,7 +3119,6 @@ class EditorState extends State<Editor>
             (pageWidthFitted / page.size.width) * page.size.height;
 
         if (canvasY >= currentY && canvasY <= currentY + pageHeightFitted) {
-
           final leftOffset = (containerWidth - pageWidthFitted) / 2;
           if (canvasX >= leftOffset &&
               canvasX <= leftOffset + pageWidthFitted) {
@@ -2460,10 +3147,13 @@ class EditorState extends State<Editor>
   double _initialScaleRadius = 0.0;
 
   Offset? eraserPosition;
+  final ValueNotifier<Offset?> _eraserPositionRepaint = ValueNotifier(null);
 
   List<Stroke>? _eraserDeltaRemoved;
   List<Stroke>? _eraserDeltaAdded;
 
+  /// Soft per-apply yield for live area erase. Not a stroke-count cap —
+  /// unfinished circle geometry continues on the next pointer sample / frame.
   static const int _kAreaEraserTimeBudgetMs = 7;
 
   bool _eraserAreaDragActive = false;
@@ -2471,13 +3161,23 @@ class EditorState extends State<Editor>
   bool _areaEraserPostFrameScheduled = false;
   EditorPage? _areaEraserWorkPage;
   Offset? _areaEraserWorkPos;
-  bool _showAreaEraserQueueNotice = false;
 
   Offset moveOffset = .zero;
   double totalRotation = 0.0;
   double totalScale = 1.0;
   final Set<int> _selectionDirtyPageIndices = {};
   SelectionTransformPreview? _selectionPreview;
+
+  /// Selected strokes removed from the page for the duration of a move/scale/
+  /// rotate so the base layer does not keep painting a stationary "ghost".
+  var _selectionStrokesDetachedFromPage = false;
+
+  SelectionHandlesInteractionMode _selectionHandlesInteractionMode =
+      SelectionHandlesInteractionMode.resize;
+  bool _selectionGestureBeganOnModeChip = false;
+  Offset _selectionChipGestureOriginPage = Offset.zero;
+  double _selectionChipGestureMaxMove = 0.0;
+  DateTime? _selectionChipWallClockStart;
 
   var isHovering = true;
   int? dragPageIndex;
@@ -2490,23 +3190,34 @@ class EditorState extends State<Editor>
   static const double _penHoldJitterThreshold = 12.0;
 
   static const double _rawDrawSampleMinDistSq = 0.25;
+  static const double _rawDrawSampleMinDistSqLowRefresh = 0.09;
+  bool _rawPenSampleSeenThisStroke = false;
+  Duration? _lastRawPenSampleTimestamp;
   Timer? _penHoldRecognitionTimer;
   bool _penHoldSatisfied = false;
   RecognizedUnistroke? _penHoldDetectedShape;
 
+  void _markCanvasInputActivity({bool cancelPendingAutosave = false}) {
+    _lastUserActivityForAutosave = DateTime.now();
+    if (cancelPendingAutosave &&
+        savingState.value == SavingState.waitingToSave) {
+      _delayedSaveTimer?.cancel();
+      _delayedSaveTimer = null;
+    }
+  }
+
   bool _shouldUseHoldShapeRecognitionForCurrentTool() {
     if (currentTool is! Pen) return false;
-    final pen = currentTool as Pen;
-    if (pen.toolId == ToolId.verticalSpacePen ||
-        pen.toolId == ToolId.horizontalSpacePen)
-      return false;
     return stows.shapeRecognitionDelay.value >= 0;
   }
 
   void _restartPenHoldRecognitionTimer() {
     _penHoldRecognitionTimer?.cancel();
     _penHoldSatisfied = false;
-    _penHoldDetectedShape = null;
+    if (_penHoldDetectedShape != null) {
+      _penHoldDetectedShape = null;
+      clearDetectedShapePreviewCache();
+    }
     if (!_shouldUseHoldShapeRecognitionForCurrentTool()) return;
     final delayMs = stows.shapeRecognitionDelay.value;
     final isHighlighter = currentTool is Highlighter;
@@ -2514,28 +3225,80 @@ class EditorState extends State<Editor>
       _penHoldSatisfied = true;
       final liveStroke = Pen.currentStroke;
       if (liveStroke == null || liveStroke.length < 2) return;
+
       final detected = liveStroke.detectShape();
       final minScore = detected?.name == DefaultUnistrokeNames.infinity
           ? 0.45
           : (detected?.name == DefaultUnistrokeNames.line ? 0.5 : 0.55);
       if (detected != null && detected.score >= minScore) {
-
         final bool isLineOrArrow =
             detected.name == DefaultUnistrokeNames.line ||
             detected.name == DefaultUnistrokeNames.arrow;
         if (isHighlighter ? isLineOrArrow : true) {
+          clearDetectedShapePreviewCache();
           _penHoldDetectedShape = detected;
+          // Warm preview path once — paint must not rebuild ShapeStroke.
+          buildDetectedShapePreviewPath(liveStroke, detected);
           if (mounted) setState(() {});
         }
       }
     });
   }
 
+  void _scheduleLiveInkRepaint(EditorPage page) {
+    // Paint this pointer event — waiting for the next frame left the mesh
+    // one sample behind the stylus.
+    page.redrawStrokes();
+    _bumpInteractionRepaint();
+  }
+
+  void _recordLivePenSample(
+    EditorPage page,
+    Offset position,
+    Duration timestamp, {
+    required bool rawPointerSample,
+  }) {
+    _markCanvasInputActivity();
+    (currentTool as Pen).onDragUpdate(position, currentPressure, timestamp);
+
+    if (rawPointerSample) {
+      _rawPenSampleSeenThisStroke = true;
+      _lastRawPenSampleTimestamp = timestamp;
+    }
+
+    final lastPos = _lastPenDragUpdatePosition;
+    // While a shape is suggested, any real draw gesture cancels it — the old
+    // 12px threshold kept the expensive preview alive during continued inking.
+    final moveThreshold = _penHoldDetectedShape != null
+        ? 2.5
+        : _penHoldJitterThreshold;
+    if (lastPos == null || (position - lastPos).distance > moveThreshold) {
+      _lastPenDragUpdatePosition = position;
+      _lastPenSignificantMoveAt = DateTime.now();
+      final hadPreview = _penHoldDetectedShape != null;
+      _restartPenHoldRecognitionTimer();
+      if (hadPreview && mounted) setState(() {});
+    }
+
+    _scheduleLiveInkRepaint(page);
+  }
+
+  bool _shouldSkipGesturePenSample(Duration timestamp) {
+    final rawTimestamp = _lastRawPenSampleTimestamp;
+    if (!_rawPenSampleSeenThisStroke || rawTimestamp == null) return false;
+    return timestamp <= rawTimestamp;
+  }
+
   bool isDrawGesture(ScaleStartDetails details) {
+    // Any canvas scale/draw pointer — used so docked-panel resize anchoring
+    // does not fight the gesture (which previously froze the sidebar anim).
+    _canvasGestureActive = true;
+
+    if (_regionScreenshotMode) return false;
+
     if (coreInfo.readOnly) return false;
 
-    CanvasImage.activeListener
-        .notifyListenersPlease();
+    CanvasImage.activeListener.notifyListenersPlease();
 
     _lastSeenPointerCountTimer?.cancel();
 
@@ -2543,9 +3306,7 @@ class EditorState extends State<Editor>
         currentPointerKind == PointerDeviceKind.invertedStylus ||
         (currentPressure != null && currentPressure! > 0)) {
       lastSeenPointerCount = 1;
-    }
-
-    else {
+    } else {
       if (details.pointerCount >= 2) {
         lastSeenPointerCount = details.pointerCount;
         return false;
@@ -2559,6 +3320,14 @@ class EditorState extends State<Editor>
 
     dragPageIndex = onWhichPageIsFocalPoint(details.focalPoint);
     if (dragPageIndex == null) return false;
+    if (coreInfo.isLazyShellPage(dragPageIndex!)) {
+      coreInfo.ensurePageHydrated(dragPageIndex!);
+      _wirePageImageCallbacks(dragPageIndex!);
+      listenToQuillChanges(
+        coreInfo.pages[dragPageIndex!].quill,
+        dragPageIndex!,
+      );
+    }
 
     if (currentTool == Tool.textEditing) {
       return false;
@@ -2596,7 +3365,6 @@ class EditorState extends State<Editor>
     }
 
     if (currentTool is! Select) {
-
       if (_imageCropState != null) return false;
       return false;
     }
@@ -2622,46 +3390,26 @@ class EditorState extends State<Editor>
 
       final bounds = select.selectResult.getBounds();
       if (!bounds.isEmpty) {
+        final currentScale = _quantizedCanvasScale;
 
-        final currentScale = _transformationController.value
-            .getMaxScaleOnAxis();
-        final double hitRadius = math.max(25.0 / currentScale, 15.0);
-
-        final centroid =
-            select.selectResult.displayBounds?.center ??
-            select.selectResult.getCentroid();
-        final rotationRad = select.selectResult.rotationDeg * math.pi / 180.0;
-
-        final handleOffset = Offset(centroid.dx, bounds.top - 30);
-        final rotatedHandleOffset = Offset(
-          centroid.dx +
-              (handleOffset.dx - centroid.dx) * math.cos(rotationRad) -
-              (handleOffset.dy - centroid.dy) * math.sin(rotationRad),
-          centroid.dy +
-              (handleOffset.dx - centroid.dx) * math.sin(rotationRad) +
-              (handleOffset.dy - centroid.dy) * math.cos(rotationRad),
-        );
-
-        if ((position - rotatedHandleOffset).distance < hitRadius) return true;
-
-        final corners = [
-          bounds.topLeft,
-          bounds.topRight,
-          bounds.bottomRight,
-          bounds.bottomLeft,
-        ];
-        for (final c in corners) {
-          final dx = c.dx - centroid.dx;
-          final dy = c.dy - centroid.dy;
-          final rotatedC = Offset(
-            centroid.dx +
-                dx * math.cos(rotationRad) -
-                dy * math.sin(rotationRad),
-            centroid.dy +
-                dx * math.sin(rotationRad) +
-                dy * math.cos(rotationRad),
-          );
-          if ((position - rotatedC).distance < hitRadius) return true;
+        if (_hitSelectionModeChip(
+              position,
+              select.selectResult,
+              currentScale,
+            ) ||
+            _hitSelectionVertexIndex(
+                  position,
+                  select.selectResult,
+                  currentScale,
+                ) !=
+                null ||
+            _hitSelectionCornerIndex(
+                  position,
+                  select.selectResult,
+                  currentScale,
+                ) !=
+                null) {
+          return true;
         }
 
         if (select.selectResult.contains(position)) return true;
@@ -2742,37 +3490,55 @@ class EditorState extends State<Editor>
   }
 
   void _applyEraserResultToPage(EditorPage page, EraserResult result) {
+    var insertAt = page.strokes.length;
     if (result.removed.isNotEmpty) {
       final removedSet = result.removed.toSet();
+      for (final stroke in result.removed) {
+        final index = page.strokes.indexOf(stroke);
+        if (index >= 0 && index < insertAt) insertAt = index;
+      }
       page.strokes.removeWhere(removedSet.contains);
       for (final stroke in removedSet) {
         page.strokeSpatialIndex?.remove(stroke);
       }
     }
     if (result.added.isNotEmpty) {
-      page.strokes.addAll(result.added);
+      page.strokes.insertAll(
+        insertAt.clamp(0, page.strokes.length),
+        result.added,
+      );
       for (final stroke in result.added) {
         page.strokeSpatialIndex?.insert(stroke);
       }
     }
   }
 
-  void _syncFlushAreaEraserWork(EditorPage page, Eraser eraser, Offset position) {
+  void _ensureActiveLayerEraserSpatialIndex(EditorPage page) {
+    if (page.strokes.isEmpty) {
+      page.strokeSpatialIndex = null;
+      return;
+    }
+    if (!page.strokeSpatialIndexCoversActiveLayer) {
+      page.buildSpatialIndex(activeLayerOnly: true);
+    }
+  }
+
+  void _syncFlushAreaEraserWork(
+    EditorPage page,
+    Eraser eraser,
+    Offset position,
+  ) {
     if (eraser.mode != EraserMode.area) return;
-    if (page.strokeSpatialIndex == null && page.strokes.isNotEmpty) {
-      page.buildSpatialIndex();
-    }
-    for (;;) {
-      final result = eraser.apply(
-        position,
-        page.strokes,
-        spatialIndex: page.strokeSpatialIndex,
-        scale: _transformationController.value.getMaxScaleOnAxis(),
-        areaTimeBudgetMs: null,
-      );
-      _applyEraserResultToPage(page, result);
-      if (!result.areaWorkRemaining) break;
-    }
+    _ensureActiveLayerEraserSpatialIndex(page);
+    // Unbounded apply: finish any deferred circle cuts before recording undo.
+    final result = eraser.apply(
+      position,
+      page.strokes,
+      spatialIndex: page.strokeSpatialIndex,
+      scale: _transformationController.value.getMaxScaleOnAxis(),
+      areaTimeBudgetMs: null,
+    );
+    _applyEraserResultToPage(page, result);
     page.redrawStrokes();
   }
 
@@ -2787,6 +3553,8 @@ class EditorState extends State<Editor>
     });
   }
 
+  /// Continues unfinished area-erase geometry from the last pointer sample.
+  /// Does not re-scan "refused" strokes — only soft time-budget leftovers.
   void _runDeferredAreaEraserChunk() {
     if (!mounted || _isDisposed || !_eraserAreaDragActive) return;
     final page = _areaEraserWorkPage;
@@ -2795,9 +3563,7 @@ class EditorState extends State<Editor>
     if (currentTool is! Eraser) return;
     final eraser = currentTool as Eraser;
     if (eraser.mode != EraserMode.area) return;
-    if (page.strokeSpatialIndex == null && page.strokes.isNotEmpty) {
-      page.buildSpatialIndex();
-    }
+    _ensureActiveLayerEraserSpatialIndex(page);
 
     final result = eraser.apply(
       pos,
@@ -2807,27 +3573,23 @@ class EditorState extends State<Editor>
       areaTimeBudgetMs: _kAreaEraserTimeBudgetMs,
     );
     _applyEraserResultToPage(page, result);
-    page.redrawStrokes();
+    if (result.removed.isNotEmpty || result.added.isNotEmpty) {
+      page.redrawStrokes();
+    }
 
     if (result.areaWorkRemaining) {
-      if (mounted) {
-        setState(() => _showAreaEraserQueueNotice = true);
-      }
       _scheduleAreaEraserBackgroundDrain();
-    } else if (mounted && _showAreaEraserQueueNotice) {
-      setState(() => _showAreaEraserQueueNotice = false);
     }
   }
 
   void _abortAreaEraserBackgroundWork() {
     _eraserAreaDragActive = false;
+    Eraser.isDragging = false;
     _areaEraserDrainGeneration++;
     _areaEraserPostFrameScheduled = false;
     _areaEraserWorkPage = null;
     _areaEraserWorkPos = null;
-    if (_showAreaEraserQueueNotice) {
-      _showAreaEraserQueueNotice = false;
-    }
+    _eraserPositionRepaint.value = null;
   }
 
   /// Stops deferred area-erase chunks and drops in-memory erase sessions so we
@@ -2841,9 +3603,7 @@ class EditorState extends State<Editor>
     final eraser = currentTool as Eraser;
     if (!eraser.shouldApplyAt(position)) return;
 
-    if (page.strokeSpatialIndex == null && page.strokes.isNotEmpty) {
-      page.buildSpatialIndex();
-    }
+    _ensureActiveLayerEraserSpatialIndex(page);
     final bool isAreaMode = eraser.mode == EraserMode.area;
     _areaEraserWorkPage = page;
     _areaEraserWorkPos = position;
@@ -2858,40 +3618,19 @@ class EditorState extends State<Editor>
     _applyEraserResultToPage(page, result);
 
     if (isAreaMode && result.areaWorkRemaining) {
-      if (mounted) setState(() => _showAreaEraserQueueNotice = true);
       _scheduleAreaEraserBackgroundDrain();
-    } else if (isAreaMode && _showAreaEraserQueueNotice) {
-      if (mounted) setState(() => _showAreaEraserQueueNotice = false);
     }
 
     if (result.removed.isNotEmpty || result.added.isNotEmpty) {
-      if (isAreaMode) {
-
-        _eraserDeltaRemoved = null;
-        _eraserDeltaAdded = null;
-      } else {
-        setState(() {
-          _eraserDeltaRemoved = result.removed;
-          _eraserDeltaAdded = result.added;
-        });
-      }
       page.redrawStrokes();
-      if (!isAreaMode) {
-        removeExcessPages();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted)
-            setState(() {
-              _eraserDeltaRemoved = null;
-              _eraserDeltaAdded = null;
-            });
-        });
-      }
+      if (!isAreaMode) removeExcessPages();
     }
   }
 
   void onDrawStart(ScaleStartDetails details) {
-    _keepAliveController
-        .stop();
+    _markCanvasInputActivity(cancelPendingAutosave: true);
+    _canvasGestureActive = true;
+    _keepAliveController.stop();
 
     InteractiveCanvasViewer.isAutoPanningEnabled = false;
 
@@ -2928,15 +3667,18 @@ class EditorState extends State<Editor>
     totalRotation = 0.0;
     totalScale = 1.0;
     _clearSelectionPreview();
+    _selectionGestureBeganOnModeChip = false;
+    _selectionChipGestureMaxMove = 0.0;
+    _selectionChipWallClockStart = null;
 
     final timestamp = details.sourceTimeStamp ?? currentTimestamp;
 
     if (currentTool is Pen) {
+      _rawPenSampleSeenThisStroke = false;
+      _lastRawPenSampleTimestamp = null;
       _lastPenDragUpdatePosition = position;
       _lastPenSignificantMoveAt = DateTime.now();
-      final hadPreview = _penHoldDetectedShape != null;
       _restartPenHoldRecognitionTimer();
-      if (hadPreview && mounted) setState(() {});
       (currentTool as Pen).onDragStart(
         position,
         page,
@@ -2950,10 +3692,12 @@ class EditorState extends State<Editor>
     } else if (currentTool is Eraser) {
       final er = currentTool as Eraser;
       _eraserAreaDragActive = er.mode == EraserMode.area;
+      Eraser.isDragging = true;
       eraserPosition = position;
-      setState(
-        () {},
-      );
+      _eraserPositionRepaint.value = position;
+      // One rebuild to mount the eraser overlay; hits after this do not
+      // setState (that dropped FPS when ink was actually deleted).
+      if (mounted) setState(() {});
       _doEraserApply(page, position);
     } else if (currentTool is Select) {
       final select = currentTool as Select;
@@ -2970,49 +3714,64 @@ class EditorState extends State<Editor>
         final bounds = select.selectResult.getBounds();
         if (bounds.isEmpty) {
           select.onDragStart(position, dragPageIndex!);
-          history.canRedo = true;
+          history.clearRedo();
+          _selectionHandlesInteractionMode =
+              SelectionHandlesInteractionMode.resize;
         } else {
+          final currentScale = _quantizedCanvasScale;
 
-          final currentScale = _transformationController.value
-              .getMaxScaleOnAxis();
-
-          final double hitRadius = math.max(25.0 / currentScale, 15.0);
-
-          final centroid =
-              select.selectResult.displayBounds?.center ??
-              select.selectResult.getCentroid();
-          final rotationRad = select.selectResult.rotationDeg * math.pi / 180.0;
-
-          final handleOffset = Offset(centroid.dx, bounds.top - 30);
-          final rotatedHandleOffset = Offset(
-            centroid.dx +
-                (handleOffset.dx - centroid.dx) * math.cos(rotationRad) -
-                (handleOffset.dy - centroid.dy) * math.sin(rotationRad),
-            centroid.dy +
-                (handleOffset.dx - centroid.dx) * math.sin(rotationRad) +
-                (handleOffset.dy - centroid.dy) * math.cos(rotationRad),
-          );
-
-          if ((position - rotatedHandleOffset).distance < hitRadius) {
-            _isRotating = true;
-            _rotationStartPosition = position;
-            _rotationStartAngle = select.selectResult.rotationDeg;
+          if (_hitSelectionModeChip(
+            position,
+            select.selectResult,
+            currentScale,
+          )) {
+            _selectionGestureBeganOnModeChip = true;
+            _selectionChipGestureOriginPage = position;
+            _selectionChipGestureMaxMove = 0.0;
+            _selectionChipWallClockStart = DateTime.now();
             _isDraggingVertex = false;
             _isScaling = false;
-            _beginSelectionPreview(select.selectResult);
+            _isRotating = false;
             return;
           }
 
-          final corners = [
-            bounds.topLeft,
-            bounds.topRight,
-            bounds.bottomRight,
-            bounds.bottomLeft,
-          ];
-          int? cornerIndex;
-          Offset? hitRotatedC;
-          for (int i = 0; i < corners.length; i++) {
-            final c = corners[i];
+          final editableShape = _singleVertexEditableShape(select.selectResult);
+          if (editableShape != null) {
+            final vertexIndex = _hitSelectionVertexIndex(
+              position,
+              select.selectResult,
+              currentScale,
+            );
+            if (vertexIndex != null) {
+              _isDraggingVertex = true;
+              _draggedVertexIndex = vertexIndex;
+              _draggedTriangle = editableShape;
+              _isScaling = false;
+              _isRotating = false;
+              return;
+            }
+          }
+
+          final cornerIndex = _hitSelectionCornerIndex(
+            position,
+            select.selectResult,
+            currentScale,
+          );
+
+          if (cornerIndex != null) {
+            final rect = _selectionRectForInteractions(select.selectResult);
+            final corners = [
+              rect.topLeft,
+              rect.topRight,
+              rect.bottomRight,
+              rect.bottomLeft,
+            ];
+            final rotationRad =
+                _selectionRotationDegForInteractions(select.selectResult) *
+                math.pi /
+                180.0;
+            final centroid = rect.center;
+            final c = corners[cornerIndex];
             final dx = c.dx - centroid.dx;
             final dy = c.dy - centroid.dy;
             final rotatedC = Offset(
@@ -3023,25 +3782,25 @@ class EditorState extends State<Editor>
                   dx * math.sin(rotationRad) +
                   dy * math.cos(rotationRad),
             );
-            if ((position - rotatedC).distance < hitRadius) {
-              cornerIndex = i;
-              hitRotatedC = rotatedC;
-              break;
-            }
-          }
 
-          if (cornerIndex != null && hitRotatedC != null) {
-            _isScaling = true;
-            _scaleHandle = corners[cornerIndex];
-            _initialScaleRadius = (hitRotatedC - centroid).distance;
-            _isRotating = false;
+            if (_selectionHandlesInteractionMode ==
+                SelectionHandlesInteractionMode.rotate) {
+              _isRotating = true;
+              _rotationStartPosition = position;
+              _rotationStartAngle = select.selectResult.rotationDeg;
+              _isScaling = false;
+            } else {
+              _isScaling = true;
+              _scaleHandle = corners[cornerIndex];
+              _initialScaleRadius = (rotatedC - centroid).distance;
+              _isRotating = false;
+            }
             _isDraggingVertex = false;
             _beginSelectionPreview(select.selectResult);
             return;
           }
 
           if (select.selectResult.contains(position)) {
-
             _startSelectionLongPressTimer(details.focalPoint);
 
             _isScaling = false;
@@ -3092,6 +3851,8 @@ class EditorState extends State<Editor>
               rotationDeg: clickedImage.rotationDeg,
             );
             select.doneSelecting = true;
+            _selectionHandlesInteractionMode =
+                SelectionHandlesInteractionMode.resize;
             _isScaling = false;
             _isRotating = false;
             _isDraggingVertex = false;
@@ -3108,6 +3869,8 @@ class EditorState extends State<Editor>
               rotationDeg: clickedStroke.rotationDeg,
             );
             select.doneSelecting = true;
+            _selectionHandlesInteractionMode =
+                SelectionHandlesInteractionMode.resize;
             _isScaling = false;
             _isRotating = false;
             _isDraggingVertex = false;
@@ -3115,16 +3878,16 @@ class EditorState extends State<Editor>
             setState(() {});
             return;
           } else {
-
             _isScaling = false;
             _isRotating = false;
             _isDraggingVertex = false;
             select.onDragStart(position, dragPageIndex!);
-            history.canRedo = true;
+            history.clearRedo();
+            _selectionHandlesInteractionMode =
+                SelectionHandlesInteractionMode.resize;
           }
         }
       } else {
-
         final page = coreInfo.pages[dragPageIndex!];
 
         for (final image in page.images.reversed) {
@@ -3155,17 +3918,22 @@ class EditorState extends State<Editor>
             rotationDeg: clickedImage.rotationDeg,
           );
           select.doneSelecting = true;
+          _selectionHandlesInteractionMode =
+              SelectionHandlesInteractionMode.resize;
           _isScaling = false;
           _isRotating = false;
           _isDraggingVertex = false;
           InteractiveCanvasViewer.isAutoPanningEnabled = true;
           setState(() {});
+          return;
         } else {
           _isScaling = false;
           _isRotating = false;
           _isDraggingVertex = false;
           select.onDragStart(position, dragPageIndex!);
-          history.canRedo = true;
+          history.clearRedo();
+          _selectionHandlesInteractionMode =
+              SelectionHandlesInteractionMode.resize;
         }
       }
     } else if (currentTool is LaserPointer) {
@@ -3180,13 +3948,10 @@ class EditorState extends State<Editor>
     }
 
     _bumpInteractionRepaint();
-    setState(() {});
   }
 
   void onDrawUpdate(ScaleUpdateDetails details) {
-
     if (_selectionLongPressTimer != null) {
-
       if ((details.focalPoint - _longPressStartPosition).distance >
           _longPressMoveThreshold) {
         _selectionLongPressTimer?.cancel();
@@ -3195,6 +3960,8 @@ class EditorState extends State<Editor>
     }
 
     if (_ignoreDragForMenu) return;
+
+    if (dragPageIndex == null) return;
 
     final page = coreInfo.pages[dragPageIndex!];
 
@@ -3279,6 +4046,30 @@ class EditorState extends State<Editor>
       return;
     }
 
+    if (_selectionGestureBeganOnModeChip) {
+      if (currentTool is Select &&
+          dragPageIndex != null &&
+          !_isScaling &&
+          !_isRotating) {
+        final sel = currentTool as Select;
+        if (sel.doneSelecting && sel.selectResult.pageIndex == dragPageIndex!) {
+          var pos = _safelyGetLocalPosition(dragPageIndex!, details.focalPoint);
+          if (!coreInfo.isInfinite) {
+            pos = Offset(
+              pos.dx.clamp(0.0, page.size.width),
+              pos.dy.clamp(0.0, page.size.height),
+            );
+          }
+          _selectionChipGestureMaxMove = math.max(
+            _selectionChipGestureMaxMove,
+            (pos - _selectionChipGestureOriginPage).distance,
+          );
+          previousPosition = pos;
+          return;
+        }
+      }
+    }
+
     if (!coreInfo.isInfinite &&
         (currentTool is Pen || currentTool is ShapeTool)) {
       position = Offset(
@@ -3293,29 +4084,22 @@ class EditorState extends State<Editor>
     final timestamp = details.sourceTimeStamp ?? currentTimestamp;
 
     if (currentTool is Pen) {
-      (currentTool as Pen).onDragUpdate(position, currentPressure, timestamp);
-
-      final lastPos = _lastPenDragUpdatePosition;
-      if (lastPos == null ||
-          (position - lastPos).distance > _penHoldJitterThreshold) {
-        _lastPenDragUpdatePosition = position;
-        _lastPenSignificantMoveAt = DateTime.now();
-        final hadPreview = _penHoldDetectedShape != null;
-        _restartPenHoldRecognitionTimer();
-        if (hadPreview && mounted) setState(() {});
+      if (!_shouldSkipGesturePenSample(timestamp)) {
+        _recordLivePenSample(
+          page,
+          position,
+          timestamp,
+          rawPointerSample: false,
+        );
+        _bumpInteractionRepaint();
       }
-      page.redrawStrokes();
-      _bumpInteractionRepaint();
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragUpdate(position, page, dragPageIndex!);
       page.redrawStrokes();
       _bumpInteractionRepaint();
     } else if (currentTool is Eraser) {
       eraserPosition = position;
-      _bumpInteractionRepaint();
-      setState(
-        () {},
-      );
+      _eraserPositionRepaint.value = position;
       _doEraserApply(page, position);
     } else if (currentTool is Select) {
       final select = currentTool as Select;
@@ -3331,42 +4115,35 @@ class EditorState extends State<Editor>
         }
         if (_isDraggingVertex &&
             _draggedTriangle != null &&
-            _draggedVertexIndex != null &&
-            _draggedTriangle!.shapeVertices != null) {
-
+            _draggedVertexIndex != null) {
           final triangle = _draggedTriangle!;
-          final vertices = List<Offset>.from(
-            triangle.shapeVertices!,
-          );
-
-          final centroid = select.selectResult.getCentroid();
-          final rotationRad = select.selectResult.rotationDeg * math.pi / 180.0;
-
-          final dx = position.dx - centroid.dx;
-          final dy = position.dy - centroid.dy;
-          final unrotatedPos = Offset(
-            centroid.dx +
-                dx * math.cos(-rotationRad) -
-                dy * math.sin(-rotationRad),
-            centroid.dy +
-                dx * math.sin(-rotationRad) +
-                dy * math.cos(-rotationRad),
-          );
-
-          vertices[_draggedVertexIndex!] = unrotatedPos;
-
-          Rect? newBounds;
-          for (final v in vertices) {
-            final pointRect = Rect.fromLTWH(v.dx, v.dy, 0, 0);
-            newBounds = newBounds == null
-                ? pointRect
-                : newBounds.expandToInclude(pointRect);
+          final vertices = List<Offset>.from(triangle.controlPoints);
+          if (_draggedVertexIndex! < 0 ||
+              _draggedVertexIndex! >= vertices.length) {
+            return;
           }
 
-          final newConfig = triangle.config.copyWith(
-            vertices: vertices,
-            bounds: newBounds ?? triangle.config.bounds,
-          );
+          final idx = _draggedVertexIndex!;
+          final ShapeConfig newConfig;
+          if (triangle.config.kind == ShapeKind.ellipse) {
+            newConfig = ShapeGeometry.moveEllipseControlPoint(
+              triangle.config,
+              idx,
+              position,
+            );
+          } else if (triangle.config.kind == ShapeKind.circle) {
+            newConfig = ShapeGeometry.moveCircleControlPoint(
+              triangle.config,
+              idx,
+              position,
+            );
+          } else {
+            vertices[idx] = position;
+            newConfig = ShapeGeometry.withControlPoints(
+              triangle.config,
+              vertices,
+            );
+          }
 
           final triangleIndex = page.strokes.indexOf(triangle);
           if (triangleIndex >= 0) {
@@ -3381,13 +4158,14 @@ class EditorState extends State<Editor>
               config: newConfig,
               fill: triangle.fill,
               fillColor: triangle.fillColor,
-              shapeVertices:
-                  vertices,
+              shapeVertices: newConfig.vertices,
             );
             page.strokes[triangleIndex] = newTriangle;
             select.selectResult.strokes[0] = newTriangle;
+            select.selectResult.displayBounds = null;
             _draggedTriangle = newTriangle;
             newTriangle.markPolygonNeedsUpdating();
+            page.redrawStrokes();
           }
         } else if (_isScaling &&
             _scaleHandle != null &&
@@ -3406,7 +4184,6 @@ class EditorState extends State<Editor>
             select.selectResult.clearAlignmentGuides();
           }
         } else if (_isRotating && _rotationStartPosition != null) {
-
           final preview =
               _selectionPreview ??
               SelectionTransformPreview.fromSelection(select.selectResult);
@@ -3433,10 +4210,8 @@ class EditorState extends State<Editor>
 
           select.selectResult.clearAlignmentGuides();
         } else {
-
           int pageOffset = 0;
           if (position.dy > page.size.height + Editor.changePageThreshold) {
-
             if (coreInfo.pages.length > select.selectResult.pageIndex + 1) {
               adjustedOffset = Offset(
                 offset.dx,
@@ -3445,9 +4220,7 @@ class EditorState extends State<Editor>
               pageOffset = 1;
             }
           } else if (position.dy < -Editor.changePageThreshold) {
-
             if (select.selectResult.pageIndex > 0) {
-
               final prevPage =
                   coreInfo.pages[select.selectResult.pageIndex - 1];
               adjustedOffset = Offset(
@@ -3495,6 +4268,7 @@ class EditorState extends State<Editor>
                 select.selectResult,
               );
               _selectionPreview = preview;
+              _detachSelectionStrokesFromPage(select.selectResult);
             }
 
             adjustedOffset = _snapSelectionOffset(
@@ -3514,7 +4288,6 @@ class EditorState extends State<Editor>
         setState(() {});
       }
       if (select.doneSelecting) {
-
         setState(() {});
       }
       _bumpInteractionRepaint();
@@ -3526,7 +4299,10 @@ class EditorState extends State<Editor>
     previousPosition = position;
     moveOffset += adjustedOffset;
 
-    if (currentTool is Eraser) {
+    bool hadSelection =
+        Select.currentSelect.doneSelecting &&
+        !Select.currentSelect.selectResult.isEmpty;
+    if (currentTool is Select || hadSelection) {
       setState(() {});
     }
   }
@@ -3561,22 +4337,13 @@ class EditorState extends State<Editor>
     final last = stroke.points.last;
     final dx = position.dx - last.x;
     final dy = position.dy - last.y;
-    if (dx * dx + dy * dy < _rawDrawSampleMinDistSq) return;
+    final minDistSq = DisplayInkFeel.instance.isLowRefresh
+        ? _rawDrawSampleMinDistSqLowRefresh
+        : _rawDrawSampleMinDistSq;
+    if (dx * dx + dy * dy < minDistSq) return;
 
     final timestamp = event.timeStamp;
-    (currentTool as Pen).onDragUpdate(position, currentPressure, timestamp);
-
-    final lastPos = _lastPenDragUpdatePosition;
-    if (lastPos == null ||
-        (position - lastPos).distance > _penHoldJitterThreshold) {
-      _lastPenDragUpdatePosition = position;
-      _lastPenSignificantMoveAt = DateTime.now();
-      final hadPreview = _penHoldDetectedShape != null;
-      _restartPenHoldRecognitionTimer();
-      if (hadPreview && mounted) setState(() {});
-    }
-    page.redrawStrokes();
-    _bumpInteractionRepaint();
+    _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
     previousPosition = position;
   }
 
@@ -3707,6 +4474,14 @@ class EditorState extends State<Editor>
   }
 
   void onDrawEnd(ScaleEndDetails details) {
+    _canvasGestureActive = false;
+    void resetDrawSessionState() {
+      dragPageIndex = null;
+      _eraserAreaDragActive = false;
+      eraserPosition = null;
+      _eraserPositionRepaint.value = null;
+      Eraser.isDragging = false;
+    }
 
     _selectionLongPressTimer?.cancel();
     _selectionLongPressTimer = null;
@@ -3715,12 +4490,16 @@ class EditorState extends State<Editor>
     Select.currentSelect.selectResult.clearAlignmentGuides();
     _activeRotationSnapAnchor = null;
 
-    if (dragPageIndex == null) return;
+    if (dragPageIndex == null) {
+      resetDrawSessionState();
+      return;
+    }
 
     if (_activeCropHandle != null) {
       setState(() {
         _activeCropHandle = null;
       });
+      resetDrawSessionState();
       return;
     }
 
@@ -3732,15 +4511,6 @@ class EditorState extends State<Editor>
         var newStroke = (currentTool as Pen).onDragEnd();
         if (newStroke == null) return;
         if (newStroke.isEmpty) return;
-
-        if (newStroke.toolId == .verticalSpacePen) {
-          _handleInsertSpaceVertical(newStroke, page);
-          return;
-        }
-        if (newStroke.toolId == .horizontalSpacePen) {
-          _handleInsertSpaceHorizontal(newStroke, page);
-          return;
-        }
 
         final delayMs = stows.shapeRecognitionDelay.value;
         final holdSatisfiedByElapsedTime =
@@ -3757,7 +4527,6 @@ class EditorState extends State<Editor>
               ? 0.45
               : (detected?.name == DefaultUnistrokeNames.line ? 0.5 : 0.55);
           if (detected != null && detected.score >= minScore) {
-
             final bool isHighlighter = currentTool is Highlighter;
             final bool isLineOrArrow =
                 detected.name == DefaultUnistrokeNames.line ||
@@ -3770,6 +4539,7 @@ class EditorState extends State<Editor>
 
         _penHoldSatisfied = false;
         _penHoldDetectedShape = null;
+        clearDetectedShapePreviewCache();
 
         createPage(newStroke.pageIndex);
         page.insertStroke(newStroke);
@@ -3802,6 +4572,17 @@ class EditorState extends State<Editor>
             stows.lastAdvancedPenOptions.value = pen.options;
             stows.lastAdvancedPenColor.value = pen.color.toARGB32();
             break;
+          case ToolId.advancedPencil:
+            stows.lastAdvancedPencilOptions.value = pen.options;
+            stows.lastAdvancedPencilColor.value = pen.color.toARGB32();
+            stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
+              pen.paint.toJson(embedBytes: false),
+            );
+            break;
+          case ToolId.experimentalPen:
+            stows.lastAdvancedPenOptions.value = pen.options;
+            stows.lastAdvancedPenColor.value = pen.color.toARGB32();
+            break;
           default:
             break;
         }
@@ -3814,18 +4595,17 @@ class EditorState extends State<Editor>
             images: [],
           ),
         );
+        _appendRecoveryStroke(newStroke);
 
         if (stows.enableMathSolver.value) {
           _trySolveMath(newStroke, page).then((solved) {
             if (solved && mounted) {
-
               setState(() {});
               autosaveAfterDelay();
             }
           });
         }
         shouldFitInfiniteCanvas = true;
-
       } else if (currentTool is ShapeTool) {
         final newStroke = (currentTool as ShapeTool).onDragEnd(
           page,
@@ -3874,8 +4654,7 @@ class EditorState extends State<Editor>
       } else if (currentTool is Eraser) {
         final eraser = currentTool as Eraser;
         if (eraser.mode == EraserMode.area) {
-          final flushPos =
-              eraserPosition ?? _areaEraserWorkPos ?? Offset.zero;
+          final flushPos = eraserPosition ?? _areaEraserWorkPos ?? Offset.zero;
           _syncFlushAreaEraserWork(page, eraser, flushPos);
         }
         _abortAreaEraserBackgroundWork();
@@ -3883,26 +4662,27 @@ class EditorState extends State<Editor>
 
         final (erased, added, toDispose) = eraser.onDragEnd();
         eraserPosition = null;
-        setState(
-          () {},
-        );
+        _eraserPositionRepaint.value = null;
+        _eraserDeltaRemoved = null;
+        _eraserDeltaAdded = null;
+        setState(() {});
         if (eraser.mode == EraserMode.area) {
-
-          page.buildSpatialIndex();
+          page.buildSpatialIndex(activeLayerOnly: true);
           page.redrawStrokes();
           removeExcessPages();
         }
         if (tmpTool != null &&
             (stylusButtonPressed || stows.disableEraserAfterUse.value)) {
-
           stylusButtonPressed = false;
           currentTool = tmpTool!;
           tmpTool = null;
         }
-        for (final stroke in toDispose) {
-          stroke.dispose();
+        if (erased.isEmpty && added.isEmpty) {
+          for (final stroke in toDispose) {
+            stroke.dispose();
+          }
+          return;
         }
-        if (erased.isEmpty && added.isEmpty) return;
         if (erased.isNotEmpty && added.isNotEmpty) {
           history.recordChange(
             EditorHistoryItem(
@@ -3932,6 +4712,11 @@ class EditorState extends State<Editor>
             ),
           );
         }
+        final keepForHistory = <Stroke>{...erased, ...added};
+        for (final stroke in toDispose) {
+          if (keepForHistory.contains(stroke)) continue;
+          stroke.dispose();
+        }
       } else if (currentTool is Select) {
         final select = currentTool as Select;
         if (select.doneSelecting) {
@@ -3942,32 +4727,47 @@ class EditorState extends State<Editor>
                 select.selectResult.images.first,
                 _imageCropState!.image,
               )) {
-
             return;
           }
-          if (_isDraggingVertex &&
+          if (_selectionGestureBeganOnModeChip) {
+            final viewportScale = _quantizedCanvasScale;
+            final tol = SelectionHandlesLayout.chipTapMovementTolerance(
+              viewportScale,
+            );
+            final started = _selectionChipWallClockStart;
+            final durationOk =
+                started == null ||
+                DateTime.now().difference(started) <=
+                    SelectionHandlesLayout.chipTapMaxDuration;
+            if (_selectionChipGestureMaxMove <= tol && durationOk) {
+              _selectionHandlesInteractionMode =
+                  _selectionHandlesInteractionMode ==
+                      SelectionHandlesInteractionMode.resize
+                  ? SelectionHandlesInteractionMode.rotate
+                  : SelectionHandlesInteractionMode.resize;
+              HapticFeedback.selectionClick();
+            }
+            _selectionGestureBeganOnModeChip = false;
+            _selectionChipWallClockStart = null;
+            _clearSelectionPreview();
+          } else if (_isDraggingVertex &&
               _draggedTriangle != null &&
               _draggedVertexIndex != null) {
-
-            if (_draggedTriangle!.shapeVertices != null) {
-
-              history.recordChange(
-                EditorHistoryItem(
-                  type: .move,
-                  pageIndex: dragPageIndex!,
-                  strokes: [_draggedTriangle!],
-                  images: [],
-                  offset: .zero,
-                ),
-              );
-            }
+            history.recordChange(
+              EditorHistoryItem(
+                type: .move,
+                pageIndex: dragPageIndex!,
+                strokes: [_draggedTriangle!],
+                images: [],
+                offset: .zero,
+              ),
+            );
 
             _isDraggingVertex = false;
             _draggedVertexIndex = null;
             _draggedTriangle = null;
             shouldFitInfiniteCanvas = true;
           } else if (_isScaling) {
-
             final centroid =
                 committedPreview?.pivot ??
                 select.selectResult.displayBounds?.center ??
@@ -4013,12 +4813,8 @@ class EditorState extends State<Editor>
             history.recordChange(
               EditorHistoryItem(
                 type: .move,
-                pageIndexStart: select
-                    .selectResult
-                    .pageIndexStart,
-                pageIndex: select
-                    .selectResult
-                    .pageIndex,
+                pageIndexStart: select.selectResult.pageIndexStart,
+                pageIndex: select.selectResult.pageIndex,
                 strokes: List.from(select.selectResult.strokes),
                 images: List.from(select.selectResult.images),
                 offset: Rect.fromLTRB(
@@ -4029,9 +4825,7 @@ class EditorState extends State<Editor>
                 ),
               ),
             );
-            select.selectResult.pageIndexStart = select
-                .selectResult
-                .pageIndex;
+            select.selectResult.pageIndexStart = select.selectResult.pageIndex;
             shouldFitInfiniteCanvas = true;
           } else {
             _clearSelectionPreview();
@@ -4043,13 +4837,14 @@ class EditorState extends State<Editor>
 
           if (select.selectResult.isEmpty) {
             Select.currentSelect.unselect();
+            _selectionHandlesInteractionMode =
+                SelectionHandlesInteractionMode.resize;
             if (_autoSwitchBackToShapeTool) {
               _autoSwitchBackToShapeTool = false;
               currentTool = ShapeTool.currentShapeTool;
               setState(() {});
             }
           } else {
-
             select.selectResult.displayBounds = select.selectResult.getBounds();
           }
         }
@@ -4076,191 +4871,28 @@ class EditorState extends State<Editor>
     _keepAliveController.forward(from: 0);
 
     _bumpInteractionRepaint();
-    if (shouldSave) autosaveAfterDelay();
-  }
-
-  void _handleInsertSpaceVertical(Stroke stroke, EditorPage page) {
-    final pts = stroke.pointsForEraser;
-    if (pts.isEmpty) return;
-
-    final double splitY = pts.first.y;
-    final double deltaY = pts.last.y - pts.first.y;
-
-    if (deltaY.abs() < 10) return;
-
-    final offset = Offset(0, deltaY);
-    final movedStrokes = <Stroke>[];
-    final movedImages = <EditorImage>[];
-
-    for (final s in page.strokes) {
-      final sp = s.pointsForEraser;
-      if (sp.isEmpty) continue;
-      double minY = sp.map((p) => p.y).reduce((a, b) => a < b ? a : b);
-      if (minY > splitY) {
-        s.shift(offset);
-        movedStrokes.add(s);
+    if (shouldSave) {
+      if (dragPageIndex != null) {
+        _pageRasterCache.invalidateInk(dragPageIndex!);
+        _maintainPageRasterBand(dragPageIndex!, dragPageIndex!, forceSchedule: true);
       }
-    }
-    for (final img in page.images) {
-      if (img.dstRect.top > splitY) {
-        img.dstRect = img.dstRect.shift(offset);
-        movedImages.add(img);
-      }
-    }
-
-    final int currentPageIdx = dragPageIndex!;
-    final double pageHeight = page.size.height;
-
-    if (coreInfo.isInfinite) {
-
-    } else if (deltaY > 0) {
-
-      final strokesToMove = movedStrokes
-          .where((s) => s.maxY > pageHeight)
-          .toList();
-      final imagesToMove = movedImages
-          .where((i) => i.dstRect.top > pageHeight)
-          .toList();
-
-      if (strokesToMove.isNotEmpty || imagesToMove.isNotEmpty) {
-        final nextPageIndex = currentPageIdx + 1;
-
-        if (nextPageIndex >= coreInfo.pages.length) {
-          setState(() {
-            coreInfo.pages.add(
-              page.copyWith(
-                strokes: [],
-                images: [],
-                quill: null,
-              ),
-            );
-          });
-        }
-
-        final nextPage = coreInfo.pages[nextPageIndex];
-
-        for (final s in strokesToMove) {
-          setState(() {
-            page.strokes.remove(s);
-            s.shift(
-              Offset(0, -pageHeight),
-            );
-            s.pageIndex = nextPageIndex;
-            s.page = nextPage;
-            nextPage.strokes.add(s);
-          });
-        }
-
-        for (final img in imagesToMove) {
-          setState(() {
-            page.images.remove(img);
-            img.dstRect = img.dstRect.shift(Offset(0, -pageHeight));
-            nextPage.images.add(img);
-          });
-        }
-      }
-    }
-
-    else if (deltaY < 0 && currentPageIdx > 0) {
-      final strokesToMove = movedStrokes.where((s) => s.maxY < 0).toList();
-      final imagesToMove = movedImages
-          .where((i) => i.dstRect.bottom < 0)
-          .toList();
-
-      if (strokesToMove.isNotEmpty || imagesToMove.isNotEmpty) {
-        final prevPageIndex = currentPageIdx - 1;
-        final prevPage = coreInfo.pages[prevPageIndex];
-        final double prevPageHeight = prevPage.size.height;
-
-        for (final s in strokesToMove) {
-          setState(() {
-            page.strokes.remove(s);
-            s.shift(
-              Offset(0, prevPageHeight),
-            );
-            s.pageIndex = prevPageIndex;
-            s.page = prevPage;
-            prevPage.strokes.add(s);
-          });
-        }
-
-        for (final img in imagesToMove) {
-          setState(() {
-            page.images.remove(img);
-            img.dstRect = img.dstRect.shift(Offset(0, prevPageHeight));
-            prevPage.images.add(img);
-          });
-        }
-      }
-    }
-
-    if (movedStrokes.isNotEmpty || movedImages.isNotEmpty) {
-      if (coreInfo.isInfinite) {
-        _fitInfiniteCanvasToContent(page);
-      }
-      history.recordChange(
-        EditorHistoryItem(
-          type: .move,
-          pageIndex: dragPageIndex!,
-          pageIndexStart: dragPageIndex!,
-          strokes: movedStrokes,
-          images: movedImages,
-          offset: Rect.fromLTWH(0, deltaY, 0, deltaY),
-        ),
-      );
       autosaveAfterDelay();
     }
+    resetDrawSessionState();
   }
 
-  void _handleInsertSpaceHorizontal(Stroke stroke, EditorPage page) {
-    final pts = stroke.pointsForEraser;
-    if (pts.isEmpty) return;
-
-    final double splitX = pts.first.x;
-    final double deltaX = pts.last.x - pts.first.x;
-
-    if (deltaX.abs() < 10) return;
-
-    final offset = Offset(deltaX, 0);
-    final movedStrokes = <Stroke>[];
-    final movedImages = <EditorImage>[];
-
-    for (final s in page.strokes) {
-      final sp = s.pointsForEraser;
-      if (sp.isEmpty) continue;
-      double minX = sp.map((p) => p.x).reduce((a, b) => a < b ? a : b);
-      if (minX > splitX) {
-        s.shift(offset);
-        movedStrokes.add(s);
-      }
-    }
-    for (final img in page.images) {
-      if (img.dstRect.left > splitX) {
-        img.dstRect = img.dstRect.shift(offset);
-        movedImages.add(img);
-      }
-    }
-
-    if (movedStrokes.isNotEmpty || movedImages.isNotEmpty) {
-      if (coreInfo.isInfinite) {
-        _fitInfiniteCanvasToContent(page);
-      }
-      history.recordChange(
-        EditorHistoryItem(
-          type: .move,
-          pageIndex: dragPageIndex!,
-          pageIndexStart: dragPageIndex!,
-          strokes: movedStrokes,
-          images: movedImages,
-          offset: Rect.fromLTWH(deltaX, 0, deltaX, 0),
-        ),
-      );
-      autosaveAfterDelay();
-    }
+  void _finishActivePenStrokeFromPointerEnd(PointerEvent event) {
+    if (Pen.currentStroke == null || dragPageIndex == null) return;
+    onDrawEnd(
+      ScaleEndDetails(
+        velocity: event is PointerUpEvent
+            ? Velocity(pixelsPerSecond: event.delta)
+            : Velocity.zero,
+      ),
+    );
   }
 
   Future<bool> _trySolveMath(Stroke lastStroke, EditorPage page) async {
-
     if (coreInfo.readOnly) return false;
 
     if (lastStroke.points.isEmpty) return false;
@@ -4293,7 +4925,6 @@ class EditorState extends State<Editor>
     );
 
     if (resultStrokes != null && resultStrokes.isNotEmpty) {
-
       page.strokes.addAll(resultStrokes);
 
       if (page.strokeSpatialIndex != null) {
@@ -4378,6 +5009,95 @@ class EditorState extends State<Editor>
     _selectionDirtyPageIndices.add(pageIndex);
   }
 
+  Rect _selectionRectForInteractions(SelectResult selection) {
+    final preview =
+        _selectionPreview ?? SelectionTransformPreview.fromSelection(selection);
+    return preview.visualBounds;
+  }
+
+  double _selectionRotationDegForInteractions(SelectResult selection) {
+    final preview =
+        _selectionPreview ?? SelectionTransformPreview.fromSelection(selection);
+    return preview.effectiveRotationDeg;
+  }
+
+  bool _hitSelectionModeChip(
+    Offset pagePosition,
+    SelectResult selection,
+    double viewportScale,
+  ) {
+    final rect = _selectionRectForInteractions(selection);
+    final rot = _selectionRotationDegForInteractions(selection);
+    final center = SelectionHandlesLayout.chipCenter(rect, rot, viewportScale);
+    return (pagePosition - center).distance <=
+        SelectionHandlesLayout.chipHitRadius(rect, viewportScale);
+  }
+
+  ShapeStroke? _singleVertexEditableShape(SelectResult selection) {
+    if (selection.images.isNotEmpty) return null;
+    if (selection.strokes.length != 1) return null;
+    final stroke = selection.strokes.first;
+    if (stroke is! ShapeStroke) return null;
+    if (!stroke.isVertexEditable) return null;
+    return stroke;
+  }
+
+  int? _hitSelectionVertexIndex(
+    Offset pagePosition,
+    SelectResult selection,
+    double viewportScale,
+  ) {
+    final shape = _singleVertexEditableShape(selection);
+    if (shape == null) return null;
+    final stylus =
+        currentPointerKind == PointerDeviceKind.stylus ||
+        currentPointerKind == PointerDeviceKind.invertedStylus;
+    return ShapeControlPointsOverlay.hitTest(
+      shape: shape,
+      pagePosition: pagePosition,
+      viewportScale: viewportScale,
+      stylus: stylus,
+    );
+  }
+
+  /// Corner index matching [SelectionHandlesOverlay] handle order:
+  /// 0 TL, 1 TR, 2 BR, 3 BL.
+  int? _hitSelectionCornerIndex(
+    Offset pagePosition,
+    SelectResult selection,
+    double viewportScale,
+  ) {
+    final stylus =
+        currentPointerKind == PointerDeviceKind.stylus ||
+        currentPointerKind == PointerDeviceKind.invertedStylus;
+    final rect = _selectionRectForInteractions(selection);
+    final rotationRad =
+        _selectionRotationDegForInteractions(selection) * math.pi / 180.0;
+    final centroid = rect.center;
+    final hitR = SelectionHandlesLayout.cornerHitRadius(
+      rect,
+      viewportScale,
+      stylus: stylus,
+    );
+    final corners = [
+      rect.topLeft,
+      rect.topRight,
+      rect.bottomRight,
+      rect.bottomLeft,
+    ];
+    for (var i = 0; i < corners.length; i++) {
+      final c = corners[i];
+      final dx = c.dx - centroid.dx;
+      final dy = c.dy - centroid.dy;
+      final rotatedC = Offset(
+        centroid.dx + dx * math.cos(rotationRad) - dy * math.sin(rotationRad),
+        centroid.dy + dx * math.sin(rotationRad) + dy * math.cos(rotationRad),
+      );
+      if ((pagePosition - rotatedC).distance <= hitR) return i;
+    }
+    return null;
+  }
+
   SelectionTransformPreview? _selectionPreviewForPage(int pageIndex) {
     final preview = _selectionPreview;
     if (preview == null || currentTool is! Select) return null;
@@ -4392,15 +5112,57 @@ class EditorState extends State<Editor>
     _selectionPreview = SelectionTransformPreview.fromSelection(selection);
     totalRotation = 0.0;
     totalScale = 1.0;
+    _detachSelectionStrokesFromPage(selection);
   }
 
   void _clearSelectionPreview() {
+    final select = currentTool is Select ? currentTool as Select : null;
+    if (_selectionStrokesDetachedFromPage && select != null) {
+      _reattachSelectionStrokesToPage(select.selectResult);
+    }
     _selectionPreview = null;
+  }
+
+  void _detachSelectionStrokesFromPage(SelectResult selection) {
+    if (_selectionStrokesDetachedFromPage) return;
+    if (selection.strokes.isEmpty) return;
+    final pageIndex = selection.pageIndex;
+    if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
+    final page = coreInfo.pages[pageIndex];
+    for (final stroke in selection.strokes) {
+      page.strokeSpatialIndex?.remove(stroke);
+      page.strokes.remove(stroke);
+    }
+    _selectionStrokesDetachedFromPage = true;
+    _markSelectionPageDirty(pageIndex);
+    page.redrawStrokes();
+  }
+
+  void _reattachSelectionStrokesToPage(SelectResult selection) {
+    if (!_selectionStrokesDetachedFromPage) return;
+    final pageIndex = selection.pageIndex;
+    if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) {
+      _selectionStrokesDetachedFromPage = false;
+      return;
+    }
+    final page = coreInfo.pages[pageIndex];
+    for (final stroke in selection.strokes) {
+      if (!page.strokes.contains(stroke)) {
+        page.strokes.add(stroke);
+        page.strokeSpatialIndex?.insert(stroke);
+      }
+    }
+    _selectionStrokesDetachedFromPage = false;
+    _markSelectionPageDirty(pageIndex);
+    page.redrawStrokes();
   }
 
   void _commitSelectionPreview(SelectResult selection) {
     final preview = _selectionPreview;
     if (preview == null || preview.isIdentity) {
+      if (_selectionStrokesDetachedFromPage) {
+        _reattachSelectionStrokesToPage(selection);
+      }
       _selectionPreview = null;
       return;
     }
@@ -4408,6 +5170,7 @@ class EditorState extends State<Editor>
     final pageIndex = selection.pageIndex;
     if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) {
       _selectionPreview = null;
+      _selectionStrokesDetachedFromPage = false;
       return;
     }
 
@@ -4425,7 +5188,11 @@ class EditorState extends State<Editor>
         if (stroke is ShapeStroke) {
           final scaled = stroke.scaled(scale, pivot);
           final idx = page.strokes.indexOf(stroke);
-          if (idx >= 0) page.strokes[idx] = scaled;
+          if (idx >= 0) {
+            page.strokeSpatialIndex?.remove(stroke);
+            page.strokes[idx] = scaled;
+            page.strokeSpatialIndex?.insert(scaled);
+          }
           selection.strokes[i] = scaled;
         } else {
           stroke.scale(scale, pivot);
@@ -4460,8 +5227,12 @@ class EditorState extends State<Editor>
         preview.transformMatrix.storage,
       );
     }
-    selection.displayBounds = preview.visualBounds;
+    // Recompute from committed geometry so min-size clamps stay inside the box.
+    selection.displayBounds = null;
+    selection.displayBounds = selection.getBounds();
     _selectionPreview = null;
+    // Strokes were removed at drag start; put the transformed ones back.
+    _reattachSelectionStrokesToPage(selection);
   }
 
   void _flushSelectionPageUpdates() {
@@ -4492,7 +5263,6 @@ class EditorState extends State<Editor>
     final images = select.selectResult.images;
 
     setState(() {
-
       for (final stroke in strokes) {
         moveStrokeToPage(stroke, oldPage, newPage);
       }
@@ -4508,11 +5278,16 @@ class EditorState extends State<Editor>
   }
 
   void onInteractionEnd(ScaleEndDetails details) {
-
+    _canvasGestureActive = false;
     _lastSeenPointerCountTimer?.cancel();
     _lastSeenPointerCountTimer = Timer(const Duration(milliseconds: 10), () {
       lastSeenPointerCount = 0;
     });
+  }
+
+  double get _quantizedCanvasScale {
+    final scale = _transformationController.value.approxScale;
+    return (scale * 20).roundToDouble() / 20;
   }
 
   void updatePointerData(
@@ -4534,18 +5309,24 @@ class EditorState extends State<Editor>
   }
 
   void onStylusButtonChanged(bool buttonPressed) {
-
-    stylusButtonPressed = stylusButtonPressed || buttonPressed;
+    stylusButtonPressed = buttonPressed;
 
     if (!stows.eraserOnStylusButtonPressAndRelease.value) return;
 
     if (buttonPressed) {
+      _finishActivePenStrokeFromPointerEnd(
+        PointerCancelEvent(timeStamp: currentTimestamp),
+      );
       if (currentTool is Eraser) return;
       tmpTool = currentTool;
       currentTool = Eraser.currentEraser;
       setState(() {});
     } else {
       if (tmpTool != null && currentTool is Eraser) {
+        if (dragPageIndex != null) {
+          // Defer switching back to Pen until onDrawEnd
+          return;
+        }
         currentTool = tmpTool!;
         tmpTool = null;
         setState(() {});
@@ -4569,6 +5350,7 @@ class EditorState extends State<Editor>
       ),
     );
 
+    _pageRasterCache.invalidateInk(image.pageIndex);
     setState(() {});
     autosaveAfterDelay();
   }
@@ -4603,6 +5385,9 @@ class EditorState extends State<Editor>
         event: event,
       );
       createPage(pageIndex);
+      if (pageIndex >= 0 && pageIndex < coreInfo.pages.length) {
+        coreInfo.pages[pageIndex].markSaveBinaryDirty();
+      }
       if (coreInfo.isInfinite &&
           pageIndex >= 0 &&
           pageIndex < coreInfo.pages.length) {
@@ -4628,6 +5413,9 @@ class EditorState extends State<Editor>
     required int pageIndex,
     required flutter_quill.DocChange event,
   }) {
+    if (_isUndoRedoInProgress) return;
+    if (currentTool != Tool.textEditing) return;
+
     final eventWasUndo = quill.controller.hasRedo;
     if (eventWasUndo) return;
 
@@ -4657,8 +5445,8 @@ class EditorState extends State<Editor>
 
     void startTimer([int? delayMs]) {
       _delayedSaveTimer?.cancel();
-      if (stows.autosaveDelay.value < 0) return;
-      final ms = delayMs ?? stows.autosaveDelay.value;
+      final configuredDelay = stows.autosaveDelay.value;
+      final ms = delayMs ?? (configuredDelay < 0 ? 300 : configuredDelay);
       _delayedSaveTimer = Timer(Duration(milliseconds: ms), callback);
     }
 
@@ -4671,13 +5459,19 @@ class EditorState extends State<Editor>
       final last = _lastUserActivityForAutosave;
       if (last != null) {
         final elapsed = DateTime.now().difference(last).inMilliseconds;
-        if (elapsed < _autosaveMinIdleMs) {
-          startTimer(_autosaveMinIdleMs - elapsed);
+        final idleMs = _autosaveIdleMs;
+        if (elapsed < idleMs) {
+          startTimer(idleMs - elapsed);
           return;
         }
       }
       saveToFile(updateThumbnail: false);
     };
+
+    if (savingState.value == SavingState.saving) {
+      _saveFollowUpRequested = true;
+      return;
+    }
 
     if (savingState.value == SavingState.saved) {
       _lastSaveTime = DateTime.now();
@@ -4689,6 +5483,7 @@ class EditorState extends State<Editor>
 
   void cancelAutosaveAndMarkSaved() {
     _delayedSaveTimer?.cancel();
+    _saveFollowUpRequested = false;
     savingState.value = SavingState.saved;
   }
 
@@ -4697,7 +5492,6 @@ class EditorState extends State<Editor>
     bool updateThumbnail = true,
     bool awaitVaultCommit = false,
   }) async {
-
     if (_isDeleted) return;
 
     // CRITICAL: Check if disposed before proceeding
@@ -4727,9 +5521,8 @@ class EditorState extends State<Editor>
           thumbnailExists = thumbnailFile.existsSync();
         } catch (_) {}
 
-        if (currentFirstPageHash != coreInfo.firstPageHash ||
+        if (currentFirstPageHash != _lastWrittenThumbnailHash ||
             !thumbnailExists) {
-
           final isCanvasMounted =
               coreInfo.pages[0].innerCanvasKey.currentState != null;
 
@@ -4737,7 +5530,6 @@ class EditorState extends State<Editor>
               mediaQueryToUse != null &&
               isCanvasMounted) {
             needsThumbnail = true;
-            coreInfo.firstPageHash = currentFirstPageHash;
           } else if (!isCanvasMounted) {
             log.fine('Skipping thumbnail: Canvas not mounted yet.');
           }
@@ -4747,45 +5539,47 @@ class EditorState extends State<Editor>
       }
     }
     if (needsThumbnail) {
-
       final hasBgImage =
           coreInfo.pages.isNotEmpty &&
           coreInfo.pages.first.backgroundImage != null;
       if (!hasBgImage) {
-
         preCapturedThumbnailBytes = await _captureThumbnailBytesFromFirstPage();
       }
     }
 
     final bool hasEdits = savingState.value != SavingState.saved;
 
-    switch (savingState.value) {
-      case SavingState.saved:
-        if (!force) return;
-        break;
-      case SavingState.saving:
+    while (true) {
+      if (savingState.value == SavingState.saving) {
         if (!force) {
-          log.warning(
-            'saveToFile() called while already saving (force=false, returning)',
-          );
+          _saveFollowUpRequested = true;
+          log.fine('saveToFile: coalesced behind in-flight save');
           return;
         }
-
-        log.info(
-          'saveToFile() called while already saving (force=true, awaiting existing)',
-        );
         final existing = _pendingSaveFuture;
         if (existing != null) {
-          if (awaitVaultCommit) {
-            await existing;
-          }
-          return existing;
+          log.info('saveToFile: awaiting in-flight save before forced flush');
+          await existing;
+        } else {
+          log.warning(
+            'saveToFile: state was saving without _pendingSaveFuture; resetting',
+          );
+          savingState.value = SavingState.waitingToSave;
         }
-        break;
-      case SavingState.waitingToSave:
+        if (_isDisposed || _isDeleted) return;
+        continue;
+      }
+
+      if (savingState.value == SavingState.saved && !force) {
+        return;
+      }
+
+      if (savingState.value == SavingState.waitingToSave) {
         _delayedSaveTimer?.cancel();
-        savingState.value = SavingState.saving;
-        break;
+      }
+
+      savingState.value = SavingState.saving;
+      break;
     }
 
     final future = _runBackgroundSave(
@@ -4794,14 +5588,27 @@ class EditorState extends State<Editor>
       preCapturedThumbnailBytes: preCapturedThumbnailBytes,
       themeToUse: themeToUse,
       mediaQueryToUse: mediaQueryToUse,
-      awaitVaultCommit: awaitVaultCommit,
       hasEdits: hasEdits,
+      awaitVaultCommit: awaitVaultCommit,
     );
     _pendingSaveFuture = future;
     _pendingSavesByPath[coreInfo.filePath] = future;
     future.whenComplete(() {
       _pendingSaveFuture = null;
       _pendingSavesByPath.remove(coreInfo.filePath);
+      if (_saveFollowUpRequested &&
+          !_isDisposed &&
+          !_isDeleted &&
+          !coreInfo.readOnly) {
+        _saveFollowUpRequested = false;
+        savingState.value = SavingState.waitingToSave;
+        unawaited(
+          saveToFile(
+            force: false,
+            updateThumbnail: stows.thumbnailOnAutosave.value,
+          ),
+        );
+      }
     });
     if (awaitVaultCommit) {
       await future;
@@ -4811,6 +5618,7 @@ class EditorState extends State<Editor>
   }
 
   static const int _autosaveMinIdleMs = 2000;
+  int get _autosaveIdleMs => _autosaveMinIdleMs;
 
   Future<void> _runBackgroundSave({
     required bool needsThumbnail,
@@ -4818,15 +5626,24 @@ class EditorState extends State<Editor>
     Uint8List? preCapturedThumbnailBytes,
     ThemeData? themeToUse,
     MediaQueryData? mediaQueryToUse,
-    bool awaitVaultCommit = false,
     bool hasEdits = false,
+    bool awaitVaultCommit = false,
   }) async {
     VaultAdapter.preventLock = true;
+    final saveEpoch = notePathEpoch(coreInfo.filePath);
+    final saveNoteId = coreInfo.noteId;
     try {
+      await _flushRecoveryWrites();
       await _renameFileNow();
       if (_isDisposed) {
         log.warning(
           '_runBackgroundSave aborted - editor disposed during rename',
+        );
+        return;
+      }
+      if (_isDeleted || notePathEpoch(coreInfo.filePath) != saveEpoch) {
+        log.warning(
+          '_runBackgroundSave aborted - note deleted or path invalidated',
         );
         return;
       }
@@ -4837,16 +5654,11 @@ class EditorState extends State<Editor>
       final currentPageIndex = this.currentPageIndex;
       Uint8List? bson;
 
-      bool effectiveAwaitCommit = awaitVaultCommit;
-      if (!effectiveAwaitCommit && stows.localEncryptionEnabled.value) {
-        try {
-          final noteExists = await FileManager.doesFileExist(filePath);
-          if (!noteExists) effectiveAwaitCommit = true;
-        } catch (e) {
-
-          effectiveAwaitCommit = true;
-        }
-      }
+      /// Wait for ciphertext on disk before marking saved. All encrypt/zlib work
+      /// runs off the UI isolate / native IO pool — this await must not do CPU
+      /// on the root isolate. Index commits stay debounced unless forced.
+      const awaitPersist = true;
+      final awaitDbCommit = awaitVaultCommit;
 
       try {
         final now = DateTime.now();
@@ -4887,10 +5699,15 @@ class EditorState extends State<Editor>
         final fullPath = FileManager.fixFileNameDelimiters(
           FileManager.getFilePath(filePath),
         );
-        await coreInfo.assetCacheAll.renumberBeforeSave(
+        final didLayoutTouch = await coreInfo.assetCacheAll.renumberBeforeSave(
           fullPath,
-          awaitWrite: effectiveAwaitCommit,
+          awaitWrite: awaitPersist,
+          awaitDbCommit: awaitDbCommit,
+          hasLazyPages: coreInfo.hasUnhydratedLazyPages,
         );
+        if (didLayoutTouch) {
+          coreInfo.invalidatePageBinaryEncodeCaches();
+        }
         if (_isDisposed) {
           coreInfo.assetCacheAll.allowRemovingAssets = true;
           return;
@@ -4921,7 +5738,7 @@ class EditorState extends State<Editor>
           lastToolId: stows.lastTool.value,
           lastPenTypeId: stows.lastPenType.value,
         );
-        bson = coreInfo.saveToBinary(
+        bson = await coreInfo.saveToBinaryAsync(
           currentPageIndex: currentPageIndex,
           precomputedHash: currentFirstPageHash,
         );
@@ -4931,19 +5748,41 @@ class EditorState extends State<Editor>
         }
         await Future.delayed(Duration.zero);
 
+        if (_isDeleted ||
+            notePathEpoch(coreInfo.filePath) != saveEpoch ||
+            coreInfo.noteId != saveNoteId) {
+          log.warning(
+            '[Editor.saveToFile] Aborting write; note deleted or superseded: $filePath',
+          );
+          coreInfo.assetCacheAll.allowRemovingAssets = true;
+          return;
+        }
+
         log.info(
           '[Editor.saveToFile] Writing ${bson.length} bytes to: $filePath',
         );
         try {
-
           await FileManager.writeFile(
             filePath,
             bson,
-            awaitWrite: effectiveAwaitCommit,
+            awaitWrite: awaitPersist,
+            awaitDbCommit: awaitDbCommit,
           );
           log.info(
             '[Editor.saveToFile] FileManager.writeFile completed for: $filePath',
           );
+          if (_isDeleted ||
+              notePathEpoch(coreInfo.filePath) != saveEpoch ||
+              coreInfo.noteId != saveNoteId) {
+            log.warning(
+              '[Editor.saveToFile] Save raced with delete; removing resurrected file: $filePath',
+            );
+            try {
+              await FileManager.deleteFile(filePath);
+            } catch (_) {}
+            coreInfo.assetCacheAll.allowRemovingAssets = true;
+            return;
+          }
           if (_isDisposed) return;
           try {
             unawaited(
@@ -4976,9 +5815,15 @@ class EditorState extends State<Editor>
         }
         final numAssetsToKeep = maxAssetId >= 0 ? maxAssetId + 1 : 0;
         if (numAssetsToKeep > 0 || (maxAssetId < 0 && assetFiles.isEmpty)) {
-          FileManager.removeUnusedAssets(filePath, numAssets: numAssetsToKeep);
+          await FileManager.removeUnusedAssets(
+            filePath,
+            numAssets: numAssetsToKeep,
+          );
         }
 
+        if (!_saveFollowUpRequested) {
+          await _recoveryJournal?.clear();
+        }
         savingState.value = SavingState.saved;
       } catch (e, stack) {
         log.severe('Failed to save file: $e', e, stack);
@@ -4993,13 +5838,13 @@ class EditorState extends State<Editor>
               coreInfo.pages.isNotEmpty &&
               coreInfo.pages.first.backgroundImage != null;
           if (hasBgImage) {
-
             await FileManager.generateThumbnailForNote(
               coreInfo: coreInfo,
               theme: themeToUse,
               mediaQuery: mediaQueryToUse,
               path: thumbnailPath,
             );
+            _markThumbnailWritten(currentFirstPageHash);
           } else if (preCapturedThumbnailBytes != null &&
               preCapturedThumbnailBytes.isNotEmpty) {
             await FileManager.writeFile(
@@ -5010,6 +5855,7 @@ class EditorState extends State<Editor>
             log.info(
               'Thumbnail saved from pre-captured frame: ${preCapturedThumbnailBytes.length} bytes',
             );
+            _markThumbnailWritten(currentFirstPageHash);
           } else {
             final saved = await _generateAndSaveThumbnail(
               theme: themeToUse,
@@ -5024,6 +5870,7 @@ class EditorState extends State<Editor>
                 path: thumbnailPath,
               );
             }
+            _markThumbnailWritten(currentFirstPageHash);
           }
         } catch (e) {
           log.warning('Thumbnail generation failed: $e');
@@ -5067,7 +5914,6 @@ class EditorState extends State<Editor>
       final newExtPath = newName + Editor.extension;
       final exists = await FileManager.doesFileExist(extPath);
       if (!exists) {
-
         final idx = coreInfo.filePath.lastIndexOf('/');
         final dir = idx >= 0 ? coreInfo.filePath.substring(0, idx + 1) : '';
         coreInfo.filePath = dir + newName;
@@ -5084,7 +5930,6 @@ class EditorState extends State<Editor>
 
     final actualName = coreInfo.fileName;
     if (actualName != newName) {
-
       filenameTextEditingController.value = filenameTextEditingController.value
           .copyWith(
             text: actualName,
@@ -5101,6 +5946,115 @@ class EditorState extends State<Editor>
     if (newName.isEmpty) return t.home.renameNote.noteNameEmpty;
     if (newName.contains('/')) return t.home.renameNote.noteNameContainsSlash;
     return null;
+  }
+
+  Tool _resolveToolForPenSizePresetFallback() {
+    Tool? pick(Tool? candidate) {
+      if (candidate != null && toolSupportsPenSizePresets(candidate)) {
+        return candidate;
+      }
+      return null;
+    }
+
+    return pick(_lastPenTool) ??
+        pick(Pen.currentPen) ??
+        pick(Highlighter.currentHighlighter) ??
+        pick(LaserPointer.currentLaserPointer) ??
+        pick(ShapeTool.currentShapeTool) ??
+        pick(_toolFromLastTool()) ??
+        Pen.ballpointPen();
+  }
+
+  /// Writes pen/highlighter stroke options touched by presets into [stows].
+  /// Deferred from [_applyPenPresetStrokeWidth] so preset taps repaint before
+  /// pref serialization / listener churn blocks the UI isolate.
+  void _persistStrokeToolPrefsAfterPresetTap() {
+    final t = currentTool;
+    if (t is Highlighter) {
+      stows.lastHighlighterOptions.value = t.options;
+      return;
+    }
+    if (t is Pen) {
+      final pen = t;
+      switch (pen.toolId) {
+        case ToolId.fountainPen:
+          stows.lastFountainPenOptions.value = pen.options;
+          break;
+        case ToolId.ballpointPen:
+          stows.lastBallpointPenOptions.value = pen.options;
+          break;
+          break;
+        case ToolId.calligraphyPen:
+          stows.lastCalligraphyPenOptions.value = pen.options;
+          break;
+        case ToolId.advancedPen:
+        case ToolId.experimentalPen:
+          stows.lastAdvancedPenOptions.value = pen.options;
+          break;
+        case ToolId.advancedPencil:
+          stows.lastAdvancedPencilOptions.value = pen.options;
+          stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
+            pen.paint.toJson(embedBytes: false),
+          );
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  /// Applies preset stroke width to the active tool immediately (in-memory).
+  /// Pen/highlighter option prefs are flushed after this frame via
+  /// [_persistStrokeToolPrefsAfterPresetTap] so UI can repaint before pref I/O.
+  /// Laser width updates [stows] synchronously because [LaserPointer.size] reads prefs.
+  void _applyPenPresetStrokeWidth(double rawSize) {
+    if (!toolSupportsPenSizePresets(currentTool)) {
+      final next = _resolveToolForPenSizePresetFallback();
+      setState(() {
+        currentTool = next;
+        if (next is Highlighter) {
+          Highlighter.currentHighlighter = next;
+        } else if (next is Pen) {
+          Pen.currentPen = next;
+        }
+      });
+    }
+
+    final t = currentTool;
+    if (t is Highlighter) {
+      final h = t;
+      final v = rawSize.clamp(h.sizeMin, h.sizeMax);
+      h.options = h.options.copyWith(size: v);
+    } else if (t is Pen) {
+      final pen = t;
+      final v = rawSize.clamp(pen.sizeMin, pen.sizeMax);
+      pen.options = pen.options.copyWith(size: v);
+    } else if (t is ShapeTool) {
+      final st = ShapeTool.currentShapeTool;
+      final v = rawSize.clamp(1.0, 20.0);
+      st.config = st.config.copyWith(strokeWidth: v);
+    } else if (t.toolId == ToolId.laserPointer) {
+      // [LaserPointer.size] reads from stows — keep this write synchronous.
+      stows.laserPointerSize.value = rawSize.clamp(4.0, LaserPointer.maxSize);
+    }
+
+    _bumpInteractionRepaint();
+
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _persistStrokeToolPrefsAfterPresetTap();
+      autosaveAfterDelay();
+    });
+  }
+
+  /// Persist live tool/color prefs into this note only (never upserts ink presets).
+  void _captureNoteToolSettingsLocally() {
+    if (!mounted || coreInfo.readOnly) return;
+    coreInfo.noteToolSettings = captureNoteToolSettings(
+      lastToolId: stows.lastTool.value,
+      lastPenTypeId: stows.lastPenType.value,
+    );
+    autosaveAfterDelay();
   }
 
   void updateColorBar(Color color) {
@@ -5125,16 +6079,13 @@ class EditorState extends State<Editor>
     }
 
     if (stows.pinnedColors.value.contains(newColorString)) {
-
     } else if (stows.recentColorsPositioned.value.contains(newColorString)) {
-
       stows.recentColorsChronological.value.remove(newColorString);
       stows.recentColorsChronological.value.add(newColorString);
       stows.recentColorsChronological.notifyListeners();
     } else {
       if (stows.recentColorsPositioned.value.length >=
           stows.recentColorsLength.value) {
-
         final removedColorString = stows.recentColorsChronological.value
             .removeAt(0);
         stows.recentColorsChronological.value.add(newColorString);
@@ -5143,7 +6094,6 @@ class EditorState extends State<Editor>
         stows.recentColorsPositioned.value[removedColorPosition] =
             newColorString;
       } else {
-
         stows.recentColorsChronological.value.add(newColorString);
         stows.recentColorsPositioned.value.insert(0, newColorString);
       }
@@ -5231,15 +6181,12 @@ class EditorState extends State<Editor>
           newImages.add(image);
           log.info('[$importId] SVG criado com sucesso (id: ${image.id})');
         } else {
-
           log.info('[$importId] Tipo BITMAP detectado');
 
           final now = DateTime.now();
           final r = math.Random();
           final randomId1 = r.nextInt(1 << 32);
-          final randomId2 = r.nextInt(
-            1 << 32,
-          );
+          final randomId2 = r.nextInt(1 << 32);
           final String uniqueName =
               'img_${now.microsecondsSinceEpoch}_${randomId1}_${randomId2}${info.extension}';
           log.info(
@@ -5394,7 +6341,6 @@ class EditorState extends State<Editor>
       );
 
       setState(() {
-
         final selectionBounds = newImages
             .map((i) => i.dstRect)
             .reduce((a, b) => a.expandToInclude(b));
@@ -5438,228 +6384,6 @@ class EditorState extends State<Editor>
     return successCount;
   }
 
-  Future<void> _plotFunction() async {
-    if (coreInfo.readOnly) return;
-
-    if (!mounted) return;
-
-    await showDialog(
-      context: context,
-      builder: (context) => FunctionPlotterDialog(
-        onPlotGenerated: (imageBytes) async {
-
-          await _insertImageBytes(imageBytes, extension: '.png');
-        },
-      ),
-    );
-  }
-
-  Future<void> _plotSurface() async {
-    if (coreInfo.readOnly) return;
-    final funcCtrl = TextEditingController(text: 'sin(x)*cos(y)');
-    final xMinCtrl = TextEditingController(text: '-5');
-    final xMaxCtrl = TextEditingController(text: '5');
-    final yMinCtrl = TextEditingController(text: '-5');
-    final yMaxCtrl = TextEditingController(text: '5');
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.4),
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-          child: Container(
-            width: 500,
-            constraints: const BoxConstraints(maxHeight: 600),
-            padding: const EdgeInsets.all(32),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surface.withOpacity(0.65),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: Colors.grey.withOpacity(0.3),
-                width: 1.5,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 40,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    t.editor.plot3dSurface,
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 24),
-                  TextField(
-                    controller: funcCtrl,
-                    decoration: InputDecoration(
-                      labelText: 'z = f(x,y)',
-                      hintText: 'sin(x)*cos(y)',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      filled: true,
-                      fillColor: Colors.grey.withOpacity(0.1),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: xMinCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'x min',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                            signed: true,
-                            decimal: true,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: TextField(
-                          controller: xMaxCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'x max',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                            signed: true,
-                            decimal: true,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: yMinCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'y min',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                            signed: true,
-                            decimal: true,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: TextField(
-                          controller: yMaxCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'y max',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                            signed: true,
-                            decimal: true,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 32),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 16,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        onPressed: () => Navigator.of(context).pop(false),
-                        child: Text(
-                          MaterialLocalizations.of(context).cancelButtonLabel,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 16,
-                          ),
-                          backgroundColor: Colors.grey.shade800,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          elevation: 0,
-                        ),
-                        onPressed: () => Navigator.of(context).pop(true),
-                        child: Text(
-                          MaterialLocalizations.of(context).okButtonLabel,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
-    if (confirmed != true) return;
-
-    final xMin = double.tryParse(xMinCtrl.text) ?? -5;
-    final xMax = double.tryParse(xMaxCtrl.text) ?? 5;
-    final yMin = double.tryParse(yMinCtrl.text) ?? -5;
-    final yMax = double.tryParse(yMaxCtrl.text) ?? 5;
-
-    final imageBytes = await FunctionPlotter.plotSurface(
-      function: funcCtrl.text.trim(),
-      xMin: xMin,
-      xMax: xMax,
-      yMin: yMin,
-      yMax: yMax,
-    );
-    if (imageBytes == null) return;
-    await _insertImageBytes(imageBytes, extension: '.png');
-  }
-
   void _showCalculator({
     PlotAnimationMetadata? visualizerMetadata,
     bool readOnlyVisualizer = false,
@@ -5683,6 +6407,12 @@ class EditorState extends State<Editor>
             },
             visualizerMetadata: visualizerMetadata,
             readOnlyVisualizer: readOnlyVisualizer,
+            initialWorkspaceMetadata: coreInfo.floatingCalculatorMetadata,
+            onWorkspaceMetadataChanged: (metadata) {
+              if (coreInfo.floatingCalculatorMetadata == metadata) return;
+              coreInfo.floatingCalculatorMetadata = metadata;
+              autosaveAfterDelay();
+            },
 
             menuOverlayContext: overlayEntryContext,
 
@@ -5699,7 +6429,6 @@ class EditorState extends State<Editor>
                     invertible: invertible,
                   );
                 },
-
           ),
         ),
       ),
@@ -5710,6 +6439,158 @@ class EditorState extends State<Editor>
   void _hideCalculator() {
     _calculatorOverlay?.remove();
     _calculatorOverlay = null;
+  }
+
+  void _toggleRegionScreenshotMode() {
+    setState(() {
+      _regionScreenshotMode = !_regionScreenshotMode;
+    });
+  }
+
+  void _cancelRegionScreenshotMode() {
+    if (!_regionScreenshotMode) return;
+    setState(() => _regionScreenshotMode = false);
+  }
+
+  Future<void> _captureRegionScreenshot(Rect localRect) async {
+    if (!mounted) return;
+    setState(() => _regionScreenshotMode = false);
+
+    // Let the overlay leave the tree before reading pixels (not required for
+    // correctness since it sits outside the RepaintBoundary, but avoids races).
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    final boundary =
+        _regionScreenshotBoundaryKey.currentContext?.findRenderObject()
+            as RenderRepaintBoundary?;
+    if (boundary == null || !boundary.hasSize) {
+      _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotFailed);
+      return;
+    }
+
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
+    late final ui.Image fullImage;
+    try {
+      fullImage = await boundary.toImage(pixelRatio: pixelRatio);
+    } catch (e, st) {
+      log.warning('Region screenshot capture failed: $e', e, st);
+      _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotFailed);
+      return;
+    }
+
+    final left = (localRect.left * pixelRatio).floor().clamp(
+      0,
+      fullImage.width,
+    );
+    final top = (localRect.top * pixelRatio).floor().clamp(0, fullImage.height);
+    final right = (localRect.right * pixelRatio).ceil().clamp(
+      left + 1,
+      fullImage.width,
+    );
+    final bottom = (localRect.bottom * pixelRatio).ceil().clamp(
+      top + 1,
+      fullImage.height,
+    );
+    final cropW = right - left;
+    final cropH = bottom - top;
+    if (cropW < 2 || cropH < 2) {
+      fullImage.dispose();
+      _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotTooSmall);
+      return;
+    }
+
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      fullImage,
+      Rect.fromLTWH(
+        left.toDouble(),
+        top.toDouble(),
+        cropW.toDouble(),
+        cropH.toDouble(),
+      ),
+      Rect.fromLTWH(0, 0, cropW.toDouble(), cropH.toDouble()),
+      ui.Paint(),
+    );
+    fullImage.dispose();
+
+    final cropped = await recorder.endRecording().toImage(cropW, cropH);
+    final byteData = await cropped.toByteData(format: ui.ImageByteFormat.png);
+    cropped.dispose();
+    if (byteData == null) {
+      _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotFailed);
+      return;
+    }
+    final pngBytes = byteData.buffer.asUint8List();
+    if (!mounted) return;
+    await _promptRegionScreenshotAction(pngBytes);
+  }
+
+  void _showRegionScreenshotMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  Future<void> _promptRegionScreenshotAction(Uint8List pngBytes) async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AdaptiveAlertDialog(
+        title: Text(t.editor.toolbar.regionScreenshotTitle),
+        content: Text(t.editor.toolbar.regionScreenshotBody),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop('cancel'),
+            child: Text(MaterialLocalizations.of(ctx).cancelButtonLabel),
+          ),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop('copy'),
+            child: Text(t.editor.toolbar.regionScreenshotCopy),
+          ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop('share'),
+            child: Text(t.editor.toolbar.regionScreenshotShare),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || choice == null || choice == 'cancel') return;
+
+    if (choice == 'copy') {
+      try {
+        final clipboard = SystemClipboard.instance;
+        await clipboard?.write([DataWriterItem()..add(Formats.png(pngBytes))]);
+      } catch (e, st) {
+        log.warning('Region screenshot clipboard failed: $e', e, st);
+        _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotFailed);
+      }
+      return;
+    }
+
+    if (choice == 'share') {
+      try {
+        final tempDir = Directory.systemTemp;
+        final path =
+            '${tempDir.path}${Platform.pathSeparator}notes_region_${DateTime.now().millisecondsSinceEpoch}.png';
+        final file = File(path);
+        await file.writeAsBytes(pngBytes, flush: true);
+        if (!mounted) {
+          await FileManager.secureDelete(file);
+          return;
+        }
+        await FileManager.exportTempFile(
+          file.path,
+          'region_screenshot.png',
+          context: context,
+        );
+      } catch (e, st) {
+        log.warning('Region screenshot share failed: $e', e, st);
+        _showRegionScreenshotMessage(t.editor.toolbar.regionScreenshotFailed);
+      }
+    }
   }
 
   PlotAnimationMetadata? _plotMetadataFromImage(EditorImage image) {
@@ -5761,26 +6642,129 @@ class EditorState extends State<Editor>
     return candidates;
   }
 
-  void _openLinkedNoteInSplit(NoteLink link) {
-    if (!mounted) return;
-    final axis = widget.splitAxis ?? Axis.horizontal;
-    final primaryPath = widget.splitPrimaryPath ?? coreInfo.filePath;
+  void _notifyEmbeddedChromeChanged() {
+    widget.onEmbeddedChromeChanged?.call();
+  }
 
-    final secondaryPath = link.targetPath.isEmpty
-        ? coreInfo.filePath
-        : link.targetPath;
-    context.go(
-      RoutePaths.editSplit(
-        primaryPath,
-        secondaryPath,
-        axis: axis,
-        secondaryPageIndex: link.targetPageIndex,
+  Future<void> _navigateToNoteReplacingCurrent(
+    String path, {
+    int? pageIndex,
+    required bool pushCurrentToHistory,
+  }) async {
+    if (_noteLinkNavBusy) return;
+    final target = path.trim();
+    if (target.isEmpty) return;
+    if (target == coreInfo.filePath) {
+      if (pageIndex != null && pageIndex >= 0) {
+        _onGoToLocation(pageIndex);
+      }
+      return;
+    }
+
+    _noteLinkNavBusy = true;
+    try {
+      if (pushCurrentToHistory) {
+        final current = coreInfo.filePath;
+        if (current.isNotEmpty) {
+          _noteLinkBackStack.add(
+            _NoteLinkHistoryEntry(path: current, pageIndex: currentPageIndex),
+          );
+          _notifyEmbeddedChromeChanged();
+          if (mounted) setState(() {});
+        }
+      }
+
+      await saveToFile(force: true);
+      if (!mounted) return;
+      await _replaceLoadedNote(target, pageIndex: pageIndex);
+    } finally {
+      _noteLinkNavBusy = false;
+    }
+  }
+
+  Future<void> _popNoteLinkHistory() async {
+    if (_noteLinkBackStack.isEmpty || _noteLinkNavBusy) return;
+    final prev = _noteLinkBackStack.removeLast();
+    _notifyEmbeddedChromeChanged();
+    if (mounted) setState(() {});
+    await _navigateToNoteReplacingCurrent(
+      prev.path,
+      pageIndex: prev.pageIndex,
+      pushCurrentToHistory: false,
+    );
+  }
+
+  Future<void> _replaceLoadedNote(String path, {int? pageIndex}) async {
+    Pen.currentStroke = null;
+    try {
+      Select.currentSelect.unselect();
+    } catch (_) {}
+    history = EditorHistory();
+    _delayedSaveTimer?.cancel();
+    _delayedSaveTimer = null;
+    _renameTimer?.cancel();
+    _selectionLongPressTimer?.cancel();
+    _clearSelectionPreview();
+    _cancelPreviewJumpHistory();
+    if (_isDockedSidePanelVisible) {
+      _closeDockedSidePanel();
+    }
+
+    try {
+      await _recoveryJournal?.flush();
+    } catch (_) {}
+    _recoveryJournal = null;
+
+    _pageRasterCache.invalidateForZoom();
+    _lastPageRasterBandStart = null;
+    _lastPageRasterBandEnd = null;
+
+    final previous = coreInfo;
+    quillFocus.value = null;
+    for (final page in previous.pages) {
+      try {
+        page.quill.focusNode.removeListener(_onQuillFocusChange);
+        page.quill.changeSubscription?.cancel();
+      } catch (_) {}
+    }
+
+    coreInfo = EditorCoreInfo(filePath: path);
+    if (pageIndex != null && pageIndex >= 0) {
+      coreInfo.initialPageIndex = pageIndex;
+    }
+    filenameTextEditingController.text = coreInfo.fileName;
+    _transformationController.value = Matrix4.identity();
+    _lastCurrentPageIndex = pageIndex ?? 0;
+
+    try {
+      previous.dispose();
+    } catch (e) {
+      log.warning('Failed to dispose previous note during link nav: $e');
+    }
+
+    await _initStrokes();
+    if (!mounted) return;
+    setState(() {});
+    _notifyEmbeddedChromeChanged();
+  }
+
+  void _openLinkedNote(NoteLink link) {
+    if (!mounted) return;
+    if (link.targetPath.isEmpty) {
+      _onGoToLocation(link.targetPageIndex);
+      return;
+    }
+    unawaited(
+      _navigateToNoteReplacingCurrent(
+        link.targetPath,
+        pageIndex: link.targetPageIndex,
+        pushCurrentToHistory: true,
       ),
     );
   }
 
   void _onCanvasNoteLinkTap(NoteLink link) {
-    _openLinkedNoteInSplit(link);
+    _openLinkedNote(link);
   }
 
   Future<void> _showTagsAndLinksDialog() async {
@@ -5809,182 +6793,167 @@ class EditorState extends State<Editor>
                 builder: (context, setLocalState) => Dialog(
                   backgroundColor: Colors.transparent,
                   elevation: 0,
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                    child: Container(
-                      width: 500,
-                      padding: const EdgeInsets.all(32),
-                      decoration: BoxDecoration(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.surface.withOpacity(0.65),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: Colors.grey.withOpacity(0.3),
-                          width: 1.5,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.2),
-                            blurRadius: 40,
-                            offset: const Offset(0, 10),
-                          ),
-                        ],
-                      ),
+                  insetPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 24,
+                  ),
+                  child: RuggedDialogShell(
+                    maxWidth: 500,
+                    child: Material(
+                      color: Colors.transparent,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Text(
-                            t.editor.addInternalLink,
-                            style: Theme.of(context).textTheme.headlineSmall
-                                ?.copyWith(fontWeight: FontWeight.w600),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 24),
-                          TextField(
-                            controller: searchController,
-                            onChanged: (value) {
-                              setLocalState(() {
-                                search = value.trim().toLowerCase();
-                              });
-                            },
-                            decoration: InputDecoration(
-                              labelText: 'Search note by name or tag',
-                              prefixIcon: const Icon(Icons.search),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          t.editor.addInternalLink,
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: -0.4,
                               ),
-                              filled: true,
-                              fillColor: Colors.grey.withOpacity(0.1),
+                        ),
+                        const SizedBox(height: 24),
+                        TextField(
+                          controller: searchController,
+                          onChanged: (value) {
+                            setLocalState(() {
+                              search = value.trim().toLowerCase();
+                            });
+                          },
+                          decoration: InputDecoration(
+                            labelText: 'Search note by name or tag',
+                            prefixIcon: const Icon(Icons.search),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
+                            filled: true,
+                            fillColor: Colors.grey.withOpacity(0.1),
                           ),
-                          const SizedBox(height: 16),
-                          SizedBox(
-                            height: 180,
-                            child: Builder(
-                              builder: (context) {
-                                final filtered = candidates.where((candidate) {
-                                  if (search.isEmpty) return true;
-                                  final name = candidate.displayName
-                                      .toLowerCase();
-                                  if (name.contains(search)) return true;
-                                  return candidate.tags.any(
-                                    (tag) => tag.contains(search),
-                                  );
-                                }).toList();
-                                if (filtered.isEmpty) {
-                                  return Center(
-                                    child: Text(t.editor.noNotesMatchQuery),
-                                  );
-                                }
-                                return ListView.separated(
-                                  itemCount: filtered.length,
-                                  separatorBuilder: (_, __) =>
-                                      const SizedBox(height: 8),
-                                  itemBuilder: (context, index) {
-                                    final candidate = filtered[index];
-                                    final selected =
-                                        selectedCandidate?.path ==
-                                        candidate.path;
-                                    return ListTile(
-                                      dense: true,
-                                      selected: selected,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      selectedTileColor: Colors.grey
-                                          .withOpacity(0.2),
-                                      title: Text(
-                                        candidate.displayName,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      subtitle: candidate.tags.isEmpty
-                                          ? null
-                                          : Text(
-                                              candidate.tags.take(4).join(', '),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                      onTap: () {
-                                        setLocalState(() {
-                                          selectedCandidate = candidate;
-                                        });
-                                      },
-                                    );
-                                  },
+                        ),
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          height: 180,
+                          child: Builder(
+                            builder: (context) {
+                              final filtered = candidates.where((candidate) {
+                                if (search.isEmpty) return true;
+                                final name = candidate.displayName
+                                    .toLowerCase();
+                                if (name.contains(search)) return true;
+                                return candidate.tags.any(
+                                  (tag) => tag.contains(search),
                                 );
-                              },
-                            ),
+                              }).toList();
+                              if (filtered.isEmpty) {
+                                return Center(
+                                  child: Text(t.editor.noNotesMatchQuery),
+                                );
+                              }
+                              return ListView.separated(
+                                itemCount: filtered.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 8),
+                                itemBuilder: (context, index) {
+                                  final candidate = filtered[index];
+                                  final selected =
+                                      selectedCandidate?.path == candidate.path;
+                                  return ListTile(
+                                    dense: true,
+                                    selected: selected,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    selectedTileColor: Colors.grey.withOpacity(
+                                      0.2,
+                                    ),
+                                    title: Text(
+                                      candidate.displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle: candidate.tags.isEmpty
+                                        ? null
+                                        : Text(
+                                            candidate.tags.take(4).join(', '),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                    onTap: () {
+                                      setLocalState(() {
+                                        selectedCandidate = candidate;
+                                      });
+                                    },
+                                  );
+                                },
+                              );
+                            },
                           ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: pageController,
-                            decoration: InputDecoration(
-                              labelText: 'Page or range (e.g. 1 or 1-5)',
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              filled: true,
-                              fillColor: Colors.grey.withOpacity(0.1),
+                        ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: pageController,
+                          decoration: InputDecoration(
+                            labelText: 'Page or range (e.g. 1 or 1-5)',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
+                            filled: true,
+                            fillColor: Colors.grey.withOpacity(0.1),
                           ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: labelController,
-                            decoration: InputDecoration(
-                              labelText: 'Label (optional)',
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              filled: true,
-                              fillColor: Colors.grey.withOpacity(0.1),
+                        ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: labelController,
+                          decoration: InputDecoration(
+                            labelText: 'Label (optional)',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
+                            filled: true,
+                            fillColor: Colors.grey.withOpacity(0.1),
                           ),
-                          const SizedBox(height: 32),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              TextButton(
-                                style: TextButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 24,
-                                    vertical: 16,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
+                        ),
+                        const SizedBox(height: 32),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 16,
                                 ),
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text('Cancel'),
-                              ),
-                              const SizedBox(width: 12),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 24,
-                                    vertical: 16,
-                                  ),
-                                  backgroundColor: Colors.grey.shade800,
-                                  foregroundColor: Colors.white,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
                                 ),
-                                onPressed: selectedCandidate == null
-                                    ? null
-                                    : () => Navigator.pop(context, true),
-                                child: const Text('Add'),
                               ),
-                            ],
-                          ),
-                        ],
-                      ),
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancel'),
+                            ),
+                            const SizedBox(width: 12),
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 16,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: selectedCandidate == null
+                                  ? null
+                                  : () => Navigator.pop(context, true),
+                              child: const Text('Add'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
+              ),
               ),
             );
 
@@ -6044,10 +7013,7 @@ class EditorState extends State<Editor>
             linksForPage.add(link);
             autosaveAfterDelay();
             setStateDialog(() {});
-            if (mounted)
-              setState(
-                () {},
-              );
+            if (mounted) setState(() {});
             try {
               unawaited(
                 NoteLinksDatabase.instance.setLinksForPath(
@@ -6067,92 +7033,57 @@ class EditorState extends State<Editor>
           return Dialog(
             backgroundColor: Colors.transparent,
             elevation: 0,
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-              child: Container(
-                width: 600,
-                constraints: const BoxConstraints(maxHeight: 700),
-                padding: const EdgeInsets.all(32),
-                decoration: BoxDecoration(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.surface.withOpacity(0.65),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(
-                    color: Colors.grey.withOpacity(0.3),
-                    width: 1.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 40,
-                      offset: const Offset(0, 10),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      t.editor.tagsAndLinks,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w600),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 24),
-                    Flexible(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            TextField(
-                              controller: tagInputController,
-                              decoration: InputDecoration(
-                                labelText: 'Add tag',
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                filled: true,
-                                fillColor: Colors.grey.withOpacity(0.1),
-                                suffixIcon: IconButton(
-                                  icon: const Icon(Icons.add),
-                                  onPressed: () {
-                                    final tag = tagInputController.text
-                                        .trim()
-                                        .toLowerCase();
-                                    if (tag.isEmpty) return;
-                                    final updated = {
-                                      ...coreInfo.tags,
-                                      tag,
-                                    }.toList()..sort();
-                                    coreInfo.tags = updated;
-                                    tagInputController.clear();
-                                    TagDatabase.instance.setTagsForPath(
-                                      coreInfo.filePath,
-                                      coreInfo.tags,
-                                    );
-                                    autosaveAfterDelay();
-                                    setStateDialog(() {});
-                                  },
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                for (final tag in coreInfo.tags)
-                                  Chip(
-                                    label: Text(tag),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    onDeleted: () {
-                                      coreInfo.tags = coreInfo.tags
-                                          .where((t) => t != tag)
-                                          .toList();
+            insetPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 24,
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 620, maxHeight: 720),
+              child: DecoratedBox(
+                decoration: homeRuggedPanelDecoration(context),
+                child: Material(
+                  color: Colors.transparent,
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          t.editor.tagsAndLinks,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.4,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              TextField(
+                                controller: tagInputController,
+                                decoration: InputDecoration(
+                                  labelText: 'Add tag',
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  filled: true,
+                                  fillColor: Colors.grey.withOpacity(0.1),
+                                  suffixIcon: IconButton(
+                                    icon: const Icon(Icons.add),
+                                    onPressed: () {
+                                      final tag = tagInputController.text
+                                          .trim()
+                                          .toLowerCase();
+                                      if (tag.isEmpty) return;
+                                      final updated = {
+                                        ...coreInfo.tags,
+                                        tag,
+                                      }.toList()..sort();
+                                      coreInfo.tags = updated;
+                                      tagInputController.clear();
                                       TagDatabase.instance.setTagsForPath(
                                         coreInfo.filePath,
                                         coreInfo.tags,
@@ -6161,164 +7092,163 @@ class EditorState extends State<Editor>
                                       setStateDialog(() {});
                                     },
                                   ),
-                              ],
-                            ),
-                            const SizedBox(height: 32),
-                            Row(
-                              children: [
-                                const Expanded(
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final tag in coreInfo.tags)
+                                    Chip(
+                                      label: Text(tag),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      onDeleted: () {
+                                        coreInfo.tags = coreInfo.tags
+                                            .where((t) => t != tag)
+                                            .toList();
+                                        TagDatabase.instance.setTagsForPath(
+                                          coreInfo.filePath,
+                                          coreInfo.tags,
+                                        );
+                                        autosaveAfterDelay();
+                                        setStateDialog(() {});
+                                      },
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 32),
+                              Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'Page links',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    onPressed: addLink,
+                                    icon: const Icon(Icons.add_link),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              if (linksForPage.isEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8.0,
+                                  ),
                                   child: Text(
-                                    'Page links',
+                                    t.editor.noLinksOnPage,
                                     style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 16,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                  ),
+                                )
+                              else
+                                ...linksForPage.map(
+                                  (link) => ListTile(
+                                    dense: true,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 4,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    leading: const Icon(Icons.link),
+                                    title: Text(
+                                      link.label ??
+                                          (link.targetPath.isEmpty
+                                              ? 'Current Note'
+                                              : link.targetPath
+                                                    .split('/')
+                                                    .last),
+                                    ),
+                                    subtitle: Text(
+                                      link.isRange
+                                          ? '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (pages ${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1})'
+                                          : '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (page ${link.targetPageIndex + 1})',
+                                    ),
+                                    onTap: () {
+                                      if (link.targetPath.isEmpty) {
+                                        Navigator.pop(
+                                          context,
+                                        ); // Close the dialog
+                                        _onGoToLocation(link.targetPageIndex);
+                                      } else {
+                                        Navigator.pop(context);
+                                        _openLinkedNote(link);
+                                      }
+                                    },
+                                    trailing: IconButton(
+                                      icon: const Icon(Icons.delete_outline),
+                                      onPressed: () {
+                                        coreInfo.links = coreInfo.links
+                                            .where((item) => item != link)
+                                            .toList();
+                                        linksForPage.remove(link);
+                                        autosaveAfterDelay();
+                                        setStateDialog(() {});
+                                        if (mounted) setState(() {});
+                                        try {
+                                          unawaited(
+                                            NoteLinksDatabase.instance
+                                                .setLinksForPath(
+                                                  coreInfo.filePath,
+                                                  coreInfo.links,
+                                                  rootDirectory: FileManager
+                                                      .documentsDirectory,
+                                                ),
+                                          );
+                                        } catch (e) {
+                                          log.warning(
+                                            'Failed to update note links metadata: $e',
+                                          );
+                                        }
+                                      },
                                     ),
                                   ),
                                 ),
-                                IconButton(
-                                  onPressed: addLink,
-                                  icon: const Icon(Icons.add_link),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            if (linksForPage.isEmpty)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8.0,
-                                ),
-                                child: Text(
-                                  t.editor.noLinksOnPage,
-                                  style: TextStyle(color: Colors.grey.shade600),
-                                ),
-                              )
-                            else
-                              ...linksForPage.map(
-                                (link) => ListTile(
-                                  dense: true,
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 4,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  leading: const Icon(Icons.link),
-                                  title: Text(
-                                    link.label ??
-                                        link.targetPath.split('/').last,
-                                  ),
-                                  subtitle: Text(
-                                    link.isRange
-                                        ? '${link.targetPath} (pages ${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1})'
-                                        : '${link.targetPath} (page ${link.targetPageIndex + 1})',
-                                  ),
-                                  onTap: () => _openLinkedNoteInSplit(link),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.delete_outline),
-                                    onPressed: () {
-                                      coreInfo.links = coreInfo.links
-                                          .where((item) => item != link)
-                                          .toList();
-                                      linksForPage.remove(link);
-                                      autosaveAfterDelay();
-                                      setStateDialog(() {});
-                                      if (mounted)
-                                        setState(
-                                          () {},
-                                        );
-                                      try {
-                                        unawaited(
-                                          NoteLinksDatabase.instance
-                                              .setLinksForPath(
-                                                coreInfo.filePath,
-                                                coreInfo.links,
-                                                rootDirectory: FileManager
-                                                    .documentsDirectory,
-                                              ),
-                                        );
-                                      } catch (e) {
-                                        log.warning(
-                                          'Failed to update note links metadata: $e',
-                                        );
-                                      }
-                                    },
-                                  ),
-                                ),
-                              ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 16,
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 16,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
                             ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('Close'),
                           ),
-                          onPressed: () => Navigator.pop(context),
-                          child: const Text('Close'),
-                        ),
-                      ],
-                    ),
-                  ],
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
+          ),
           );
         },
       ),
     );
     tagInputController.dispose();
-  }
-
-  Future<void> _insertTable(int rows, int cols) async {
-    if (coreInfo.readOnly) return;
-    rows = rows.clamp(1, 50);
-    cols = cols.clamp(1, 50);
-    final cellW = 120.0;
-    final cellH = 60.0;
-    final width = (cols * cellW).toInt().clamp(200, 1600);
-    final height = (rows * cellH).toInt().clamp(200, 1600);
-
-    final recorder = ui.PictureRecorder();
-    final canvas = ui.Canvas(recorder);
-    final paint = ui.Paint()
-      ..color = const ui.Color(0xFFFFFFFF)
-      ..style = ui.PaintingStyle.fill;
-    canvas.drawRect(
-      ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
-      paint,
-    );
-
-    final border = ui.Paint()
-      ..color = const ui.Color(0xFF000000)
-      ..strokeWidth = 1
-      ..style = ui.PaintingStyle.stroke;
-
-    for (int c = 0; c <= cols; c++) {
-      final x = c * width / cols;
-      canvas.drawLine(ui.Offset(x, 0), ui.Offset(x, height.toDouble()), border);
-    }
-    for (int r = 0; r <= rows; r++) {
-      final y = r * height / rows;
-      canvas.drawLine(ui.Offset(0, y), ui.Offset(width.toDouble(), y), border);
-    }
-
-    final picture = recorder.endRecording();
-    final image = await picture.toImage(width, height);
-    final data = await image.toByteData(format: ui.ImageByteFormat.png);
-    final bytes = data?.buffer.asUint8List();
-    if (bytes == null) return;
-    await _insertImageBytes(bytes, extension: '.png');
   }
 
   Future<void> _insertImageBytes(
@@ -6334,7 +7264,6 @@ class EditorState extends State<Editor>
     log.info('[$processId] >>> INICIANDO INSERÇÃO DE BYTES <<<');
 
     try {
-
       final photoInfo = (
         bytes: rawBytes,
         extension: extension,
@@ -6457,7 +7386,7 @@ class EditorState extends State<Editor>
     if (!mounted) return false;
     if (pdfDocument.pages.isEmpty) return false;
 
-    final invert = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
+    final invert = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     final selected = await PdfPagePickerDialog.show(
       context,
       pdfDocument: pdfDocument,
@@ -6616,6 +7545,9 @@ class EditorState extends State<Editor>
         id: coreInfo.allocatePageId(),
         width: pageSize.width,
         height: pageSize.height,
+        // Prevent white edge artifacts around PDF background images
+        hasLocalBorderColor: true,
+        borderColor: Colors.transparent,
       );
 
       final pageIndex = i;
@@ -6690,7 +7622,7 @@ class EditorState extends State<Editor>
 
         if (File(path).existsSync()) {
           log.info('PDF thumbnail already exists. Skipping generation.');
-          coreInfo.firstPageHash = coreInfo.calculateFirstPageHash();
+          _markThumbnailWritten(coreInfo.calculateFirstPageHash());
           return;
         }
 
@@ -6718,17 +7650,16 @@ class EditorState extends State<Editor>
           destinationPath: path,
         );
 
-        coreInfo.firstPageHash = coreInfo.calculateFirstPageHash();
+        _markThumbnailWritten(coreInfo.calculateFirstPageHash());
       } catch (e, stackTrace) {
         log.warning('Failed to generate PDF thumbnail: $e', e, stackTrace);
       }
     });
 
-    await Future.delayed(const Duration(milliseconds: 100));
-    await saveToFile(
-      force: true,
-      updateThumbnail: false,
-      awaitVaultCommit: true,
+    unawaited(
+      saveToFile(force: true, updateThumbnail: false).catchError((e) {
+        log.warning('Background save after PDF import failed: $e');
+      }),
     );
 
     return true;
@@ -6838,7 +7769,6 @@ class EditorState extends State<Editor>
 
           for (final json in imagesJson) {
             try {
-
               final assetIndexJson = json['a'] as int?;
               if (assetIndexJson != null && inlineAssets.isNotEmpty) {
                 if (assetIndexJson < 0 ||
@@ -6863,12 +7793,10 @@ class EditorState extends State<Editor>
               pastedImages.add(img);
             } catch (e) {
               log.severe('Failed to parse pasted image: $e');
-
             }
           }
 
           if (pastedStrokes.isNotEmpty || pastedImages.isNotEmpty) {
-
             if (position != null) {
               final localPos = _safelyGetLocalPosition(pageIndex, position);
               final selectResult = SelectResult(
@@ -6905,14 +7833,12 @@ class EditorState extends State<Editor>
 
             Rect? newBounds;
             if (allItems.isNotEmpty) {
-
               double minX = double.infinity;
               double maxX = double.negativeInfinity;
               double minY = double.infinity;
               double maxY = double.negativeInfinity;
 
               for (final stroke in pastedStrokes) {
-
                 final polygon = stroke.highQualityPolygon;
                 if (polygon.isNotEmpty) {
                   for (final pt in polygon) {
@@ -7110,7 +8036,6 @@ class EditorState extends State<Editor>
     if (currentTool != Tool.textEditing) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-
           page.quill.focusNode.unfocus();
 
           SystemChannels.textInput.invokeMethod('TextInput.hide');
@@ -7177,7 +8102,10 @@ class EditorState extends State<Editor>
       if (!context.mounted) return;
       List<int> bytes = sba;
       if (mode.password != null) {
-        bytes = SbaEncryption.encrypt(Uint8List.fromList(sba), mode.password!);
+        bytes = await SbaEncryption.encryptForExport(
+          Uint8List.fromList(sba),
+          mode.password!,
+        );
       }
       await FileManager.exportFile(
         fileName,
@@ -7201,7 +8129,13 @@ class EditorState extends State<Editor>
         ).showSnackBar(SnackBar(content: Text(t.export.exportComplete)));
       }
     } else {
-      await doExport();
+      await ExportManager.exportInBackground(t.export.exportingNote, (
+        onProgress,
+      ) async {
+        onProgress(0.5, fileName);
+        await doExport();
+        onProgress(1.0, t.export.exportComplete);
+      });
     }
   }
 
@@ -7243,18 +8177,21 @@ class EditorState extends State<Editor>
 
       if (pressedImage != null && !hasSingleSameImageSelection) {
         final targetImage = pressedImage;
-        setState(() {
-          currentTool = Select.currentSelect;
-          select.selectResult = SelectResult(
-            pageIndex: pageIndex,
-            pageIndexStart: pageIndex,
-            strokes: [],
-            images: [targetImage],
-            path: Path()..addRect(targetImage.dstRect),
-            displayBounds: targetImage.dstRect,
-          );
-          select.doneSelecting = true;
-          tempSelection = true;
+        // Mutate selection without setState first so the menu can open on this
+        // frame; paint selection chrome on the next frame.
+        currentTool = Select.currentSelect;
+        select.selectResult = SelectResult(
+          pageIndex: pageIndex,
+          pageIndexStart: pageIndex,
+          strokes: [],
+          images: [targetImage],
+          path: Path()..addRect(targetImage.dstRect),
+          displayBounds: targetImage.dstRect,
+        );
+        select.doneSelecting = true;
+        tempSelection = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() {});
         });
       }
 
@@ -7285,8 +8222,15 @@ class EditorState extends State<Editor>
           menuItems.add({
             'value': 'change_color',
             'icon': Icons.palette_outlined,
-            'label': 'Change color',
+            'label': t.editor.selectionBar.changeColor,
           });
+          if (select.selectResult.strokes.any((s) => s.canConvertStrokeType)) {
+            menuItems.add({
+              'value': 'change_stroke_type',
+              'icon': Icons.gesture_rounded,
+              'label': t.editor.selectionBar.changeStrokeType,
+            });
+          }
           menuItems.add({'divider': true});
         }
 
@@ -7393,7 +8337,7 @@ class EditorState extends State<Editor>
         barrierDismissible: true,
         barrierLabel: 'Close Menu',
         barrierColor: Colors.transparent,
-        transitionDuration: const Duration(milliseconds: 300),
+        transitionDuration: CanvasContextMenuFeel.openDuration,
         pageBuilder: (context, animation, secondaryAnimation) {
           final size = MediaQuery.sizeOf(context);
 
@@ -7415,6 +8359,7 @@ class EditorState extends State<Editor>
           }
 
           final isDark = Theme.of(context).brightness == Brightness.dark;
+          final scheme = Theme.of(context).colorScheme;
 
           return Stack(
             children: [
@@ -7423,96 +8368,86 @@ class EditorState extends State<Editor>
                 top: top,
                 child: Material(
                   color: Colors.transparent,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(20),
-                    child: BackdropFilter(
-                      filter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-                      child: Container(
-                        width: 230,
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        decoration: BoxDecoration(
-                          color:
-                              (isDark ? const Color(0xFF1E1E1E) : Colors.white)
-                                  .withValues(alpha: 0.6),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: (isDark ? Colors.white : Colors.black)
-                                .withValues(alpha: 0.12),
-                            width: 1,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.15),
-                              blurRadius: 32,
-                              offset: const Offset(0, 12),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: menuItems.map((item) {
-                            if (item['divider'] == true) {
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                                child: Divider(
-                                  height: 1,
-                                  color: (isDark ? Colors.white : Colors.black)
-                                      .withValues(alpha: 0.1),
-                                ),
-                              );
-                            }
-
-                            final isDestructive = item['destructive'] == true;
-                            final isPrimary = item['primary'] == true;
-
-                            Color contentColor = Theme.of(
-                              context,
-                            ).colorScheme.onSurface;
-                            if (isDestructive)
-                              contentColor = Theme.of(
-                                context,
-                              ).colorScheme.error;
-                            else if (isPrimary)
-                              contentColor = Theme.of(
-                                context,
-                              ).colorScheme.primary;
-
-                            return InkWell(
-                              onTap: () =>
-                                  Navigator.pop(context, item['value']),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 18,
-                                  vertical: 14,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      item['icon'],
-                                      size: 22,
-                                      color: contentColor,
-                                    ),
-                                    const SizedBox(width: 14),
-                                    Text(
-                                      item['label'],
-                                      style: TextStyle(
-                                        color: contentColor,
-                                        fontWeight: isPrimary
-                                            ? FontWeight.w600
-                                            : FontWeight.w500,
-                                        fontSize: 15,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
+                  elevation: 0,
+                  child: Container(
+                    width: 230,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      // Solid surface: avoid BackdropFilter blur on open.
+                      color: isDark
+                          ? const Color(0xF02C2C2E)
+                          : scheme.surface.withValues(alpha: 0.97),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: (isDark ? Colors.white : Colors.black)
+                            .withValues(alpha: 0.10),
+                        width: 1,
                       ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.14),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: menuItems.map((item) {
+                        if (item['divider'] == true) {
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 8,
+                            ),
+                            child: Divider(
+                              height: 1,
+                              color: (isDark ? Colors.white : Colors.black)
+                                  .withValues(alpha: 0.1),
+                            ),
+                          );
+                        }
+
+                        final isDestructive = item['destructive'] == true;
+                        final isPrimary = item['primary'] == true;
+
+                        Color contentColor = scheme.onSurface;
+                        if (isDestructive)
+                          contentColor = scheme.error;
+                        else if (isPrimary)
+                          contentColor = scheme.primary;
+
+                        return InkWell(
+                          onTap: () =>
+                              Navigator.pop(context, item['value']),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 14,
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  item['icon'],
+                                  size: 22,
+                                  color: contentColor,
+                                ),
+                                const SizedBox(width: 14),
+                                Text(
+                                  item['label'],
+                                  style: TextStyle(
+                                    color: contentColor,
+                                    fontWeight: isPrimary
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }).toList(),
                     ),
                   ),
                 ),
@@ -7524,15 +8459,10 @@ class EditorState extends State<Editor>
           final flipY =
               (globalPos.dy + (menuItems.length * 48)) >
               MediaQuery.sizeOf(context).height - 16;
-          return FadeTransition(
-            opacity: animation,
-            child: ScaleTransition(
-              scale: Tween<double>(begin: 0.85, end: 1.0).animate(
-                CurvedAnimation(parent: animation, curve: Curves.easeOutBack),
-              ),
-              alignment: flipY ? Alignment.bottomLeft : Alignment.topLeft,
-              child: child,
-            ),
+          return CanvasContextMenuFeel.buildOpenTransition(
+            animation: animation,
+            alignment: flipY ? Alignment.bottomLeft : Alignment.topLeft,
+            child: child,
           );
         },
       );
@@ -7545,6 +8475,8 @@ class EditorState extends State<Editor>
 
     if (menuSelected == 'change_color') {
       await _showSelectionColorPicker();
+    } else if (menuSelected == 'change_stroke_type') {
+      await _showSelectionStrokeTypePicker();
     } else if (menuSelected == 'to_text') {
       await _exportSelectionStrokesToText();
     } else if (menuSelected == 'selection_to_latex') {
@@ -7823,6 +8755,22 @@ class EditorState extends State<Editor>
     );
   }
 
+  List<Widget> _buildNoteLinkBackActions() {
+    if (_noteLinkBackStack.isEmpty) return const [];
+    return [
+      IconButton(
+        icon: const AdaptiveIcon(
+          icon: Icons.arrow_back_rounded,
+          cupertinoIcon: CupertinoIcons.back,
+        ),
+        tooltip: _noteLinkBackStack.length == 1
+            ? 'Back to previous note'
+            : 'Back (${_noteLinkBackStack.length})',
+        onPressed: _noteLinkNavBusy ? null : () => unawaited(_popNoteLinkHistory()),
+      ),
+    ];
+  }
+
   PreferredSizeWidget _buildEditorAppBar(
     BuildContext context, {
     ValueNotifier<SavingState>? savingStateOverride,
@@ -7831,228 +8779,75 @@ class EditorState extends State<Editor>
     VoidCallback? onBackOverride,
   }) {
     final effectiveSavingState = savingStateOverride ?? savingState;
-    final effectiveTriggerSave = triggerSaveOverride ?? saveToFile;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
 
     final actions = <Widget>[
-      if (!coreInfo.isInfinite) ...[
-
-        IconButton(
-          icon: const AdaptiveIcon(
-            icon: Icons.arrow_circle_up_outlined,
-            cupertinoIcon: CupertinoIcons.arrow_up_circle,
-          ),
-          tooltip: "Insert page above",
-          onPressed: () => setState(() {
-            final currentPageIndex = this.currentPageIndex;
-            insertPageBefore(currentPageIndex);
-            final screenWidth = _currentViewportWidth();
-            CanvasGestureDetector.scrollToPage(
-              pageIndex: currentPageIndex,
-              pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-              transformationController: _transformationController,
-            );
-          }),
-        ),
-
-        IconButton(
-          icon: const AdaptiveIcon(
-            icon: Icons.arrow_circle_down_outlined,
-            cupertinoIcon: CupertinoIcons.arrow_down_circle,
-          ),
-          tooltip: t.editor.menu.insertPage,
-          onPressed: () => setState(() {
-            final currentPageIndex = this.currentPageIndex;
-            insertPageAfter(currentPageIndex);
-            final screenWidth = _currentViewportWidth();
-            CanvasGestureDetector.scrollToPage(
-              pageIndex: currentPageIndex + 1,
-              pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-              transformationController: _transformationController,
-            );
-          }),
-        ),
-
-        IconButton(
-          icon: const AdaptiveIcon(
-            icon: Icons.keyboard_double_arrow_left_rounded,
-            cupertinoIcon: CupertinoIcons.chevron_left_2,
-          ),
-          tooltip: "First Page",
-          onPressed: () {
-            final screenWidth = _currentViewportWidth();
-            CanvasGestureDetector.scrollToPage(
-              pageIndex: 0,
-              pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-              transformationController: _transformationController,
-            );
-          },
-        ),
-
-        ValueListenableBuilder(
-          valueListenable: _transformationController,
-          builder: (context, _, __) {
-
-            final int currentIdx = currentPageIndex;
-            final int totalPages = coreInfo.pages.length;
-
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  width: 40,
-                  child: TextField(
-
-                    key: ValueKey(currentIdx),
-                    controller: TextEditingController(
-                      text: "${currentIdx + 1}",
-                    ),
-                    keyboardType: TextInputType.number,
-                    textAlign: TextAlign.center,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: InputBorder.none,
-                      focusedBorder: InputBorder.none,
-                      enabledBorder: InputBorder.none,
-                      errorBorder: InputBorder.none,
-                      disabledBorder: InputBorder.none,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurface,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    onSubmitted: (value) {
-                      final int? targetPage = int.tryParse(value);
-                      if (targetPage != null) {
-
-                        final int pageIndex = (targetPage - 1).clamp(
-                          0,
-                          totalPages - 1,
-                        );
-
-                        FocusManager.instance.primaryFocus?.unfocus();
-
-                        final screenWidth = _currentViewportWidth();
-                        CanvasGestureDetector.scrollToPage(
-                          pageIndex: pageIndex,
-                          pageOffsets: _generatePageOffsets(
-                            coreInfo.pages,
-                            screenWidth,
-                          ),
-                          transformationController: _transformationController,
-                        );
-                      }
-                    },
-                  ),
-                ),
-                Text(
-                  "/ $totalPages",
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-
-        IconButton(
-          icon: const AdaptiveIcon(
-            icon: Icons.keyboard_double_arrow_right_rounded,
-            cupertinoIcon: CupertinoIcons.chevron_right_2,
-          ),
-          tooltip: "Last Page",
-          onPressed: () {
-            final screenWidth = _currentViewportWidth();
-            CanvasGestureDetector.scrollToPage(
-              pageIndex: coreInfo.pages.length - 1,
-              pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-              transformationController: _transformationController,
-            );
-          },
-        ),
-      ],
-
-      if (!coreInfo.isInfinite &&
-          coreInfo.pdfOutlines != null &&
-          coreInfo.pdfOutlines!.isNotEmpty)
-        PdfOutlineNavigator(
-          outlines: coreInfo.pdfOutlines!,
-          onPageSelected: (int pageIndex) {
-            final screenWidth = _currentViewportWidth();
-            CanvasGestureDetector.scrollToPage(
-              pageIndex: pageIndex,
-              pageOffsets: _generatePageOffsets(coreInfo.pages, screenWidth),
-              transformationController: _transformationController,
-            );
-          },
-        ),
-
+      ..._buildNoteLinkBackActions(),
+      
       if (!coreInfo.isInfinite)
-        IconButton(
-          icon: const AdaptiveIcon(
-            icon: Icons.grid_view_rounded,
-            cupertinoIcon: CupertinoIcons.square_grid_2x2,
-          ),
-          tooltip: t.editor.pages,
-          onPressed: () {
-            final idx = currentPageIndex;
-            _showResponsiveSidePanel(
-              SafeArea(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              t.editor.pages,
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () => Navigator.pop(context),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Divider(
-                      height: 1,
-                      thickness: 2,
-                      color: Theme.of(context).dividerColor,
-                    ),
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          border: Border(
-                            top: BorderSide(
-                              color: Theme.of(context).dividerColor,
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                        child: pageManager(context, pageIndexAtOpen: idx),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.add_outlined),
+          tooltip: "Insert page",
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          offset: const Offset(0, 48),
+          onSelected: (value) {
+            final currentIdx = currentPageIndex;
+            if (value == 'above') {
+              insertPageBefore(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx,
+                pageOffsets: _generatePageOffsets(coreInfo.pages, _currentViewportWidth()),
+                transformationController: _transformationController,
+              );
+            } else if (value == 'below') {
+              insertPageAfter(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx + 1,
+                pageOffsets: _generatePageOffsets(coreInfo.pages, _currentViewportWidth()),
+                transformationController: _transformationController,
+              );
+            }
           },
+          itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+            PopupMenuItem<String>(
+              value: 'above',
+              child: Row(
+                children: [
+                  Icon(CupertinoIcons.arrow_up_circle, color: colorScheme.onSurface),
+                  const SizedBox(width: 12),
+                  const Text('Page above'),
+                ],
+              ),
+            ),
+            PopupMenuItem<String>(
+              value: 'below',
+              child: Row(
+                children: [
+                  Icon(CupertinoIcons.arrow_down_circle, color: colorScheme.onSurface),
+                  const SizedBox(width: 12),
+                  const Text('Page below'),
+                ],
+              ),
+            ),
+          ],
+        ),
+
+      // Botão Pages na AppBar visível APENAS no modo Split View (embedded == true)
+      if (!coreInfo.isInfinite && widget.embedded)
+        IconButton(
+          icon: const Icon(Icons.article_outlined), 
+          tooltip: 'Pages',
+          isSelected: _dockedSidePanel == _EditorDockedSidePanel.pages,
+          onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
         ),
 
       IconButton(
-        icon: const AdaptiveIcon(
-          icon: Icons.more_vert_rounded,
-          cupertinoIcon: CupertinoIcons.ellipsis_vertical,
-        ),
-        onPressed: () {
-          _showResponsiveSidePanel(SafeArea(child: bottomSheet(context)));
-        },
+        icon: const Icon(Icons.more_vert_rounded),
+        tooltip: t.home.tabs.settings,
+        isSelected: _dockedSidePanel == _EditorDockedSidePanel.settings,
+        onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.settings),
       ),
     ];
 
@@ -8061,19 +8856,42 @@ class EditorState extends State<Editor>
     }
 
     return AppBar(
-      toolbarHeight: kToolbarHeight,
-      title: widget.customTitle != null
-          ? Text(widget.customTitle!)
-          : Form(
-              key: _filenameFormKey,
-              autovalidateMode: AutovalidateMode.onUserInteraction,
+      primary: true,
+      backgroundColor: isDark ? const Color(0xFF1E1E1E) : colorScheme.surface,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      toolbarHeight: 64,
+      centerTitle: true,
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back),
+        onPressed: onBackOverride ?? () {
+          if (mounted) _goToHome(this.context);
+        },
+      ),
+      titleSpacing: 0,
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Form(
+            key: _filenameFormKey,
+            autovalidateMode: AutovalidateMode.onUserInteraction,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
               child: TextFormField(
+                textAlign: TextAlign.center,
                 decoration: const InputDecoration(
                   border: InputBorder.none,
                   focusedBorder: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   errorBorder: InputBorder.none,
                   disabledBorder: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                ),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w400,
+                  fontSize: 18,
                 ),
                 controller: filenameTextEditingController,
                 onChanged: renameFile,
@@ -8081,10 +8899,44 @@ class EditorState extends State<Editor>
                 validator: _validateFilenameTextField,
               ),
             ),
-      leading: SaveIndicator(
-        savingState: effectiveSavingState,
-        triggerSave: effectiveTriggerSave,
-        onBackOverride: onBackOverride,
+          ),
+          ValueListenableBuilder<SavingState>(
+            valueListenable: effectiveSavingState,
+            builder: (context, state, _) {
+              String statusText;
+              IconData? statusIcon;
+              switch (state) {
+                case SavingState.saving:
+                  statusText = 'Saving...';
+                  statusIcon = Icons.cloud_upload_outlined;
+                  break;
+                case SavingState.waitingToSave:
+                  statusText = 'Pending changes';
+                  statusIcon = Icons.edit_note_rounded;
+                  break;
+                case SavingState.saved:
+                default:
+                  statusText = 'All changes saved';
+                  statusIcon = Icons.cloud_done_outlined;
+                  break;
+              }
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(statusIcon, size: 12, color: colorScheme.onSurfaceVariant),
+                  const SizedBox(width: 4),
+                  Text(
+                    statusText,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
       ),
       actions: actions,
     );
@@ -8146,7 +8998,7 @@ class EditorState extends State<Editor>
         stows.editorToolbarAlignment.value == AxisDirection.right;
     final brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     void notifyHostToolbarChanged() {
       onHostToolbarChanged?.call();
@@ -8166,7 +9018,6 @@ class EditorState extends State<Editor>
           setTool: (tool) {
             setState(() {
               if (tool is Eraser) {
-
                 if (currentTool is! Eraser) {
                   tmpTool = currentTool;
                 }
@@ -8206,13 +9057,18 @@ class EditorState extends State<Editor>
             }
           },
           onManageTagsAndLinks: _showTagsAndLinksDialog,
+          onRegionScreenshot: _toggleRegionScreenshotMode,
+          regionScreenshotActive: _regionScreenshotMode,
           quillFocus: quillFocus,
+          applyPenPresetStrokeWidth: coreInfo.readOnly
+              ? (_) {}
+              : _applyPenPresetStrokeWidth,
+          onPenPresetNoteDirty: coreInfo.readOnly ? () {} : autosaveAfterDelay,
           setColor: (color) {
             setState(() {
               updateColorBar(color);
 
               if (currentTool is Highlighter) {
-
                 final h = currentTool as Highlighter;
                 h.color = color.withValues(
                   alpha: stows.highlighterOpacity.value,
@@ -8237,6 +9093,8 @@ class EditorState extends State<Editor>
                     break;
                   case ToolId.advancedPen:
                     stows.lastAdvancedPenColor.value = color.toARGB32();
+                  case ToolId.advancedPencil:
+                    stows.lastAdvancedPencilColor.value = color.toARGB32();
                     break;
                   default:
                     break;
@@ -8309,6 +9167,8 @@ class EditorState extends State<Editor>
                         break;
                       case ToolId.advancedPen:
                         stows.lastAdvancedPenColor.value = color.toARGB32();
+                      case ToolId.advancedPencil:
+                        stows.lastAdvancedPencilColor.value = color.toARGB32();
                         break;
                       default:
                         break;
@@ -8319,9 +9179,11 @@ class EditorState extends State<Editor>
                 }
               }
             });
+            _captureNoteToolSettingsLocally();
             notifyHostToolbarChanged();
           },
           onColorChanged: updateColorBar,
+          onToolbarSlotsChanged: _captureNoteToolSettingsLocally,
           invert: invert,
           axis: isToolbarVertical ? Axis.vertical : Axis.horizontal,
         ),
@@ -8338,74 +9200,136 @@ class EditorState extends State<Editor>
 
     final Widget canvas = Stack(
       children: [
-        CanvasGestureDetector(
-          key: _canvasGestureDetectorKey,
-          filePath: coreInfo.filePath,
-          isInfinite: coreInfo.isInfinite,
-          skipTransformClampForExpansion: _skipTransformClampForExpansion,
-          isDrawGesture: isDrawGesture,
-          onInteractionEnd: onInteractionEnd,
-          onDrawStart: onDrawStart,
-          onDrawUpdate: onDrawUpdate,
-          onDrawEnd: onDrawEnd,
-          shouldInjectRawPointerSamplesForDraw:
-              shouldInjectRawPointerSamplesForDraw,
-          onRawPointerMoveForDraw: onRawPointerMoveForDraw,
-          onHovering: onHovering,
-          onHoveringEnd: onHoveringEnd,
-          onStylusButtonChanged: onStylusButtonChanged,
-          onLongPress: _showCanvasMenu,
-          onSecondaryTapDown: _showCanvasMenu,
-          onTapDown: (globalPos) async {
-            _toolbarKey.currentState?.hideAllCards();
+        RepaintBoundary(
+          key: _regionScreenshotBoundaryKey,
+          child: CanvasGestureDetector(
+            key: _canvasGestureDetectorKey,
+            filePath: coreInfo.filePath,
+            isInfinite: coreInfo.isInfinite,
+            skipTransformClampForExpansion: _skipTransformClampForExpansion,
+            suppressTransformClamp: _suppressTransformClamp,
+            onContainerBoundsChanged: _onCanvasContainerBoundsChanged,
+            isDrawGesture: isDrawGesture,
+            onInteractionEnd: onInteractionEnd,
+            onDrawStart: onDrawStart,
+            onDrawUpdate: onDrawUpdate,
+            onDrawEnd: onDrawEnd,
+            shouldInjectRawPointerSamplesForDraw:
+                shouldInjectRawPointerSamplesForDraw,
+            onRawPointerMoveForDraw: onRawPointerMoveForDraw,
+            onPointerUpOrCancel: _finishActivePenStrokeFromPointerEnd,
+            onHovering: onHovering,
+            onHoveringEnd: onHoveringEnd,
+            onStylusButtonChanged: onStylusButtonChanged,
+            onLongPress: _showCanvasMenu,
+            onSecondaryTapDown: _showCanvasMenu,
+            onTapDown: (globalPos) async {
+              _toolbarKey.currentState?.hideAllCards();
 
-            final primaryFocus = FocusManager.instance.primaryFocus;
-            final isTextEditingActive = currentTool == Tool.textEditing;
+              final primaryFocus = FocusManager.instance.primaryFocus;
+              final isTextEditingActive = currentTool == Tool.textEditing;
 
-            bool isTextFieldFocused = false;
-            if (primaryFocus != null && primaryFocus.context != null) {
-              try {
-                final widget = primaryFocus.context!.widget;
+              bool isTextFieldFocused = false;
+              if (primaryFocus != null && primaryFocus.context != null) {
+                try {
+                  final widget = primaryFocus.context!.widget;
 
-                isTextFieldFocused = widget is EditableText;
-              } catch (e) {
-
-                isTextFieldFocused = false;
-              }
-            }
-
-            if (!isTextEditingActive && !isTextFieldFocused) {
-
-              primaryFocus?.unfocus();
-
-              SystemChannels.textInput.invokeMethod('TextInput.hide');
-            }
-
-            if (_previewPdfDocument != null) {
-              _hidePdfEquationPreview();
-              return;
-            }
-
-            if (_imageCropState != null) {
-              final cropPageIndex = coreInfo.pages.indexWhere(
-                (p) => p.images.contains(_imageCropState!.image),
-              );
-              if (cropPageIndex >= 0) {
-                final position = _safelyGetLocalPosition(
-                  cropPageIndex,
-                  globalPos,
-                );
-                if (!_imageCropState!.image.dstRect.contains(position)) {
-                  await _applyImageCrop(
-                    _imageCropState!.image,
-                    _imageCropState!.normalizedCrop,
-                  );
-                  return;
+                  isTextFieldFocused = widget is EditableText;
+                } catch (e) {
+                  isTextFieldFocused = false;
                 }
               }
-            }
 
-            if (lastSeenPointerCount > 1) {
+              if (!isTextEditingActive && !isTextFieldFocused) {
+                primaryFocus?.unfocus();
+
+                SystemChannels.textInput.invokeMethod('TextInput.hide');
+              }
+
+              if (_previewPdfDocument != null) {
+                _hidePdfEquationPreview();
+                return;
+              }
+
+              if (_imageCropState != null) {
+                final cropPageIndex = coreInfo.pages.indexWhere(
+                  (p) => p.images.contains(_imageCropState!.image),
+                );
+                if (cropPageIndex >= 0) {
+                  final position = _safelyGetLocalPosition(
+                    cropPageIndex,
+                    globalPos,
+                  );
+                  if (!_imageCropState!.image.dstRect.contains(position)) {
+                    await _applyImageCrop(
+                      _imageCropState!.image,
+                      _imageCropState!.normalizedCrop,
+                    );
+                    return;
+                  }
+                }
+              }
+
+              if (lastSeenPointerCount > 1) {
+                if (currentTool is Select ||
+                    currentTool is LaserPointer ||
+                    currentTool == Tool.textEditing ||
+                    !stows.enableFingerDrawing.value) {
+                  await _handlePotentialPdfLinkTap(globalPos);
+                }
+                return;
+              }
+
+              final tapPageIndex = onWhichPageIsFocalPoint(globalPos);
+              if (tapPageIndex != null &&
+                  tapPageIndex >= 0 &&
+                  tapPageIndex < coreInfo.pages.length) {
+                final page = coreInfo.pages[tapPageIndex];
+                final position = _safelyGetLocalPosition(
+                  tapPageIndex,
+                  globalPos,
+                );
+                for (final image in page.images.reversed) {
+                  if (!image.contains(position)) continue;
+                  final plotMetadata = _plotMetadataFromImage(image);
+                  if (plotMetadata != null &&
+                      _isTapOnAnimationPlayButton(
+                        image: image,
+                        position: position,
+                      )) {
+                    _showPlotVisualizer(plotMetadata);
+                    return;
+                  }
+                }
+              }
+
+              final select = Select.currentSelect;
+              if (select.doneSelecting && !select.selectResult.isEmpty) {
+                final pageIndex = dragPageIndex ?? currentPageIndex;
+                if (select.selectResult.pageIndex == pageIndex) {
+                  final page = coreInfo.pages[pageIndex];
+                  final box = page.renderBox;
+                  if (box != null && box.attached) {
+                    final localPos = box.globalToLocal(globalPos);
+                    if (select.selectResult.contains(localPos)) {
+                      return;
+                    } else {
+                      Select.currentSelect.unselect();
+                      setState(() {
+                        _selectionHandlesInteractionMode =
+                            SelectionHandlesInteractionMode.resize;
+                      });
+                      if (currentTool is Select ||
+                          currentTool is LaserPointer ||
+                          currentTool == Tool.textEditing ||
+                          !stows.enableFingerDrawing.value) {
+                        await _handlePotentialPdfLinkTap(globalPos);
+                      }
+                      return;
+                    }
+                  }
+                }
+              }
 
               if (currentTool is Select ||
                   currentTool is LaserPointer ||
@@ -8413,117 +9337,33 @@ class EditorState extends State<Editor>
                   !stows.enableFingerDrawing.value) {
                 await _handlePotentialPdfLinkTap(globalPos);
               }
-              return;
-            }
+            },
+            updatePointerData: updatePointerData,
+            onPointerDown: (event) {
+              _markCanvasInputActivity(cancelPendingAutosave: true);
+              _toolbarKey.currentState?.hideAllCards();
+              _scrollPhysicsStopNotifier.value++;
+            },
+            undo: undo,
+            redo: redo,
+            pages: coreInfo.pages,
+            initialPageIndex: coreInfo.initialPageIndex,
 
-            final tapPageIndex = onWhichPageIsFocalPoint(globalPos);
-            if (tapPageIndex != null &&
-                tapPageIndex >= 0 &&
-                tapPageIndex < coreInfo.pages.length) {
-              final page = coreInfo.pages[tapPageIndex];
-              final position = _safelyGetLocalPosition(tapPageIndex, globalPos);
-              for (final image in page.images.reversed) {
-                if (!image.contains(position)) continue;
-                final plotMetadata = _plotMetadataFromImage(image);
-                if (plotMetadata != null &&
-                    _isTapOnAnimationPlayButton(
-                      image: image,
-                      position: position,
-                    )) {
-                  _showPlotVisualizer(plotMetadata);
-                  return;
-                }
-              }
-            }
-
-            final select = Select.currentSelect;
-            if (select.doneSelecting && !select.selectResult.isEmpty) {
-              final pageIndex = dragPageIndex ?? currentPageIndex;
-              if (select.selectResult.pageIndex == pageIndex) {
-                final page = coreInfo.pages[pageIndex];
-                final box = page.renderBox;
-                if (box != null && box.attached) {
-
-                  final localPos = box.globalToLocal(globalPos);
-                  if (select.selectResult.contains(localPos)) {
-
-                    return;
-                  } else {
-
-                    Select.currentSelect.unselect();
-                    setState(() {});
-                    if (currentTool is Select ||
-                        currentTool is LaserPointer ||
-                        currentTool == Tool.textEditing ||
-                        !stows.enableFingerDrawing.value) {
-                      await _handlePotentialPdfLinkTap(globalPos);
-                    }
-                    return;
-                  }
-                }
-              }
-            }
-
-            if (currentTool is Select ||
-                currentTool is LaserPointer ||
-                currentTool == Tool.textEditing ||
-                !stows.enableFingerDrawing.value) {
-              await _handlePotentialPdfLinkTap(globalPos);
-            }
-          },
-          updatePointerData: updatePointerData,
-          onPointerDown: (event) {
-            _toolbarKey.currentState?.hideAllCards();
-            _scrollPhysicsStopNotifier.value++;
-          },
-          undo: undo,
-          redo: redo,
-          pages: coreInfo.pages,
-          initialPageIndex: coreInfo.initialPageIndex,
-
-          pageBuilder: (context, index) => pageBuilder(context, index),
-          isTextEditing: () => currentTool == Tool.textEditing,
-          placeholderPageBuilder: (BuildContext context, int pageIndex) {
-            final page = coreInfo.pages[pageIndex];
-            return Canvas(
-              path: coreInfo.filePath,
-              page: page,
-              pageIndex: 0,
-              textEditing: false,
-              coreInfo: EditorCoreInfo.empty,
-              currentStroke: null,
-              currentStrokeDetectedShape: null,
-              currentSelection: null,
-              placeholder: true,
-              setAsBackground: null,
-              currentTool: currentTool,
-              currentScale: double.minPositive,
-              eraserPosition: null,
-              eraserSize: null,
-              onNoteLinkTap: null,
-
-              lineHeight: page.hasLocalLineHeight
-                  ? page.lineHeight
-                  : coreInfo.lineHeight,
-
-              lineThickness: page.hasLocalLineThickness
-                  ? page.lineThickness.toInt()
-                  : coreInfo.lineThickness.toInt(),
-              lineColor: page.lineColor,
-            );
-          },
-          transformationController: _transformationController,
-          scrollPhysicsStopNotifier: _scrollPhysicsStopNotifier,
+            pageBuilder: pageBuilder,
+            isTextEditing: _isEditorTextEditingMode,
+            placeholderPageBuilder: _editorPlaceholderPageBuilder,
+            tryHydratePage: _tryIdleHydratePage,
+            onMaintainPageRasterBand: _maintainPageRasterBand,
+            transformationController: _transformationController,
+            scrollPhysicsStopNotifier: _scrollPhysicsStopNotifier,
+            pageLayoutWidthOverride: _pageLayoutWidthOverride,
+          ),
         ),
         LayoutBuilder(
           builder: (context, constraints) {
-            return ValueListenableBuilder<Matrix4>(
-              valueListenable: _transformationController,
-              builder: (context, _, child) {
-                for (final p in coreInfo.pages) {
-                  p.redrawStrokes();
-                }
-
+            return ThrottledListenableBuilder(
+              listenable: _transformationController,
+              builder: (context, child) {
                 return Stack(
                   children: [
                     _AdaptiveScrollbar(
@@ -8552,6 +9392,13 @@ class EditorState extends State<Editor>
             );
           },
         ),
+        if (_regionScreenshotMode)
+          Positioned.fill(
+            child: RegionScreenshotOverlay(
+              onCancel: _cancelRegionScreenshotMode,
+              onSelected: _captureRegionScreenshot,
+            ),
+          ),
       ],
     );
 
@@ -8573,106 +9420,69 @@ class EditorState extends State<Editor>
 
     final Widget toolbar = _buildSplitGlobalToolbar(context);
 
-    final Widget body = _buildEditorBody(
-      canvas: canvas,
-      toolbar: toolbar,
-      readonlyBanner: readonlyBanner,
-      isToolbarVertical: isToolbarVertical,
-      showToolbar: widget.showToolbar,
-    );
-    final Widget editorSurface = Stack(
-      children: [
-        body,
+    final Widget layeredCanvas = _wrapWithDockedSidePanel(
+      Stack(
+        children: [
+          canvas,
 
-        if (_previewPdfDocument != null &&
-            _previewPageIndex != null &&
-            _previewRegion != null)
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final maxWidth =
-                  widget.embedded &&
-                      constraints.maxWidth.isFinite &&
-                      constraints.maxWidth > 0
-                  ? constraints.maxWidth
-                  : null;
-              return PdfEquationPreview(
-                pdfDocument: _previewPdfDocument!,
-                pageIndex: _previewPageIndex!,
-                region: _previewRegion!,
-                onDismiss: _hidePdfEquationPreview,
-                onLinkTapped: _onPreviewLinkTapped,
-                onGoToLocation: _onGoToLocation,
-                maxWidth: maxWidth,
-                invert: Theme.of(context).brightness == Brightness.dark
-                    ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
-                    : false,
-              );
-            },
-          ),
-        if (_showGoBackAfterPreviewJump &&
-            _lastPreviewGoToOriginPageIndex != null)
-          Positioned(
-            right: 12,
-            bottom: 12,
-            child: Opacity(
-              opacity: 0.85,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  FilledButton.tonal(
-                    onPressed: _goBackFromPreviewJump,
-                    child: Text(t.editor.goBack),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: _cancelPreviewJumpHistory,
-                    child: const Text('Cancel'),
-                  ),
-                ],
-              ),
+          if (_previewPdfDocument != null &&
+              _previewPageIndex != null &&
+              _previewRegion != null)
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final maxWidth =
+                    widget.embedded &&
+                        constraints.maxWidth.isFinite &&
+                        constraints.maxWidth > 0
+                    ? constraints.maxWidth
+                    : null;
+                return PdfEquationPreview(
+                  pdfDocument: _previewPdfDocument!,
+                  pageIndex: _previewPageIndex!,
+                  region: _previewRegion!,
+                  onDismiss: _hidePdfEquationPreview,
+                  onLinkTapped: _onPreviewLinkTapped,
+                  onGoToLocation: _onGoToLocation,
+                  maxWidth: maxWidth,
+                  invert: Theme.of(context).brightness == Brightness.dark
+                      ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+                      : false,
+                );
+              },
             ),
-          ),
-        if (_showAreaEraserQueueNotice)
-          Positioned(
-            right: 10,
-            bottom: (_showGoBackAfterPreviewJump &&
-                    _lastPreviewGoToOriginPageIndex != null)
-                ? 72
-                : 14,
-            child: Material(
-              elevation: 3,
-              borderRadius: BorderRadius.circular(8),
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 6,
-                ),
+          if (_showGoBackAfterPreviewJump &&
+              _lastPreviewGoToOriginPageIndex != null)
+            Positioned(
+              right: 12,
+              bottom: 12,
+              child: Opacity(
+                opacity: 0.85,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
+                    FilledButton.tonal(
+                      onPressed: _goBackFromPreviewJump,
+                      child: Text(t.editor.goBack),
                     ),
                     const SizedBox(width: 8),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 220),
-                      child: Text(
-                        t.editor.areaEraserMemorySafeQueue,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
+                    OutlinedButton(
+                      onPressed: _cancelPreviewJumpHistory,
+                      child: const Text('Cancel'),
                     ),
                   ],
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
+    );
+
+    final Widget body = _buildEditorBody(
+      canvas: layeredCanvas,
+      toolbar: toolbar,
+      readonlyBanner: readonlyBanner,
+      isToolbarVertical: isToolbarVertical,
+      showToolbar: widget.showToolbar,
     );
 
     return ValueListenableBuilder<Map<String, int>>(
@@ -8682,29 +9492,31 @@ class EditorState extends State<Editor>
           valueListenable: savingState,
           builder: (context, savingState, child) {
             return PopScope(
-              canPop: widget.embedded,
+              canPop: widget.embedded && !_isDockedSidePanelVisible,
               onPopInvokedWithResult: (didPop, _) {
+                if (!didPop && _isDockedSidePanelVisible) {
+                  _closeDockedSidePanel();
+                  return;
+                }
                 if (!didPop && !widget.embedded && mounted) {
                   _goToHome(this.context);
                   return;
                 }
-                if (didPop) {
-
-                  if (savingState == .waitingToSave || savingState == .saving) {
-                    log.info(
-                      'Exit triggered - saving in background (${coreInfo.pages.length} pages)',
-                    );
-
-                    unawaited(
-                      saveToFile(force: true).catchError((e) {
-                        log.warning('Background save on exit failed: $e');
-                      }),
-                    );
-                  }
+                if (didPop &&
+                    (savingState == .waitingToSave ||
+                        savingState == .saving ||
+                        _saveFollowUpRequested)) {
+                  log.info(
+                    'Exit triggered — note has pending save; dispose will flush (${coreInfo.pages.length} pages)',
+                  );
                 }
               },
               child: WillPopScope(
                 onWillPop: () async {
+                  if (_isDockedSidePanelVisible) {
+                    _closeDockedSidePanel();
+                    return false;
+                  }
                   if (widget.embedded) return true;
                   if (mounted) _goToHome(this.context);
                   return false;
@@ -8714,424 +9526,80 @@ class EditorState extends State<Editor>
             );
           },
           child: widget.embedded
-              ? editorSurface
-              : Scaffold(
-                  backgroundColor:
-                      Theme.of(context).brightness == Brightness.dark
-                      ? const Color(0xFF1E1E1E)
-                      : Theme.of(context).colorScheme.surfaceContainerLow,
-                  resizeToAvoidBottomInset: false,
-                  appBar: _PdfLoadingAppBarWrapper(
-                    pdfLoadingState: coreInfo.assetCacheAll.pdfLoadingState,
-                    openingNoteState: isOpeningNote,
-                    child: (context, pdfLoading, showOpening) {
-                      final showProgress = pdfLoading != null;
-                      final toolbarAtTop =
-                          stows.editorToolbarAlignment.value ==
-                          AxisDirection.up;
-                      final showProgressInAppBar =
-                          showProgress && !toolbarAtTop;
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  (Theme.of(context).brightness ==
-                                              Brightness.dark
-                                          ? const Color(0xFF1A1A1A)
-                                          : Theme.of(
-                                              context,
-                                            ).colorScheme.surface)
-                                      .withValues(alpha: 0.95),
-                                  (Theme.of(context).brightness ==
-                                          Brightness.dark
-                                      ? const Color(0xFF111111)
-                                      : Theme.of(context).colorScheme.surface),
-                                ],
-                              ),
-                              border: Border(
-                                bottom: BorderSide(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .outlineVariant
-                                      .withValues(alpha: 0.4),
-                                  width: 1,
-                                ),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.shadow.withValues(alpha: 0.05),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: AppBar(
-                              backgroundColor: Colors.transparent,
-                              elevation: 0,
-                              scrolledUnderElevation: 0,
-                              toolbarHeight: kToolbarHeight,
-                              title: widget.customTitle != null
-                                  ? Text(widget.customTitle!)
-                                  : Form(
-                                      key: _filenameFormKey,
-                                      autovalidateMode:
-                                          AutovalidateMode.onUserInteraction,
-                                      child: TextFormField(
-                                        decoration: const InputDecoration(
-                                          border: InputBorder.none,
-                                          focusedBorder: InputBorder.none,
-                                          enabledBorder: InputBorder.none,
-                                          errorBorder: InputBorder.none,
-                                          disabledBorder: InputBorder.none,
-                                        ),
-                                        controller:
-                                            filenameTextEditingController,
-                                        onChanged: renameFile,
-                                        autofocus: needsNaming,
-                                        validator: _validateFilenameTextField,
-                                      ),
-                                    ),
-                              leading: SaveIndicator(
-                                savingState: savingState,
-                                triggerSave: saveToFile,
-                                onBackOverride: () {
-                                  if (mounted) _goToHome(this.context);
-                                },
-                              ),
-                              actions: [
-                                if (!coreInfo.isInfinite) ...[
+                  ? body
+                  : Builder(
+                      builder: (context) {
+                    return Hero(
+                      tag: widget.path != null ? 'note_hero_${widget.path}' : 'note_hero_new_note',
+                      flightShuttleBuilder: (flightContext, animation, flightDirection, fromHeroContext, toHeroContext) {
+                        final size = MediaQuery.sizeOf(flightContext);
+                        final isPush = flightDirection == HeroFlightDirection.push;
+                        final cardWidget = isPush ? fromHeroContext.widget : toHeroContext.widget;
+                        final editorWidget = isPush ? toHeroContext.widget : fromHeroContext.widget;
+                        final cardSize = isPush ? fromHeroContext.size : toHeroContext.size;
 
-                                  IconButton(
-                                    icon: const AdaptiveIcon(
-                                      icon: Icons.arrow_circle_up_outlined,
-                                      cupertinoIcon:
-                                          CupertinoIcons.arrow_up_circle,
-                                    ),
-                                    tooltip: "Insert page above",
-                                    onPressed: () => setState(() {
-                                      final currentPageIndex =
-                                          this.currentPageIndex;
-                                      insertPageBefore(currentPageIndex);
-                                      final screenWidth =
-                                          _currentViewportWidth();
-                                      CanvasGestureDetector.scrollToPage(
-                                        pageIndex: currentPageIndex,
-                                        pageOffsets: _generatePageOffsets(
-                                          coreInfo.pages,
-                                          screenWidth,
-                                        ),
-                                        transformationController:
-                                            _transformationController,
-                                      );
-                                    }),
-                                  ),
-
-                                  IconButton(
-                                    icon: const AdaptiveIcon(
-                                      icon: Icons.arrow_circle_down_outlined,
-                                      cupertinoIcon:
-                                          CupertinoIcons.arrow_down_circle,
-                                    ),
-                                    tooltip: t.editor.menu.insertPage,
-                                    onPressed: () => setState(() {
-                                      final currentPageIndex =
-                                          this.currentPageIndex;
-                                      insertPageAfter(currentPageIndex);
-                                      final screenWidth =
-                                          _currentViewportWidth();
-                                      CanvasGestureDetector.scrollToPage(
-                                        pageIndex: currentPageIndex + 1,
-                                        pageOffsets: _generatePageOffsets(
-                                          coreInfo.pages,
-                                          screenWidth,
-                                        ),
-                                        transformationController:
-                                            _transformationController,
-                                      );
-                                    }),
-                                  ),
-
-                                  IconButton(
-                                    icon: const AdaptiveIcon(
-                                      icon: Icons
-                                          .keyboard_double_arrow_left_rounded,
-                                      cupertinoIcon:
-                                          CupertinoIcons.chevron_left_2,
-                                    ),
-                                    tooltip: "First Page",
-                                    onPressed: () {
-                                      final screenWidth =
-                                          _currentViewportWidth();
-                                      CanvasGestureDetector.scrollToPage(
-                                        pageIndex: 0,
-                                        pageOffsets: _generatePageOffsets(
-                                          coreInfo.pages,
-                                          screenWidth,
-                                        ),
-                                        transformationController:
-                                            _transformationController,
-                                      );
-                                    },
-                                  ),
-
-                                  ValueListenableBuilder(
-                                    valueListenable: _transformationController,
-                                    builder: (context, _, __) {
-
-                                      final int currentIdx = currentPageIndex;
-                                      final int totalPages =
-                                          coreInfo.pages.length;
-
-                                      return Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          SizedBox(
-                                            width:
-                                                40,
-                                            child: TextField(
-
-                                              key: ValueKey(currentIdx),
-                                              controller: TextEditingController(
-                                                text: "${currentIdx + 1}",
-                                              ),
-                                              keyboardType:
-                                                  TextInputType.number,
-                                              textAlign: TextAlign.center,
-                                              decoration: const InputDecoration(
-                                                isDense: true,
-                                                border: InputBorder.none,
-                                                focusedBorder: InputBorder.none,
-                                                enabledBorder: InputBorder.none,
-                                                errorBorder: InputBorder.none,
-                                                disabledBorder:
-                                                    InputBorder.none,
-                                                contentPadding: EdgeInsets.zero,
-                                              ),
-                                              style: TextStyle(
-                                                color: Theme.of(
-                                                  context,
-                                                ).colorScheme.onSurface,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                              onSubmitted: (value) {
-                                                final int? targetPage =
-                                                    int.tryParse(value);
-                                                if (targetPage != null) {
-
-                                                  final int pageIndex =
-                                                      (targetPage - 1).clamp(
-                                                        0,
-                                                        totalPages - 1,
-                                                      );
-
-                                                  FocusManager
-                                                      .instance
-                                                      .primaryFocus
-                                                      ?.unfocus();
-
-                                                  final screenWidth =
-                                                      _currentViewportWidth();
-                                                  CanvasGestureDetector.scrollToPage(
-                                                    pageIndex: pageIndex,
-                                                    pageOffsets:
-                                                        _generatePageOffsets(
-                                                          coreInfo.pages,
-                                                          screenWidth,
-                                                        ),
-                                                    transformationController:
-                                                        _transformationController,
-                                                  );
-                                                }
-                                              },
-                                            ),
-                                          ),
-                                          Text(
-                                            "/ $totalPages",
-                                            style: TextStyle(
-                                              color: Theme.of(
-                                                context,
-                                              ).colorScheme.onSurface,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  ),
-
-                                  IconButton(
-                                    icon: const AdaptiveIcon(
-                                      icon: Icons
-                                          .keyboard_double_arrow_right_rounded,
-                                      cupertinoIcon:
-                                          CupertinoIcons.chevron_right_2,
-                                    ),
-                                    tooltip: "Last Page",
-                                    onPressed: () {
-                                      final screenWidth =
-                                          _currentViewportWidth();
-                                      CanvasGestureDetector.scrollToPage(
-                                        pageIndex: coreInfo.pages.length - 1,
-                                        pageOffsets: _generatePageOffsets(
-                                          coreInfo.pages,
-                                          screenWidth,
-                                        ),
-                                        transformationController:
-                                            _transformationController,
-                                      );
-                                    },
-                                  ),
-                                ],
-                                if (!coreInfo.isInfinite &&
-                                    coreInfo.pdfOutlines != null &&
-                                    coreInfo.pdfOutlines!.isNotEmpty)
-                                  PdfOutlineNavigator(
-                                    outlines: coreInfo.pdfOutlines!,
-                                    onPageSelected: (int pageIndex) {
-                                      final screenWidth =
-                                          _currentViewportWidth();
-                                      CanvasGestureDetector.scrollToPage(
-                                        pageIndex: pageIndex,
-                                        pageOffsets: _generatePageOffsets(
-                                          coreInfo.pages,
-                                          screenWidth,
-                                        ),
-                                        transformationController:
-                                            _transformationController,
-                                      );
-                                    },
-                                  ),
-                                if (!coreInfo.isInfinite)
-                                  IconButton(
-                                    icon: const AdaptiveIcon(
-                                      icon: Icons.grid_view_rounded,
-                                      cupertinoIcon:
-                                          CupertinoIcons.square_grid_2x2,
-                                    ),
-                                    tooltip: t.editor.pages,
-                                    onPressed: () {
-                                      final idx = currentPageIndex;
-                                      _showResponsiveSidePanel(
-                                        SafeArea(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.stretch,
-                                            children: [
-                                              Padding(
-                                                padding: const EdgeInsets.all(
-                                                  16.0,
-                                                ),
-                                                child: Row(
-                                                  children: [
-                                                    Expanded(
-                                                      child: Text(
-                                                        t.editor.pages,
-                                                        style: Theme.of(
-                                                          context,
-                                                        ).textTheme.titleMedium,
-                                                      ),
-                                                    ),
-                                                    IconButton(
-                                                      icon: const Icon(
-                                                        Icons.close,
-                                                      ),
-                                                      onPressed: () =>
-                                                          Navigator.pop(
-                                                            context,
-                                                          ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                              Divider(
-                                                height: 1,
-                                                thickness: 2,
-                                                color: Theme.of(
-                                                  context,
-                                                ).dividerColor,
-                                              ),
-                                              Expanded(
-                                                child: Container(
-                                                  decoration: BoxDecoration(
-                                                    border: Border(
-                                                      top: BorderSide(
-                                                        color: Theme.of(
-                                                          context,
-                                                        ).dividerColor,
-                                                        width: 2,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  child: pageManager(
-                                                    context,
-                                                    pageIndexAtOpen: idx,
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                IconButton(
-                                  icon: const AdaptiveIcon(
-                                    icon: Icons.more_vert_rounded,
-                                    cupertinoIcon:
-                                        CupertinoIcons.ellipsis_vertical,
-                                  ),
-                                  onPressed: () {
-                                    _showResponsiveSidePanel(
-                                      SafeArea(child: bottomSheet(context)),
-                                    );
-                                  },
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (showOpening && !showProgressInAppBar)
-                            const _OpeningNoteBar()
-                          else if (showProgressInAppBar)
-                            _PdfDecryptProgressBar(
-                              progress: pdfLoading.progress,
-                              label: pdfLoading.label,
-                            ),
-                        ],
-                      );
-                    },
-                  ),
-                  body:
-                      ValueListenableBuilder<
-                        ({double progress, String label})?
-                      >(
-                        valueListenable: coreInfo.assetCacheAll.pdfLoadingState,
-                        builder: (context, pdfLoading, _) {
-                          final toolbarAtTop =
-                              stows.editorToolbarAlignment.value ==
-                              AxisDirection.up;
-                          final showProgressAtBottom =
-                              toolbarAtTop && pdfLoading != null;
-                          if (showProgressAtBottom) {
-                            return Column(
+                        return AnimatedBuilder(
+                          animation: animation,
+                          builder: (context, child) {
+                            return Stack(
+                              fit: StackFit.expand,
                               children: [
-                                Expanded(child: editorSurface),
-                                _PdfDecryptProgressBar(
-                                  progress: pdfLoading.progress,
-                                  label: pdfLoading.label,
+                                Opacity(
+                                  opacity: (1.0 - animation.value).clamp(0.0, 1.0),
+                                  child: FittedBox(
+                                    fit: BoxFit.cover,
+                                    alignment: Alignment.topCenter,
+                                    child: SizedBox(
+                                      width: cardSize?.width,
+                                      height: cardSize?.height,
+                                      child: cardWidget,
+                                    ),
+                                  ),
+                                ),
+                                Opacity(
+                                  opacity: animation.value.clamp(0.0, 1.0),
+                                  child: ClipRect(
+                                    child: OverflowBox(
+                                      alignment: Alignment.topCenter,
+                                      minWidth: size.width,
+                                      minHeight: size.height,
+                                      maxWidth: size.width,
+                                      maxHeight: size.height,
+                                      child: editorWidget,
+                                    ),
+                                  ),
                                 ),
                               ],
                             );
-                          }
-                          return editorSurface;
-                        },
+                          },
+                        );
+                      },
+                      child: Scaffold(
+                        backgroundColor:
+                            Theme.of(context).brightness == Brightness.dark
+                            ? const Color(0xFF1E1E1E)
+                            : Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerLow,
+                        resizeToAvoidBottomInset: false,
+                        // Oculta o FAB se o painel de Pages estiver aberto OU se for tela infinita OU se estiver no SplitView (embedded)
+                        floatingActionButton: ((_dockedSidePanel != _EditorDockedSidePanel.pages) && !coreInfo.isInfinite && !widget.embedded)
+                            ? FloatingActionButton.extended(
+                                elevation: 4,
+                                backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                                foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                                onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
+                                icon: const Icon(Icons.article_outlined),
+                                label: const Text('Pages'),
+                              )
+                            : null,
+                        floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
+                        // AppBar só é oculta quando a ABA PAGES está aberta. Settings e Split View a mantêm visível!
+                        appBar: (_dockedSidePanel == _EditorDockedSidePanel.pages) ? null : _buildEditorAppBar(context),
+                        body: body,
                       ),
+                    );
+                  },
                 ),
         );
       },
@@ -9210,21 +9678,18 @@ class EditorState extends State<Editor>
     );
 
     if (confirmed == true) {
-
       _isDeleted = true;
       _delayedSaveTimer?.cancel();
 
       try {
-
+        await _recoveryJournal?.clear();
         await FileManager.deleteFile(coreInfo.filePath + Editor.extension);
 
         try {
           await FileManager.deleteFile(
             '${coreInfo.filePath}${Editor.extension}.p',
           );
-        } catch (_) {
-          
-        }
+        } catch (_) {}
 
         if (mounted) {
           Navigator.of(context).pop();
@@ -9251,14 +9716,42 @@ class EditorState extends State<Editor>
     );
   }
 
+  void _forceRefreshPageStrokes(EditorPage page) {
+    for (final stroke in page.allStrokesInDrawOrder) {
+      stroke.markPolygonNeedsUpdating();
+    }
+    page.redrawStrokes();
+  }
+
   void _toggleGlobalBackgroundInversion(bool invert) {
+    // Update the stows override so the setting persists across canvas interactions
+    final currentOverrides = Map<String, int>.from(stows.noteInvertInDarkModeOverrides.value);
+    currentOverrides[coreInfo.filePath] = invert ? 1 : 0;
+    stows.noteInvertInDarkModeOverrides.value = currentOverrides;
+
     setState(() {
-      for (final page in coreInfo.pages) {
+      for (int i = 0; i < coreInfo.pages.length; i++) {
+        final page = coreInfo.pages[i];
         if (page.backgroundImage != null) {
           page.backgroundImage!.invertible = invert;
           page.backgroundImage!.onMiscChange?.call();
         }
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidatePage(i);
       }
+      
+      final center = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
+      final radius = 2;
+      final bandStart = (center - radius).clamp(0, coreInfo.pages.length - 1);
+      final bandEnd = (center + radius).clamp(0, coreInfo.pages.length - 1);
+      _maintainPageRasterBand(
+        bandStart,
+        bandEnd,
+        forceSchedule: true,
+        scale: _quantizedCanvasScale,
+      );
+      
+      _bumpInteractionRepaint();
     });
     autosaveAfterDelay();
   }
@@ -9266,15 +9759,14 @@ class EditorState extends State<Editor>
   Widget bottomSheet(BuildContext context) {
     final Brightness brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     final int currentPageIndex = this.currentPageIndex;
 
     final page = coreInfo.pages[currentPageIndex];
 
     EditorImage? bgImage = page.backgroundImage;
-    bool isFakeBackground =
-        false;
+    bool isFakeBackground = false;
 
     if (bgImage == null && page.images.isNotEmpty) {
       final potentialBg = page.images.first;
@@ -9311,9 +9803,7 @@ class EditorState extends State<Editor>
       coreInfo: coreInfo,
       currentPageIndex: currentPageIndex,
       invert: invert,
-      onClose: () {
-        if (mounted) Navigator.pop(context);
-      },
+      onClose: _closeDockedSidePanel,
       onOpenSplitView: widget.onOpenSplitView ?? _openSplitView,
       onCloseSplitView: widget.onCloseSplitView,
       onReopenSplitView: widget.onReopenSplitView,
@@ -9323,8 +9813,22 @@ class EditorState extends State<Editor>
       splitAxis: widget.splitAxis ?? Axis.horizontal,
       onLayersChanged: () {
         setState(() {});
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
       },
+      onInkDefaultsChanged: () {
+        coreInfo.noteToolSettings = captureNoteToolSettings(
+          lastToolId: stows.lastTool.value,
+          lastPenTypeId: stows.lastPenType.value,
+        );
+        setState(() {});
+        _pageRasterCache.invalidateInk(currentPageIndex);
+        autosaveAfterDelay();
+      },
+      captureNoteToolSettingsForInk: () => captureNoteToolSettings(
+        lastToolId: stows.lastTool.value,
+        lastPenTypeId: stows.lastPenType.value,
+      ),
 
       hasBackground: hasBackground,
       isBackgroundInverted: hasBackground ? (bgImage.invertible) : false,
@@ -9421,6 +9925,7 @@ class EditorState extends State<Editor>
             newImg.locked = true;
           }
           page.redrawStrokes();
+          _pageRasterCache.invalidatePage(currentPageIndex);
           autosaveAfterDelay();
         });
       },
@@ -9433,6 +9938,7 @@ class EditorState extends State<Editor>
         } else {
           page.backgroundImage!.invertible = !page.backgroundImage!.invertible;
         }
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
       }),
 
@@ -9461,8 +9967,9 @@ class EditorState extends State<Editor>
         );
         Select.currentSelect.doneSelecting = true;
 
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
-        if (mounted) Navigator.pop(context);
+        _closeDockedSidePanel();
       }),
 
       onDeleteBackground: () => setState(() {
@@ -9471,8 +9978,9 @@ class EditorState extends State<Editor>
         if (isFakeBackground) {
           page.images.remove(bgImage);
         }
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
-        if (mounted) Navigator.pop(context);
+        _closeDockedSidePanel();
       }),
 
       onSetPagePattern: (pattern) => setState(() {
@@ -9482,7 +9990,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalPattern = true;
         page.backgroundPattern = pattern;
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidateBg(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9493,7 +10004,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalLineHeight = true;
         page.lineHeight = height;
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidatePage(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9504,7 +10018,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalLineThickness = true;
         page.lineThickness = thick.toDouble();
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidatePage(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9515,7 +10032,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalBackgroundColor = true;
         page.backgroundColor = color;
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidateBg(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9526,7 +10046,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalLineColor = true;
         page.lineColor = color;
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidatePage(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9552,7 +10075,10 @@ class EditorState extends State<Editor>
           page.hasLocalBorderColor = true;
           page.borderColor = Color(coreInfo.noteDefaultBorderColor!);
         }
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidateBg(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9563,7 +10089,10 @@ class EditorState extends State<Editor>
         final page = coreInfo.pages[currentPageIndex];
         page.hasLocalBorderColor = true;
         page.borderColor = color;
-        page.redrawStrokes();
+        page.markSaveBinaryDirty();
+        _forceRefreshPageStrokes(page);
+        _pageRasterCache.invalidateBg(currentPageIndex);
+        _bumpInteractionRepaint();
         autosaveAfterDelay();
       }),
 
@@ -9611,38 +10140,30 @@ class EditorState extends State<Editor>
         listenToQuillChanges(newPage.quill, currentPageIndex);
         newPage.buildSpatialIndex();
         coreInfo.notifyListeners();
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
       }),
 
       onClearPage: () {
-        if (mounted) Navigator.pop(context);
+        _closeDockedSidePanel();
         clearPage(currentPageIndex);
       },
       onClearAll: () {
-        if (mounted) Navigator.pop(context);
+        _closeDockedSidePanel();
         clearAllPages();
       },
       onPickImage: () async {
         final photosPicked = await _pickPhotos();
         if (photosPicked > 0 && mounted) {
-          Navigator.pop(context);
+          _closeDockedSidePanel();
         }
       },
       onImportPdf: () async {
         final pdfImported = await importPdf();
         if (mounted && pdfImported) {
-          Navigator.pop(context);
+          _closeDockedSidePanel();
         }
         return pdfImported;
-      },
-      onPlotFunction: () async {
-        await _plotFunction();
-      },
-      onPlotSurface: () async {
-        await _plotSurface();
-      },
-      onInsertTable: (rows, cols) async {
-        await _insertTable(rows, cols);
       },
       onToggleCalculator: () {},
       onNoteHandwritingToLatex: coreInfo.readOnly
@@ -9673,9 +10194,7 @@ class EditorState extends State<Editor>
       onSetCustomThumbnail: _setCustomThumbnail,
       onDeleteNote: _deleteNote,
       onShowProperties: () async {
-        await saveToFile(
-          force: true,
-        );
+        await saveToFile(force: true);
         if (mounted) {
           showNotePropertiesDialog(context, coreInfo);
         }
@@ -9684,129 +10203,235 @@ class EditorState extends State<Editor>
     );
   }
 
-  Widget pageBuilder(BuildContext context, int pageIndex) {
+  bool _isEditorTextEditingMode() => currentTool == Tool.textEditing;
+
+  /// Stable page/placeholder builder identity for [_PagesBuilder] — avoid a new
+  /// closure each [EditorState.build] so didUpdateWidget does not treat the
+  /// builder as changed and reset prewarm offsets / layout unnecessarily.
+  Widget _editorPlaceholderPageBuilder(BuildContext context, int pageIndex) {
     final page = coreInfo.pages[pageIndex];
-    Stroke? currentStroke = Pen.currentStroke?.pageIndex == pageIndex
-        ? Pen.currentStroke
-        : null;
-    final shapePreview = ShapeTool.currentShapeTool.preview;
-    if (shapePreview != null && shapePreview.pageIndex == pageIndex) {
-      currentStroke = shapePreview;
-    }
-    final isCroppingThisPage =
-        _imageCropState != null && page.images.contains(_imageCropState!.image);
-    final Widget? cropOverlay = isCroppingThisPage
-        ? Positioned(
-            left: _imageCropState!.image.dstRect.left,
-            top: _imageCropState!.image.dstRect.top,
-            width: _imageCropState!.image.dstRect.width,
-            height: _imageCropState!.image.dstRect.height,
-            child: Transform.rotate(
-              angle: _imageCropState!.image.rotationDeg * math.pi / 180,
-              alignment: Alignment.center,
-              child: SizedBox(
-                width: _imageCropState!.image.dstRect.width,
-                height: _imageCropState!.image.dstRect.height,
-                child: CustomPaint(
-                  painter: _CropOverlayPainter(
-                    cropRect: _imageCropState!.normalizedCrop,
-                    scale: _transformationController.value.getMaxScaleOnAxis(),
-                    accentColor: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ),
-            ),
-          )
-        : null;
 
-    return Stack(
-      children: [
-        Canvas(
+    return ValueListenableBuilder<Map<String, int>>(
+      valueListenable: stows.noteInvertInDarkModeOverrides,
+      builder: (context, overrides, _) {
+        final theme = _cachedTheme ?? Theme.of(context);
+        final invert = theme.brightness == Brightness.dark
+            ? (overrides[coreInfo.filePath] == 1)
+            : false;
 
-          key: ValueKey(
-            '${page.backgroundPattern?.index}_${page.backgroundColor.value}_${page.lineHeight}_${page.lineThickness}_${page.lineColor.value}_${page.size.width}_${page.size.height}',
-          ),
+        return Canvas(
+          key: ValueKey('placeholder_${invert}_$pageIndex'),
+          overrideInvert: invert,
           path: coreInfo.filePath,
           page: page,
-          pageIndex: pageIndex,
-
+          pageIndex: 0,
+          textEditing: false,
+          coreInfo: EditorCoreInfo.empty,
+          currentStroke: null,
+          currentStrokeDetectedShape: null,
+          currentSelection: null,
+          placeholder: true,
+          setAsBackground: null,
+          currentTool: currentTool,
+          currentScale: double.minPositive,
+          eraserPosition: null,
+          eraserSize: null,
+          onNoteLinkTap: null,
           lineHeight: page.hasLocalLineHeight
               ? page.lineHeight
               : coreInfo.lineHeight,
-
           lineThickness: page.hasLocalLineThickness
-              ? page.lineThickness.toInt()
-              : coreInfo.lineThickness.toInt(),
-          lineColor: page.lineColor,
-          textEditing: currentTool == Tool.textEditing,
-          coreInfo: coreInfo,
-          currentStroke: currentStroke,
-          currentStrokeDetectedShape:
-              currentStroke != null &&
-                  currentTool is Pen &&
-                  currentTool is! Highlighter
-              ? _penHoldDetectedShape
-              : null,
-          currentSelection: () {
-            if (currentTool is! Select) return null;
-            final selectResult = (currentTool as Select).selectResult;
-            if (selectResult.pageIndex != pageIndex) return null;
-            if (_imageCropState != null &&
-                selectResult.images.length == 1 &&
-                identical(selectResult.images.first, _imageCropState!.image)) {
-              return null;
+          ? page.lineThickness.toInt()
+          : coreInfo.lineThickness.toInt(),
+      lineColor: page.lineColor,
+        );
+      },
+    );
+  }
+
+  void _wirePageImageCallbacks(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
+    final page = coreInfo.pages[pageIndex];
+    page.backgroundImage?.onMoveImage = onMoveImage;
+    page.backgroundImage?.onDeleteImage = onDeleteImage;
+    page.backgroundImage?.onMiscChange = () {
+      _pageRasterCache.invalidatePage(pageIndex, ink: false, bg: true);
+      autosaveAfterDelay();
+    };
+    for (final image in page.images) {
+      image.onMoveImage = onMoveImage;
+      image.onDeleteImage = onDeleteImage;
+      image.onMiscChange = () {
+        _pageRasterCache.invalidateInk(pageIndex);
+        autosaveAfterDelay();
+      };
+    }
+  }
+
+  /// Idle BSON hydrate for upcoming shells. Must not run inside [pageBuilder].
+  bool _tryIdleHydratePage(int index) {
+    if (!coreInfo.isLazyShellPage(index)) return false;
+    final hydrated = coreInfo.tryHydratePageAtIndex(index);
+    if (hydrated) {
+      _wirePageImageCallbacks(index);
+      listenToQuillChanges(coreInfo.pages[index].quill, index);
+      _primeVisibleCanvasAssets(coreInfo, index, index, index);
+    }
+    return hydrated;
+  }
+
+  Widget pageBuilder(BuildContext context, int pageIndex) {
+    _wirePageImageCallbacks(pageIndex);
+    final page = coreInfo.pages[pageIndex];
+
+    return ValueListenableBuilder<Map<String, int>>(
+      valueListenable: stows.noteInvertInDarkModeOverrides,
+      builder: (context, overrides, _) {
+        final theme = _cachedTheme ?? Theme.of(context);
+        final invert = theme.brightness == Brightness.dark
+            ? (overrides[coreInfo.filePath] == 1)
+            : false;
+
+        final isCroppingThisPage =
+            _imageCropState != null && page.images.contains(_imageCropState!.image);
+        final Widget? cropOverlay = isCroppingThisPage
+            ? Positioned(
+                left: _imageCropState!.image.dstRect.left,
+                top: _imageCropState!.image.dstRect.top,
+                width: _imageCropState!.image.dstRect.width,
+                height: _imageCropState!.image.dstRect.height,
+                child: Transform.rotate(
+                  angle: _imageCropState!.image.rotationDeg * math.pi / 180,
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    width: _imageCropState!.image.dstRect.width,
+                    height: _imageCropState!.image.dstRect.height,
+                    child: CustomPaint(
+                      painter: _CropOverlayPainter(
+                        cropRect: _imageCropState!.normalizedCrop,
+                        scale: _transformationController.value.getMaxScaleOnAxis(),
+                        accentColor: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            : null;
+
+        return ValueListenableBuilder<int>(
+          valueListenable: _interactionRepaint,
+          builder: (context, _, __) {
+            Stroke? currentStroke = Pen.currentStroke?.pageIndex == pageIndex
+                ? Pen.currentStroke
+                : null;
+            final shapePreview = ShapeTool.currentShapeTool.preview;
+            if (shapePreview != null && shapePreview.pageIndex == pageIndex) {
+              currentStroke = shapePreview;
             }
-            return selectResult;
-          }(),
-          selectionPreview: _selectionPreviewForPage(pageIndex),
-          setAsBackground: (EditorImage image) {
 
-            final rect = image.dstRect;
-            final natSize = image.naturalSize;
+            return Stack(
+              children: [
+                Canvas(
+                  key: ValueKey(
+                    'canvas_${invert}_${pageIndex}_${page.backgroundPattern?.index}_${page.backgroundColor.value}_${page.lineHeight}_${page.lineThickness}_${page.lineColor.value}_${page.size.width}_${page.size.height}',
+                  ),
+                  overrideInvert: invert,
+                  path: coreInfo.filePath,
+              page: page,
+              pageIndex: pageIndex,
 
-            if (page.backgroundImage != null) {
-              page.images.add(page.backgroundImage!);
-            }
-            page.images.remove(image);
+              lineHeight: page.hasLocalLineHeight
+                  ? page.lineHeight
+                  : coreInfo.lineHeight,
 
-            page.backgroundImage = image;
+              lineThickness: page.hasLocalLineThickness
+                  ? page.lineThickness.toInt()
+                  : coreInfo.lineThickness.toInt(),
+              lineColor: page.lineColor,
+              textEditing: currentTool == Tool.textEditing,
+              coreInfo: coreInfo,
+              currentStroke: currentStroke,
+              currentStrokeDetectedShape:
+                  currentStroke != null &&
+                      currentTool is Pen &&
+                      currentTool is! Highlighter
+                  ? _penHoldDetectedShape
+                  : null,
+              currentSelection: () {
+                if (currentTool is! Select) return null;
+                final selectResult = (currentTool as Select).selectResult;
+                if (selectResult.pageIndex != pageIndex) return null;
+                if (_imageCropState != null &&
+                    selectResult.images.length == 1 &&
+                    identical(
+                      selectResult.images.first,
+                      _imageCropState!.image,
+                    )) {
+                  return null;
+                }
+                return selectResult;
+              }(),
+              selectionPreview: _selectionPreviewForPage(pageIndex),
+              selectionHandlesInteractionMode: currentTool is Select
+                  ? _selectionHandlesInteractionMode
+                  : SelectionHandlesInteractionMode.resize,
+              setAsBackground: (EditorImage image) {
+                final rect = image.dstRect;
+                final natSize = image.naturalSize;
 
-            page.backgroundImage!.dstRect = rect;
-            page.backgroundImage!.naturalSize = natSize;
+                if (page.backgroundImage != null) {
+                  page.images.add(page.backgroundImage!);
+                }
+                page.images.remove(image);
 
-            CanvasImage.activeListener.notifyListenersPlease();
+                page.backgroundImage = image;
 
-            autosaveAfterDelay();
-            setState(() {});
-          },
-          onNoteLinkTap: _onCanvasNoteLinkTap,
-          currentTool: currentTool,
-          interactionRepaintListenable: _interactionRepaint,
-          currentScale: _transformationController.value.approxScale,
-          eraserPosition:
-              currentTool is Eraser &&
-                  eraserPosition != null &&
-                  pageIndex == dragPageIndex
-              ? eraserPosition
-              : null,
-          eraserSize: currentTool is Eraser
-              ? (currentTool as Eraser).size
-              : null,
-          eraserDeltaRemoved: pageIndex == dragPageIndex
-              ? _eraserDeltaRemoved
-              : null,
-          eraserDeltaAdded: pageIndex == dragPageIndex
-              ? _eraserDeltaAdded
-              : null,
-          doneSelecting: currentTool is Select
-              ? (currentTool as Select).doneSelecting
-              : true,
+                page.backgroundImage!.dstRect = rect;
+                page.backgroundImage!.naturalSize = natSize;
 
-          imageCropState: null,
-          onCropRectChanged: null,
-        ),
-        if (cropOverlay != null) cropOverlay,
-      ],
+                _pageRasterCache.invalidatePage(pageIndex, ink: true, bg: true);
+
+                CanvasImage.activeListener.notifyListenersPlease();
+
+                autosaveAfterDelay();
+                setState(() {});
+              },
+              onNoteLinkTap: _onCanvasNoteLinkTap,
+              currentTool: currentTool,
+              interactionRepaintListenable: _interactionRepaint,
+              currentScale: _quantizedCanvasScale,
+              eraserPositionListenable: pageIndex == dragPageIndex
+                  ? _eraserPositionRepaint
+                  : null,
+              eraserPosition:
+                  currentTool is Eraser &&
+                      eraserPosition != null &&
+                      pageIndex == dragPageIndex
+                  ? eraserPosition
+                  : null,
+              eraserSize: currentTool is Eraser
+                  ? (currentTool as Eraser).size
+                  : null,
+              eraserDeltaRemoved: pageIndex == dragPageIndex
+                  ? _eraserDeltaRemoved
+                  : null,
+              eraserDeltaAdded: pageIndex == dragPageIndex
+                  ? _eraserDeltaAdded
+                  : null,
+              doneSelecting: currentTool is Select
+                  ? (currentTool as Select).doneSelecting
+                  : true,
+
+              pageRasterCache: _pageRasterCache,
+              imageCropState: null,
+              onCropRectChanged: null,
+            ),
+            if (cropOverlay != null) cropOverlay,
+          ],
+        );
+      },
+    );
+      },
     );
   }
 
@@ -9825,55 +10450,396 @@ class EditorState extends State<Editor>
     );
   }
 
-  void _showResponsiveSidePanel(Widget child) {
-    final isMobile = MediaQuery.sizeOf(context).width < 600;
-    showGeneralDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Close',
-      barrierColor: Colors.black54,
-      transitionDuration: const Duration(milliseconds: 300),
-      pageBuilder: (context, animation, secondaryAnimation) {
-        return Align(
-          alignment: isMobile ? Alignment.center : Alignment.centerRight,
-          child: Material(
-            color: Theme.of(context).colorScheme.surface,
-            surfaceTintColor: Colors.transparent,
-            elevation: 16,
-            borderRadius: isMobile
-                ? BorderRadius.zero
-                : const BorderRadius.horizontal(left: Radius.circular(24)),
-            child: SizedBox(
-              width: isMobile ? double.infinity : 480,
-              height: double.infinity,
-              child: child,
+  void _onDockedSidePanelAnimTick() {
+    if (_resizeViewportAnchor == null) return;
+    // Apply immediately from the ticker (not during layout). Prefer the
+    // predicted canvas width so we stay aligned before LayoutBuilder runs.
+    final predictedW = _predictCanvasWidthForDockAnim();
+    if (_canvasGestureActive) {
+      // Keep horizontal centering while the user draws/pans; skip vertical
+      // re-anchoring so we do not fight the active gesture.
+      _applyResizeViewportAnchor(
+        viewportWidthOverride: predictedW,
+        horizontalOnly: true,
+      );
+      return;
+    }
+    _applyResizeViewportAnchor(viewportWidthOverride: predictedW);
+  }
+
+  void _onCanvasContainerBoundsChanged(Size size) {
+    if (_isSmoothScrolling) return; // Evita que a âncora de resize interrompa a animação de scroll
+    if (_resizeViewportAnchor == null) return;
+    // Never write the transform synchronously from LayoutBuilder — that races
+    // with canvas gestures and can freeze the docked-panel animation mid-way.
+    _scheduleResizeViewportAnchorApply(
+      viewportWidthOverride: size.width,
+      viewportHeightOverride: size.height,
+    );
+  }
+
+  /// Mirrors [_wrapWithDockedSidePanel] width math for the current anim value.
+  double? _predictCanvasWidthForDockAnim() {
+    if (!mounted) return null;
+    final box = context.findRenderObject() as RenderBox?;
+    final available = box?.hasSize == true
+        ? box!.size.width
+        : MediaQuery.sizeOf(context).width;
+    if (available <= 0) return null;
+    final ideal = editorSidePanelDesktopWidth(context);
+    final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
+    final panelWidth = isPages 
+        ? ideal.clamp(280.0, 360.0).toDouble() 
+        : ideal.clamp(340.0, 460.0).toDouble();
+    const spacing = 16.0;
+    final totalPanelSpace = panelWidth + spacing * 2;
+    
+    final tAnim = Curves.easeOutCubic.transform(
+      _dockedSidePanelController.value,
+    );
+    return available - totalPanelSpace * tAnim;
+  }
+
+  void _beginViewportResizeStabilization({bool freezePageLayout = true}) {
+    // Explicit sidebar/split sessions take over from orientation settle.
+    _metricsOwnsResizeSession = false;
+    _suppressTransformClamp.value = true;
+    if (_viewportStablePageIndex == null && coreInfo.pages.isNotEmpty) {
+      final resolved = coreInfo.isInfinite || coreInfo.pages.length <= 1
+          ? 0
+          : getPageIndexFromScrollPosition(
+              scrollY: -scrollY,
+              screenWidth: _currentViewportWidth(),
+              pages: coreInfo.pages,
+            );
+      _viewportStablePageIndex = resolved.clamp(0, coreInfo.pages.length - 1);
+      _lastCurrentPageIndex = _viewportStablePageIndex!;
+    } else {
+      _viewportStablePageIndex ??= _lastCurrentPageIndex;
+    }
+    // Keep the first locked anchor for the whole resize/sidebar session.
+    _resizeViewportAnchor ??= _captureResizeViewportAnchor();
+    PageRasterCacheManager.beginLayoutResizeSession();
+    if (!freezePageLayout) {
+      // Live FittedBox rescale with the docked panel; raster LOD covers ink.
+      if (_pageLayoutWidthOverride != null) {
+        setState(() => _pageLayoutWidthOverride = null);
+      }
+      return;
+    }
+    final w = _currentViewportWidth();
+    if (w > 0 && _pageLayoutWidthOverride == null) {
+      setState(() => _pageLayoutWidthOverride = w);
+    }
+  }
+
+  void _endViewportResizeStabilization({
+    double? viewportWidthOverride,
+    double? viewportHeightOverride,
+  }) {
+    if (!mounted) return;
+    _metricsOwnsResizeSession = false;
+    final gesture = _canvasGestureDetectorKey.currentState;
+    final laidOutW = gesture?.containerBounds.maxWidth;
+    final laidOutH = gesture?.containerBounds.maxHeight;
+    final wOverride =
+        viewportWidthOverride ??
+        (laidOutW != null && laidOutW > 0 ? laidOutW : null);
+    final hOverride =
+        viewportHeightOverride ??
+        (laidOutH != null && laidOutH > 0 ? laidOutH : null);
+    final anchor = _resizeViewportAnchor;
+    final hadLayoutOverride = _pageLayoutWidthOverride != null;
+
+    // Re-anchor using the final page layout width so scrollY still targets the
+    // same page after fitted heights/offsets change.
+    _pageLayoutWidthOverride = null;
+    _applyResizeViewportAnchor(
+      viewportWidthOverride: wOverride,
+      viewportHeightOverride: hOverride,
+    );
+    if (anchor != null && coreInfo.pages.isNotEmpty) {
+      _lastCurrentPageIndex = anchor.pageIndex.clamp(
+        0,
+        coreInfo.pages.length - 1,
+      );
+    }
+    _unlockResizeViewportAnchor();
+    _viewportStablePageIndex = null;
+    _suppressTransformClamp.value = false;
+    PageRasterCacheManager.endLayoutResizeSession();
+    if (hadLayoutOverride && mounted) {
+      setState(() {});
+    }
+    gesture?.reclampTransform();
+    _transformationController.notifyListenersPlease();
+  }
+
+  void _lockResizeViewportAnchor() {
+    _resizeViewportAnchor = _captureResizeViewportAnchor();
+  }
+
+  void _scheduleResizeViewportAnchorApply({
+    double? viewportWidthOverride,
+    double? viewportHeightOverride,
+  }) {
+    if (_resizeViewportAnchor == null) return;
+    if (_resizeAnchorApplyScheduled) {
+      _pendingResizeAnchorWidthOverride = viewportWidthOverride;
+      _pendingResizeAnchorHeightOverride = viewportHeightOverride;
+      return;
+    }
+    _resizeAnchorApplyScheduled = true;
+    _pendingResizeAnchorWidthOverride = viewportWidthOverride;
+    _pendingResizeAnchorHeightOverride = viewportHeightOverride;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _resizeAnchorApplyScheduled = false;
+      if (!mounted || _resizeViewportAnchor == null) return;
+      if (_canvasGestureActive && _dockedSidePanelController.isAnimating) {
+        _applyResizeViewportAnchor(
+          viewportWidthOverride: _pendingResizeAnchorWidthOverride,
+          viewportHeightOverride: _pendingResizeAnchorHeightOverride,
+          horizontalOnly: true,
+        );
+      } else {
+        _applyResizeViewportAnchor(
+          viewportWidthOverride: _pendingResizeAnchorWidthOverride,
+          viewportHeightOverride: _pendingResizeAnchorHeightOverride,
+        );
+      }
+      _pendingResizeAnchorWidthOverride = null;
+      _pendingResizeAnchorHeightOverride = null;
+    });
+  }
+
+  bool get _isDockedSidePanelVisible =>
+      _dockedSidePanel != _EditorDockedSidePanel.none ||
+      _dockedSidePanelController.value > 0;
+
+  void _toggleDockedSidePanel(_EditorDockedSidePanel panel) {
+    if (panel == _EditorDockedSidePanel.none) {
+      _closeDockedSidePanel();
+      return;
+    }
+
+    final controller = _dockedSidePanelController;
+    final isThisPanel = _dockedSidePanel == panel;
+    final visible = controller.value > 0.01;
+
+    // Mid-close of this panel → reopen (do not stack another reverse).
+    if (isThisPanel &&
+        controller.isAnimating &&
+        controller.status == AnimationStatus.reverse) {
+      _openDockedSidePanel(panel);
+      return;
+    }
+
+    // Already open (or opening) → close.
+    if (isThisPanel && visible) {
+      _closeDockedSidePanel();
+      return;
+    }
+
+    final switching =
+        _dockedSidePanel != _EditorDockedSidePanel.none &&
+        _dockedSidePanel != panel &&
+        visible;
+
+    if (switching) {
+      // Swap content in place; keep whatever open/close animation is running.
+      if (panel == _EditorDockedSidePanel.pages) {
+        _pagesSidePanelIndexAtOpen = currentPageIndex;
+      }
+      setState(() => _dockedSidePanel = panel);
+      if (controller.status == AnimationStatus.reverse ||
+          controller.isDismissed) {
+        _openDockedSidePanel(panel);
+      }
+      return;
+    }
+
+    if (panel == _EditorDockedSidePanel.pages) {
+      _pagesSidePanelIndexAtOpen = currentPageIndex;
+    }
+    _openDockedSidePanel(panel);
+  }
+
+  void _openDockedSidePanel(_EditorDockedSidePanel panel) {
+    final epoch = ++_dockedSidePanelAnimEpoch;
+    if (!_dockedSidePanelOcclusionActive) {
+      PageRasterCacheManager.pushLayoutOcclusion();
+      _dockedSidePanelOcclusionActive = true;
+    }
+    _beginViewportResizeStabilization(freezePageLayout: false);
+    if (_dockedSidePanel != panel) {
+      setState(() => _dockedSidePanel = panel);
+    }
+    final future = _dockedSidePanelController.forward();
+    future.whenComplete(() {
+      if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
+      if (!_dockedSidePanelController.isCompleted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
+        _endViewportResizeStabilization();
+      });
+    });
+  }
+
+  void _closeDockedSidePanel() {
+    if (_dockedSidePanel == _EditorDockedSidePanel.none &&
+        _dockedSidePanelController.isDismissed) {
+      return;
+    }
+    final epoch = ++_dockedSidePanelAnimEpoch;
+    _beginViewportResizeStabilization(freezePageLayout: false);
+    final future = _dockedSidePanelController.reverse();
+    future.whenComplete(() {
+      if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
+      if (!_dockedSidePanelController.isDismissed) return;
+      setState(() => _dockedSidePanel = _EditorDockedSidePanel.none);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
+        _endViewportResizeStabilization();
+        if (_dockedSidePanelOcclusionActive) {
+          PageRasterCacheManager.popLayoutOcclusion();
+          _dockedSidePanelOcclusionActive = false;
+        }
+      });
+    });
+  }
+
+  Widget _buildDockedSidePanelBody() {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    
+    // Cor pura e minimalista, perfeitamente adaptada a luz/escuro.
+    final uniformColor = colorScheme.surface;
+
+    // Override rígido: força os fundos rebeldes do 'pageManager' e 'outlines' 
+    // a ficarem invisíveis, mostrando apenas o uniformColor do painel base.
+    final unifiedTheme = theme.copyWith(
+      scaffoldBackgroundColor: Colors.transparent,
+      canvasColor: Colors.transparent,
+      dialogBackgroundColor: Colors.transparent,
+      cardColor: Colors.transparent,
+      colorScheme: colorScheme.copyWith(
+        surfaceContainer: Colors.transparent,
+        surfaceContainerLow: Colors.transparent,
+        surfaceContainerHigh: Colors.transparent,
+      ),
+      cardTheme: CardThemeData(
+        color: Colors.transparent,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+          ),
+        ),
+      ),
+      listTileTheme: ListTileThemeData(
+        tileColor: Colors.transparent,
+        selectedTileColor: colorScheme.secondaryContainer,
+        iconColor: colorScheme.onSurfaceVariant,
+        selectedColor: colorScheme.onSecondaryContainer,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+      ),
+      appBarTheme: theme.appBarTheme.copyWith(
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+      ),
+      tabBarTheme: theme.tabBarTheme.copyWith(
+        dividerColor: colorScheme.outlineVariant.withValues(alpha: 0.3),
+        labelColor: colorScheme.primary,
+        unselectedLabelColor: colorScheme.onSurfaceVariant,
+      ),
+    );
+
+    switch (_dockedSidePanel) {
+      case _EditorDockedSidePanel.pages:
+        return EditorFlatSidePanel(
+          title: "Document tabs",
+          onClose: _closeDockedSidePanel,
+          backgroundColor: uniformColor,
+          body: Theme(
+            data: unifiedTheme,
+            child: pageManager(
+              context,
+              pageIndexAtOpen: _pagesSidePanelIndexAtOpen,
             ),
           ),
         );
-      },
-      transitionBuilder: (context, animation, secondaryAnimation, child) {
-        if (MediaQuery.sizeOf(context).width < 600) {
-          return SlideTransition(
-            position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
-                .animate(
-                  CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                  ),
+      case _EditorDockedSidePanel.settings:
+        return EditorFlatSidePanel(
+          title: t.home.tabs.settings,
+          onClose: _closeDockedSidePanel,
+          backgroundColor: uniformColor,
+          body: Theme(
+            data: unifiedTheme,
+            child: bottomSheet(context),
+          ),
+        );
+      case _EditorDockedSidePanel.none:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Widget _wrapWithDockedSidePanel(Widget child) {
+    final panelBody = _dockedSidePanel == _EditorDockedSidePanel.none
+        ? null
+        : _buildDockedSidePanelBody();
+
+    return AnimatedBuilder(
+      animation: _dockedSidePanelController,
+      child: child,
+      builder: (context, cachedChild) {
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final ideal = editorSidePanelDesktopWidth(context);
+            final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
+            final panelWidth = isPages 
+                ? ideal.clamp(280.0, 360.0).toDouble() 
+                : ideal.clamp(340.0, 460.0).toDouble();
+            final tAnim = Curves.easeOutCubic.transform(
+              _dockedSidePanelController.value,
+            );
+            const double spacing = 16.0;
+            final totalPanelSpace = panelWidth + spacing * 2;
+            final visibleSpace = totalPanelSpace * tAnim;
+
+            return Stack(
+              children: [
+                // O canvas é empurrado de acordo com a aba selecionada. A Toolbar se mantém fixa.
+                Positioned.fill(
+                  left: isPages ? visibleSpace : 0,
+                  right: (!isPages && _dockedSidePanel == _EditorDockedSidePanel.settings) ? visibleSpace : 0,
+                  child: cachedChild!,
                 ),
-            child: child,
-          );
-        }
-        return SlideTransition(
-          position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
-              .animate(
-                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-              ),
-          child: child,
+                
+                // Sidebar Card do Material 3 Flutuante (porém fixada ao lado)
+                if (panelBody != null && tAnim > 0)
+                  Positioned(
+                    top: spacing,
+                    bottom: spacing,
+                    left: isPages ? -panelWidth * (1 - tAnim) + spacing : null,
+                    right: !isPages ? -panelWidth * (1 - tAnim) + spacing : null,
+                    width: panelWidth,
+                    child: Opacity(
+                      opacity: tAnim.clamp(0.0, 1.0),
+                      child: panelBody,
+                    ),
+                  ),
+              ],
+            );
+          },
         );
       },
     );
   }
+
 
   Widget pageManager(BuildContext context, {int? pageIndexAtOpen}) {
     return EditorPageManager(
@@ -9883,6 +10849,82 @@ class EditorState extends State<Editor>
         if (coreInfo.readOnly) return;
         autosaveAfterDelay();
       }),
+      pdfOutlines: coreInfo.pdfOutlines ?? const [],
+      onOutlinePageSelected: (int pageIndex) {
+        _navigateToPage(pageIndex, neighborWindow: 1);
+      },
+      onNavigateToPage: (int pageIndex) {
+        _navigateToPage(pageIndex, neighborWindow: 1);
+      },
+      onAddOutline: () {
+        if (coreInfo.readOnly) return;
+        final pageIndex = (pageIndexAtOpen ?? currentPageIndex ?? 0).clamp(
+          0,
+          coreInfo.pages.length - 1,
+        );
+        final page = coreInfo.pages[pageIndex];
+        final titleController = TextEditingController(
+          text: 'Page ${pageIndex + 1}',
+        );
+        showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: Text(t.editor.navigation.addOutlineForPage),
+              content: TextField(
+                controller: titleController,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: t.editor.navigation.outlineTitle,
+                ),
+                onSubmitted: (_) => Navigator.pop(dialogContext, true),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: Text(t.common.cancel),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: Text(t.common.done),
+                ),
+              ],
+            );
+          },
+        ).then((confirmed) {
+          final title = titleController.text.trim();
+          titleController.dispose();
+          if (confirmed != true || title.isEmpty) return;
+          setState(() {
+            coreInfo.pdfOutlines ??= <PdfOutlineItem>[];
+            coreInfo.pdfOutlines!.add(
+              PdfOutlineItem(
+                title: title,
+                pageIndex: pageIndex,
+                pageId: page.id,
+              ),
+            );
+            autosaveAfterDelay();
+          });
+        });
+      },
+      onRenameOutline: (item, newTitle) {
+        if (coreInfo.readOnly) return;
+        setState(() {
+          item.title = newTitle;
+          autosaveAfterDelay();
+        });
+      },
+      onDeleteOutline: (item) {
+        if (coreInfo.readOnly) return;
+        setState(() {
+          final roots = coreInfo.pdfOutlines;
+          if (roots == null) return;
+          removePdfOutlineItem(roots, item);
+          if (roots.isEmpty) coreInfo.pdfOutlines = null;
+          autosaveAfterDelay();
+        });
+      },
       insertPageAfter: insertPageAfter,
       insertPageBefore: insertPageBefore,
       duplicatePage: (int pageIndex) => setState(() {
@@ -9890,6 +10932,7 @@ class EditorState extends State<Editor>
         if (coreInfo.isInfinite) return;
         final page = coreInfo.pages[pageIndex];
         final newPage = page.copyWith(
+          id: coreInfo.allocatePageId(),
           strokes: page.strokes
               .map((stroke) => stroke.copy()..pageIndex += 1)
               .toList(),
@@ -9909,6 +10952,7 @@ class EditorState extends State<Editor>
         );
         coreInfo.pages.insert(pageIndex + 1, newPage);
         listenToQuillChanges(newPage.quill, pageIndex + 1);
+        syncPdfOutlinesWithPages(coreInfo.pdfOutlines, coreInfo.pages);
         history.recordChange(
           EditorHistoryItem(
             type: .insertPage,
@@ -9923,8 +10967,7 @@ class EditorState extends State<Editor>
       clearPage: clearPage,
       deletePage: (int pageIndex) => setState(() {
         if (coreInfo.readOnly) return;
-        if (coreInfo.isInfinite)
-          return;
+        if (coreInfo.isInfinite) return;
         final page = coreInfo.pages.removeAt(pageIndex);
         coreInfo.links = coreInfo.links
             .where(
@@ -9933,6 +10976,10 @@ class EditorState extends State<Editor>
                   (l.sourcePageId == null && l.sourcePageIndex != pageIndex),
             )
             .toList();
+        syncPdfOutlinesWithPages(coreInfo.pdfOutlines, coreInfo.pages);
+        if (coreInfo.pdfOutlines != null && coreInfo.pdfOutlines!.isEmpty) {
+          coreInfo.pdfOutlines = null;
+        }
         createPage(pageIndex - 1);
         try {
           unawaited(
@@ -9957,144 +11004,13 @@ class EditorState extends State<Editor>
         autosaveAfterDelay();
       }),
       transformationController: _transformationController,
-
-      pageBuilder: (context, index) {
-        final page = coreInfo.pages[index];
-        final theme = Theme.of(context);
-        final colorScheme = theme.colorScheme;
-        final brightness = theme.brightness;
-        final invert = brightness == Brightness.dark
-            ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
-            : false;
-
-        final Color bgColor = page.backgroundImage != null
-            ? Colors.white
-            : (page.backgroundColor.value != 0xFFFFFFFF
-                  ? page.backgroundColor
-                  : InnerCanvas.getBackgroundColor(
-                      context,
-                      coreInfo.backgroundColor,
-                    ));
-
-        final CanvasBackgroundPattern pattern = page.backgroundImage != null
-            ? CanvasBackgroundPattern.none
-            : (page.backgroundPattern ?? coreInfo.backgroundPattern);
-
-        return IgnorePointer(
-          child: RepaintBoundary(
-            child: FittedBox(
-              fit: BoxFit.contain,
-              child: SizedBox(
-                width: page.size.width,
-                height: page.size.height,
-                child: Stack(
-                  children: [
-
-                    CustomPaint(
-                      size: page.size,
-                      painter: CanvasBackgroundPainter(
-                        invert: invert,
-                        backgroundColor: bgColor,
-                        backgroundPattern: pattern,
-
-                        lineHeight: page.hasLocalLineHeight
-                            ? page.lineHeight
-                            : coreInfo.lineHeight,
-                        lineThickness: page.hasLocalLineThickness
-                            ? page.lineThickness.toInt()
-                            : coreInfo.lineThickness,
-                        primaryColor: page.lineColor.value != 0xFF9E9E9E
-                            ? page.lineColor
-                            : colorScheme.primary,
-                        secondaryColor: page.lineColor.value != 0xFF9E9E9E
-                            ? page.lineColor.withValues(alpha: 0.5)
-                            : colorScheme.secondary,
-                        marginLeft: page.marginLeft,
-                        marginRight: page.marginRight,
-                        marginTop: page.marginTop,
-                        marginBottom: page.marginBottom,
-                        borderColor:
-                            page.hasLocalBorderColor ||
-                                (page.marginLeft > 0 ||
-                                    page.marginRight > 0 ||
-                                    page.marginTop > 0 ||
-                                    page.marginBottom > 0)
-                            ? page.borderColor
-                            : null,
-                      ),
-                    ),
-
-                    if (page.backgroundImage != null)
-                      Positioned.fill(
-                        child: page.backgroundImage!.buildImageWidget(
-                          context: context,
-                          isBackground: true,
-                          invert: invert,
-                          renderScale: 0.5,
-                          overrideBoxFit: BoxFit.contain,
-                        ),
-                      ),
-                    ...page.images.map(
-                      (image) => Positioned(
-                        left: image.dstRect.left,
-                        top: image.dstRect.top,
-                        width: image.dstRect.width,
-                        height: image.dstRect.height,
-                        child: Transform.rotate(
-                          angle: image.rotationDeg * math.pi / 180,
-                          child: image.buildImageWidget(
-                            context: context,
-                            invert: invert,
-                            renderScale: 0.5,
-                            isBackground: false,
-                            overrideBoxFit: BoxFit.fill,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    CustomPaint(
-                      size: page.size,
-                      painter: CanvasPainter(
-                        invert: invert,
-                        strokes: page.strokes,
-                        laserStrokes: const [],
-                        currentStroke: null,
-                        currentSelection: null,
-                        primaryColor: colorScheme.primary,
-                        page: page,
-                        showPageIndicator: false,
-                        pageIndex: index,
-                        totalPages: coreInfo.pages.length,
-
-                        currentScale: 0.1,
-                        defaultTextStyle: theme.textTheme.bodyMedium!,
-                        doneSelecting: true,
-
-                        lineHeight: page.hasLocalLineHeight
-                            ? page.lineHeight
-                            : coreInfo.lineHeight,
-                        lineThickness: page.hasLocalLineThickness
-                            ? page.lineThickness.toDouble()
-                            : coreInfo.lineThickness.toDouble(),
-                        lineColor: page.hasLocalLineColor
-                            ? page.lineColor
-                            : colorScheme.primary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 
   void insertPageAfter(int pageIndex) => setState(() {
     if (coreInfo.readOnly) return;
     if (coreInfo.isInfinite) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     final d = _newPageDefaults();
     final hasMargins =
         d.marginLeft > 0 ||
@@ -10125,6 +11041,7 @@ class EditorState extends State<Editor>
 
     coreInfo.pages.insert(pageIndex + 1, page);
     listenToQuillChanges(page.quill, pageIndex + 1);
+    syncPdfOutlinesWithPages(coreInfo.pdfOutlines, coreInfo.pages);
     history.recordChange(
       EditorHistoryItem(
         type: .insertPage,
@@ -10140,6 +11057,7 @@ class EditorState extends State<Editor>
   void insertPageBefore(int pageIndex) => setState(() {
     if (coreInfo.readOnly) return;
     if (coreInfo.isInfinite) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     final d = _newPageDefaults();
     final hasMargins =
         d.marginLeft > 0 ||
@@ -10170,6 +11088,7 @@ class EditorState extends State<Editor>
 
     coreInfo.pages.insert(pageIndex, page);
     listenToQuillChanges(page.quill, pageIndex);
+    syncPdfOutlinesWithPages(coreInfo.pdfOutlines, coreInfo.pages);
     history.recordChange(
       EditorHistoryItem(
         type: .insertPage,
@@ -10184,6 +11103,7 @@ class EditorState extends State<Editor>
 
   void clearPage(int pageIndex) {
     if (coreInfo.readOnly) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     final page = coreInfo.pages[pageIndex];
     setState(() {
       final removedStrokes = page.strokes.toList();
@@ -10205,6 +11125,7 @@ class EditorState extends State<Editor>
 
   void clearAllPages() {
     if (coreInfo.readOnly) return;
+    if (coreInfo.hasUnhydratedLazyPages) coreInfo.hydrateAllLazyPages();
     setState(() {
       final removedStrokes = <Stroke>[];
       final removedImages = <EditorImage>[];
@@ -10258,9 +11179,16 @@ class EditorState extends State<Editor>
 
   late int _lastCurrentPageIndex = coreInfo.initialPageIndex ?? 0;
   _ResizeViewportAnchor? _resizeViewportAnchor;
+  double? _pageLayoutWidthOverride;
+  int? _viewportStablePageIndex;
 
   double _currentViewportWidth() {
     if (!mounted) return 0;
+    final canvasWidth =
+        _canvasGestureDetectorKey.currentState?.containerBounds.maxWidth;
+    if (canvasWidth != null && canvasWidth > 0 && canvasWidth.isFinite) {
+      return canvasWidth;
+    }
     final override = widget.viewportWidthOverride;
     if (override != null && override > 0) return override;
     if (!widget.embedded) {
@@ -10291,7 +11219,10 @@ class EditorState extends State<Editor>
     final screenWidth = _currentViewportWidth();
     if (screenWidth <= 0) return null;
 
-    final pageIndex = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
+    final pageIndex = (_viewportStablePageIndex ?? _lastCurrentPageIndex).clamp(
+      0,
+      coreInfo.pages.length - 1,
+    );
     final pageOffsets = _generatePageOffsets(coreInfo.pages, screenWidth);
     if (pageOffsets.isEmpty) return null;
 
@@ -10311,72 +11242,110 @@ class EditorState extends State<Editor>
     );
   }
 
-  void _lockResizeViewportAnchor() {
-    _resizeViewportAnchor = _captureResizeViewportAnchor();
-  }
-
   void _applyResizeViewportAnchor({
     double? viewportWidthOverride,
     double? viewportHeightOverride,
+    bool horizontalOnly = false,
   }) {
     final anchor = _resizeViewportAnchor;
     if (anchor == null || !mounted || coreInfo.pages.isEmpty) return;
+    if (_applyingResizeAnchor) return;
+    _applyingResizeAnchor = true;
+    try {
+      final pageIndex = anchor.pageIndex.clamp(0, coreInfo.pages.length - 1);
 
-    final pageIndex = anchor.pageIndex.clamp(0, coreInfo.pages.length - 1);
-    final screenWidth =
-        viewportWidthOverride ??
-        widget.viewportWidthOverride ??
-        _currentViewportWidth();
-    if (screenWidth <= 0) return;
+      final laidOutWidth =
+          _canvasGestureDetectorKey.currentState?.containerBounds.maxWidth;
+      final viewportWidth =
+          (viewportWidthOverride != null &&
+              viewportWidthOverride > 0 &&
+              viewportWidthOverride.isFinite)
+          ? viewportWidthOverride
+          : ((laidOutWidth != null && laidOutWidth > 0 && laidOutWidth.isFinite)
+                ? laidOutWidth
+                : (widget.viewportWidthOverride ?? _currentViewportWidth()));
+      if (viewportWidth <= 0) return;
 
-    final pageOffsets = _generatePageOffsets(coreInfo.pages, screenWidth);
-    if (pageOffsets.isEmpty) return;
+      // Frozen width for split-pane drags; live viewport width while a
+      // docked sidebar animates so pages rescale with the panel.
+      final layoutWidth =
+          (_pageLayoutWidthOverride != null && _pageLayoutWidthOverride! > 0)
+          ? _pageLayoutWidthOverride!
+          : viewportWidth;
 
-    final pageTop = CanvasGestureDetector.getTopOfPage(
-      pageIndex: pageIndex,
-      pageOffsets: pageOffsets,
-    );
-    final pageHeight = _fittedPageHeight(pageIndex, screenWidth);
-    if (pageHeight <= 0) return;
+      final transformation = _transformationController.value;
+      final scale = transformation.approxScale;
+      final translation = transformation.getTranslation();
 
-    final targetDocumentScrollY =
-        pageTop + (anchor.relativePositionInPage * pageHeight);
-    final transformation = _transformationController.value;
-    final scale = transformation.approxScale;
-    final translation = transformation.getTranslation();
-    final gestureDetector = _canvasGestureDetectorKey.currentState;
-    final middle =
-        (viewportHeightOverride ?? widget.viewportHeightOverride) != null
-        ? (viewportHeightOverride ?? widget.viewportHeightOverride)! / 2
-        : (gestureDetector != null
-              ? gestureDetector.containerBounds.maxHeight / 2
-              : MediaQuery.sizeOf(context).height / 2);
+      // Horizontally center in the live viewport at any zoom (HUD stays put).
+      final targetTranslationX = viewportWidth * (1 - scale) / 2;
 
-    final targetScrollY = -targetDocumentScrollY;
-    final targetTranslationY = (targetScrollY - middle) * scale + middle;
-    if ((targetTranslationY - translation.y).abs() < 0.1) return;
+      double targetTranslationY = translation.y;
+      if (!horizontalOnly) {
+        final pageOffsets = _generatePageOffsets(coreInfo.pages, layoutWidth);
+        if (pageOffsets.isEmpty) return;
 
-    final nextTransformation = transformation.clone()
-      ..setTranslationRaw(translation.x, targetTranslationY, translation.z);
-    _transformationController.value = nextTransformation;
+        final pageTop = CanvasGestureDetector.getTopOfPage(
+          pageIndex: pageIndex,
+          pageOffsets: pageOffsets,
+        );
+        final pageHeight = _fittedPageHeight(pageIndex, layoutWidth);
+        if (pageHeight <= 0) return;
+
+        final targetDocumentScrollY =
+            pageTop + (anchor.relativePositionInPage * pageHeight);
+        final gestureDetector = _canvasGestureDetectorKey.currentState;
+        final laidOutHeight = gestureDetector?.containerBounds.maxHeight;
+        final middle =
+            (viewportHeightOverride != null && viewportHeightOverride > 0)
+            ? viewportHeightOverride / 2
+            : ((laidOutHeight != null && laidOutHeight > 0)
+                  ? laidOutHeight / 2
+                  : ((widget.viewportHeightOverride) != null
+                        ? widget.viewportHeightOverride! / 2
+                        : MediaQuery.sizeOf(context).height / 2));
+
+        final targetScrollY = -targetDocumentScrollY;
+        targetTranslationY = (targetScrollY - middle) * scale + middle;
+      }
+
+      if ((targetTranslationY - translation.y).abs() < 0.05 &&
+          (targetTranslationX - translation.x).abs() < 0.05) {
+        return;
+      }
+
+      final nextTransformation = transformation.clone()
+        ..setTranslationRaw(
+          targetTranslationX,
+          targetTranslationY,
+          translation.z,
+        );
+      _transformationController.value = nextTransformation;
+    } finally {
+      _applyingResizeAnchor = false;
+    }
   }
 
   void _unlockResizeViewportAnchor() {
     _resizeViewportAnchor = null;
   }
 
+  /// Returns to home after the first-page thumbnail is on disk/cache so the
+  /// preview card can crossfade immediately.
   void _goToHome(BuildContext context) {
     _releaseAreaEraserQueueAndSessions();
+    unawaited(_goToHomeAfterThumbnail(context));
+  }
 
-    if (savingState.value == SavingState.waitingToSave ||
-        savingState.value == SavingState.saving) {
-      unawaited(
-        saveToFile(force: true).catchError((e) {
-          log.warning('Background save on exit failed: $e');
-        }),
-      );
+  Future<void> _goToHomeAfterThumbnail(BuildContext context) async {
+    await _flushThumbnailBeforeExit();
+    // Empty notes are auto-deleted on dispose — do not seed them into Recent.
+    if (!_isEmptyNote()) {
+      HomeDataCache.instance.rememberRecentPaths([coreInfo.filePath]);
+    } else {
+      HomeDataCache.instance.forgetRecentPaths([coreInfo.filePath]);
     }
-
+    if (!context.mounted) return;
     if (context.canPop()) {
       context.pop();
     } else {
@@ -10384,8 +11353,39 @@ class EditorState extends State<Editor>
     }
   }
 
+  void _markThumbnailWritten(String hash) {
+    if (hash.isEmpty) return;
+    _lastWrittenThumbnailHash = hash;
+    coreInfo.firstPageHash = hash;
+    coreInfo.notifyThumbnailGenerated();
+  }
+
+  Future<void> _flushThumbnailBeforeExit() async {
+    if (coreInfo.readOnly || coreInfo.isInfinite || coreInfo.pages.isEmpty) {
+      return;
+    }
+    final hash = coreInfo.calculateFirstPageHash();
+    if (hash.isEmpty || hash == _lastWrittenThumbnailHash) return;
+    try {
+      final bytes = await _captureThumbnailBytesFromFirstPage();
+      if (bytes == null || bytes.isEmpty) return;
+      final path = '${coreInfo.filePath}${Editor.extension}.p';
+      ThumbnailCache.instance.put(coreInfo.filePath, bytes);
+      await FileManager.writeFile(path, bytes, awaitWrite: true);
+      _markThumbnailWritten(hash);
+    } catch (e) {
+      log.fine('Exit thumbnail flush failed: $e');
+    }
+  }
+
   int get currentPageIndex {
     if (!mounted) return _lastCurrentPageIndex;
+    if (_viewportStablePageIndex != null) {
+      return _viewportStablePageIndex!.clamp(
+        0,
+        math.max(0, coreInfo.pages.length - 1),
+      );
+    }
     if (coreInfo.isInfinite || coreInfo.pages.length <= 1) {
       return _lastCurrentPageIndex = 0;
     }
@@ -10416,19 +11416,70 @@ class EditorState extends State<Editor>
   }
 
   @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted) return;
+
+    final view = View.maybeOf(context);
+    // Battery saver often flips refresh rate without a layout size change.
+    DisplayInkFeel.instance.updateFromView(view);
+
+    if (coreInfo.pages.isEmpty || coreInfo.isInfinite) return;
+    if (view == null) return;
+    final logical = view.physicalSize / view.devicePixelRatio;
+    final last = _lastMetricsLogicalSize;
+    _lastMetricsLogicalSize = logical;
+    // Soft keyboard / system UI often fires metrics without a real size flip.
+    if (last != null &&
+        (last.width - logical.width).abs() < 1.0 &&
+        (last.height - logical.height).abs() < 1.0) {
+      return;
+    }
+
+    // Sidebar / split-divider sessions own the anchor; do not steal or end them.
+    if (_resizeViewportAnchor != null ||
+        _dockedSidePanelController.isAnimating) {
+      return;
+    }
+
+    // Capture page from the still-current layout, then re-apply after the
+    // orientation (or window) size change has laid out.
+    _beginViewportResizeStabilization(freezePageLayout: false);
+    _metricsOwnsResizeSession = true;
+    final epoch = ++_metricsSettleEpoch;
+    void settle() {
+      if (!mounted || epoch != _metricsSettleEpoch) return;
+      if (!_metricsOwnsResizeSession) return;
+      _metricsOwnsResizeSession = false;
+      if (_resizeViewportAnchor == null) return;
+      _endViewportResizeStabilization();
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || epoch != _metricsSettleEpoch) return;
+      // Second frame: canvas containerBounds usually match the new size.
+      WidgetsBinding.instance.addPostFrameCallback((_) => settle());
+    });
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
+      if (VaultAdapter.preventLock) return;
       // Do not release on [inactive] alone (keyboard, transient overlays); only
       // when the app is not expected to keep drawing (paused/hidden/detached).
       if (state != AppLifecycleState.inactive) {
         _releaseAreaEraserQueueAndSessions();
       }
-      saveToFile(force: true);
+      unawaited(
+        saveToFile(force: true, awaitVaultCommit: true).catchError((e, st) {
+          log.warning('Save on lifecycle pause failed: $e', e, st);
+        }),
+      );
     } else if (state == AppLifecycleState.resumed) {
-
       final now = DateTime.now();
       _lastSaveTime = now;
       _lastTimeSpentUpdate = now;
@@ -10438,13 +11489,28 @@ class EditorState extends State<Editor>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    stows.editorFullScreen.removeListener(_onFullscreenPrefChanged);
-    if (stows.editorFullScreen.value) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+    if (identical(
+      NotesEyedropperTarget.canvasRepaintKey,
+      _regionScreenshotBoundaryKey,
+    )) {
+      NotesEyedropperTarget.canvasRepaintKey = null;
     }
 
+    if (_dockedSidePanelOcclusionActive) {
+      TiledStrokePictureCache.popLayoutOcclusion();
+      _dockedSidePanelOcclusionActive = false;
+    }
+
+    _pageRasterCache.dispose();
+    PageRasterCacheManager.removeLodSettledListener(_onPageRasterLodSettled);
+
     _keepAliveController.dispose();
+    _dockedSidePanelController
+      ..removeListener(_onDockedSidePanelAnimTick)
+      ..dispose();
     _skipTransformClampForExpansion.dispose();
+    _suppressTransformClamp.dispose();
 
     _cleanUpAsync();
 
@@ -10463,14 +11529,13 @@ class EditorState extends State<Editor>
     stows.lastBallpointPenOptions.notifyListeners();
     stows.lastHighlighterOptions.notifyListeners();
 
-    isOpeningNote.dispose();
     _interactionRepaint.dispose();
+    _eraserPositionRepaint.dispose();
 
     super.dispose();
   }
 
   void _cleanUpAsync() {
-
     final totalPages = coreInfo.pages.length;
     var disposed = false;
 
@@ -10478,6 +11543,9 @@ class EditorState extends State<Editor>
       if (disposed) return;
       disposed = true;
       _isDisposed = true;
+      // Restore global ink defaults so the next new note / home ink screen
+      // sees the active preset — not this note's local toolbar edits.
+      InkPresetLibrary.applyActive(stows);
       coreInfo.dispose();
     }
 
@@ -10500,6 +11568,12 @@ class EditorState extends State<Editor>
     }
 
     if (_isDeleted) {
+      unawaited(
+        EditorRecoveryJournal.purgeAllForNote(
+          noteBasePath: coreInfo.filePath,
+          noteId: coreInfo.noteId,
+        ),
+      );
       doDispose();
       return;
     }
@@ -10507,6 +11581,7 @@ class EditorState extends State<Editor>
     if (_isEmptyNote()) {
       log.info('Note is empty on exit. Deleting automatically...');
       _isDeleted = true;
+      HomeDataCache.instance.forgetRecentPaths([coreInfo.filePath]);
 
       FileManager.deleteFile(coreInfo.filePath + Editor.extension)
           .then((_) {
@@ -10530,6 +11605,20 @@ class EditorState extends State<Editor>
       return;
     }
 
+    if (savingState.value == SavingState.saved &&
+        !_saveFollowUpRequested &&
+        !(_renameTimer?.isActive ?? false)) {
+      // Leaving a saved editor must not leave recovery strokes behind for the
+      // next note that reuses this display name.
+      unawaited(_recoveryJournal?.clear() ?? Future<void>.value());
+      log.fine(
+        'Document ($totalPages pages) already persisted — dispose without redundant save',
+      );
+      _mathSolver.dispose();
+      doDispose();
+      return;
+    }
+
     log.info('Document ($totalPages pages) - saving before dispose');
 
     saveToFile(force: true, updateThumbnail: true, awaitVaultCommit: true)
@@ -10550,12 +11639,18 @@ class EditorState extends State<Editor>
         });
   }
 
+  /// True when leaving the editor would auto-delete this note (no ink / media).
+  bool get wouldAutoDeleteOnExit => _isEmptyNote();
+
   bool _isEmptyNote() {
     if (coreInfo.readOnly) return false;
-
+    // Unhydrated shells still hold real content on disk — never auto-delete.
+    if (coreInfo.hasUnhydratedLazyPages) return false;
     for (final page in coreInfo.pages) {
-      if (page.strokes.isNotEmpty) return false;
-      if (page.images.isNotEmpty) return false;
+      if (page.isLazyShell) return false;
+
+      if (page.allStrokesInDrawOrder.isNotEmpty) return false;
+      if (page.allImagesInDrawOrder.isNotEmpty) return false;
       if (page.backgroundImage != null) return false;
 
       if (page.quill.controller.document.length > 1) return false;
@@ -10720,6 +11815,215 @@ class EditorState extends State<Editor>
       autosaveAfterDelay();
     }
   }
+
+  Future<void> _showSelectionStrokeTypePicker() async {
+    final select = Select.currentSelect;
+    if (!select.doneSelecting || select.selectResult.strokes.isEmpty) return;
+    if (coreInfo.readOnly) return;
+
+    final convertible = select.selectResult.strokes
+        .where((s) => s.canConvertStrokeType)
+        .toList(growable: false);
+    if (convertible.isEmpty) return;
+
+    final currentIds = convertible.map((s) => s.toolId).toSet();
+    final initialId = currentIds.length == 1
+        ? currentIds.single
+        : convertible.first.toolId;
+
+    final result = await showGeneralDialog<ToolId>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black.withValues(alpha: 0.4),
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (context, animation, secondaryAnimation) {
+        final scheme = Theme.of(context).colorScheme;
+        return Center(
+          child: Material(
+            color: Colors.transparent,
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+              child: Container(
+                width: 340,
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
+                decoration: BoxDecoration(
+                  color: scheme.surface.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      blurRadius: 30,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      t.editor.selectionBar.changeStrokeTypeTitle,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      t.editor.selectionBar.changeStrokeTypeHint,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurface.withValues(alpha: 0.7),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ...Pen.convertibleInkToolIds.map((id) {
+                      final selected =
+                          id == initialId && currentIds.length == 1;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Material(
+                          color: selected
+                              ? scheme.primary.withValues(alpha: 0.14)
+                              : scheme.surfaceContainerHighest.withValues(
+                                  alpha: 0.35,
+                                ),
+                          borderRadius: BorderRadius.circular(14),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(14),
+                            onTap: () => Navigator.pop(context, id),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              child: Row(
+                                children: [
+                                  FaIcon(
+                                    Pen.iconForTool(id),
+                                    size: 18,
+                                    color: selected
+                                        ? scheme.primary
+                                        : scheme.onSurface,
+                                  ),
+                                  const SizedBox(width: 14),
+                                  Expanded(
+                                    child: Text(
+                                      Pen.displayNameForTool(id),
+                                      style: TextStyle(
+                                        fontWeight: selected
+                                            ? FontWeight.w600
+                                            : FontWeight.w500,
+                                        color: selected
+                                            ? scheme.primary
+                                            : scheme.onSurface,
+                                      ),
+                                    ),
+                                  ),
+                                  if (selected)
+                                    Icon(
+                                      Icons.check_rounded,
+                                      size: 20,
+                                      color: scheme.primary,
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: Text(t.common.cancel),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.95, end: 1.0).animate(
+              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+
+    if (result == null || !mounted) return;
+    _applySelectionStrokeType(result);
+  }
+
+  void _applySelectionStrokeType(ToolId newToolId) {
+    final select = Select.currentSelect;
+    if (!select.doneSelecting || select.selectResult.strokes.isEmpty) return;
+    if (coreInfo.readOnly) return;
+
+    final oldStrokes = <Stroke>[];
+    final newStrokes = <Stroke>[];
+    final selectionReplacement = <Stroke>[];
+
+    for (final stroke in select.selectResult.strokes) {
+      if (!stroke.canConvertStrokeType || stroke.toolId == newToolId) {
+        selectionReplacement.add(stroke);
+        continue;
+      }
+      final converted = Pen.convertStroke(stroke, newToolId);
+      oldStrokes.add(stroke);
+      newStrokes.add(converted);
+      selectionReplacement.add(converted);
+    }
+
+    if (oldStrokes.isEmpty) return;
+
+    setState(() {
+      final pageIndices = <int>{};
+      for (var i = 0; i < oldStrokes.length; i++) {
+        final oldStroke = oldStrokes[i];
+        final newStroke = newStrokes[i];
+        final page = coreInfo.pages[oldStroke.pageIndex];
+        page.removeStrokeFromAnyLayer(oldStroke);
+        page.strokeSpatialIndex?.remove(oldStroke);
+        page.insertStroke(newStroke);
+        page.strokeSpatialIndex?.insert(newStroke);
+        pageIndices.add(oldStroke.pageIndex);
+      }
+      for (final idx in pageIndices) {
+        coreInfo.pages[idx].redrawStrokes();
+      }
+
+      select.selectResult = select.selectResult.copyWith(
+        strokes: selectionReplacement,
+        displayBounds: null,
+      );
+
+      history.recordChange(
+        EditorHistoryItem(
+          type: EditorHistoryItemType.changeStrokeType,
+          pageIndex: select.selectResult.pageIndex,
+          strokes: oldStrokes,
+          strokesAdded: newStrokes,
+          images: const [],
+        ),
+      );
+    });
+    _bumpInteractionRepaint();
+    autosaveAfterDelay();
+  }
 }
 
 class _ResizeViewportAnchor {
@@ -10883,285 +12187,68 @@ class _SmoothCirclePainter extends CustomPainter {
   }
 }
 
-class _PdfLoadingAppBarWrapper extends StatelessWidget
-    implements PreferredSizeWidget {
-  const _PdfLoadingAppBarWrapper({
-    required this.pdfLoadingState,
-    this.openingNoteState,
-    required this.child,
+class EditorFlatSidePanel extends StatelessWidget {
+  const EditorFlatSidePanel({
+    super.key,
+    required this.title,
+    required this.body,
+    required this.onClose,
+    this.backgroundColor,
   });
 
-  final ValueNotifier<({double progress, String label})?> pdfLoadingState;
-  final ValueNotifier<bool>? openingNoteState;
-  final Widget Function(
-    BuildContext context,
-    ({double progress, String label})? pdfLoading,
-    bool showOpening,
-  )
-  child;
-
-  @override
-  Size get preferredSize {
-    final toolbarAtTop = stows.editorToolbarAlignment.value == AxisDirection.up;
-    final showPdfInAppBar = pdfLoadingState.value != null && !toolbarAtTop;
-    final showOpeningInAppBar =
-        (openingNoteState?.value ?? false) && !toolbarAtTop;
-    final showBar = showPdfInAppBar || showOpeningInAppBar;
-    return Size.fromHeight(kToolbarHeight + (showBar ? 52 : 0));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: openingNoteState ?? ValueNotifier(false),
-      builder: (context, showOpening, _) {
-        return ValueListenableBuilder<({double progress, String label})?>(
-          valueListenable: pdfLoadingState,
-          builder: (context, pdfLoading, __) {
-            return KeyedSubtree(
-              key: ValueKey('${pdfLoading != null}_$showOpening'),
-              child: child(context, pdfLoading, showOpening),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class _SplitViewAppBarWithPdfProgress extends StatelessWidget
-    implements PreferredSizeWidget {
-  const _SplitViewAppBarWithPdfProgress({
-    required this.baseAppBar,
-    required this.pdfLoadingState,
-  });
-
-  final PreferredSizeWidget baseAppBar;
-  final ValueNotifier<({double progress, String label})?> pdfLoadingState;
-
-  @override
-  Size get preferredSize {
-    final showInAppBar =
-        pdfLoadingState.value != null &&
-        stows.editorToolbarAlignment.value != AxisDirection.up;
-    return Size.fromHeight(
-      baseAppBar.preferredSize.height + (showInAppBar ? 52 : 0),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<({double progress, String label})?>(
-      valueListenable: pdfLoadingState,
-      builder: (context, pdfLoading, _) {
-        final toolbarAtTop =
-            stows.editorToolbarAlignment.value == AxisDirection.up;
-        final showInAppBar = pdfLoading != null && !toolbarAtTop;
-        return KeyedSubtree(
-          key: ValueKey(pdfLoading != null),
-          child: !showInAppBar
-              ? baseAppBar
-              : _PdfDecryptProgressBarPreferred(
-                  baseAppBar: baseAppBar,
-                  progress: pdfLoading.progress,
-                  label: pdfLoading.label,
-                ),
-        );
-      },
-    );
-  }
-}
-
-class _PdfDecryptProgressBarPreferred extends StatelessWidget
-    implements PreferredSizeWidget {
-  const _PdfDecryptProgressBarPreferred({
-    required this.baseAppBar,
-    required this.progress,
-    required this.label,
-  });
-
-  final PreferredSizeWidget baseAppBar;
-  final double progress;
-  final String label;
-
-  @override
-  Size get preferredSize =>
-      Size.fromHeight(baseAppBar.preferredSize.height + 52);
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        baseAppBar,
-        _PdfDecryptProgressBar(progress: progress, label: label),
-      ],
-    );
-  }
-}
-
-class _OpeningNoteBar extends StatelessWidget {
-  const _OpeningNoteBar();
+  final String title;
+  final Widget body;
+  final VoidCallback onClose;
+  final Color? backgroundColor;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
-    final menubarColors = [
-      (isDark ? const Color(0xFF1A1A1A) : colorScheme.surface).withValues(
-        alpha: 0.95,
-      ),
-      (isDark ? const Color(0xFF111111) : colorScheme.surface),
-    ];
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: menubarColors,
-        ),
-        border: Border(
-          top: BorderSide(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-            width: 1,
-          ),
+    
+    final panelColor = backgroundColor ?? colorScheme.surface;
+
+    return Material(
+      color: panelColor,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.5),
         ),
       ),
-      child: Row(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Icon(
-            Icons.folder_open_rounded,
-            size: 20,
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.7)
-                : colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+            child: Row(
               children: [
-                Text(
-                  'Opening note…',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 6),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: null,
-                    backgroundColor: isDark
-                        ? const Color(0xFF0D0D0D)
-                        : colorScheme.surfaceContainerHighest,
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      isDark
-                          ? Colors.white.withValues(alpha: 0.6)
-                          : colorScheme.primary,
+                Expanded(
+                  child: Text(
+                    title,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w500,
                     ),
-                    minHeight: 6,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                  onPressed: onClose,
+                  tooltip: 'Close',
+                  style: IconButton.styleFrom(
+                    padding: const EdgeInsets.all(8),
+                    minimumSize: const Size(36, 36),
                   ),
                 ),
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PdfDecryptProgressBar extends StatelessWidget {
-  const _PdfDecryptProgressBar({required this.progress, required this.label});
-
-  final double progress;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
-
-    final menubarColors = [
-      (isDark ? const Color(0xFF1A1A1A) : colorScheme.surface).withValues(
-        alpha: 0.95,
-      ),
-      (isDark ? const Color(0xFF111111) : colorScheme.surface),
-    ];
-
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: menubarColors,
-        ),
-        border: Border(
-          top: BorderSide(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-            width: 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.lock_open_rounded,
-            size: 20,
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.7)
-                : colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                RichText(
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  text: TextSpan(
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                    children: [
-                      TextSpan(
-                        text: '${context.t.editor.pdfLoading.decrypting} · ',
-                        style: const TextStyle(fontWeight: FontWeight.w500),
-                      ),
-                      TextSpan(text: label),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 6),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: progress > 0 ? progress : null,
-                    backgroundColor: isDark
-                        ? const Color(0xFF0D0D0D)
-                        : colorScheme.surfaceContainerHighest,
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      isDark
-                          ? Colors.white.withValues(alpha: 0.6)
-                          : colorScheme.primary,
-                    ),
-                    minHeight: 6,
-                  ),
-                ),
-              ],
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(16)),
+              child: body,
             ),
           ),
         ],

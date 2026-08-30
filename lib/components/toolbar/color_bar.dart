@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'package:flex_color_picker/flex_color_picker.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/components/toolbar/color_option.dart';
+import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -279,36 +277,14 @@ class _ColorBarState extends State<ColorBar> {
   }
 
   void openColorPicker(BuildContext context) async {
-    final bool? confirmChange = await showDialog(
-      context: context,
-      builder: (BuildContext context) => _colorPickerDialog(context),
+    final result = await showNotesColorPicker(
+      context,
+      initialColor: pickedColor,
+      recordRecent: false, // setColor / editor already updates recent colors
     );
-    if (confirmChange ?? false) {
-      widget.setColor(pickedColor.withInversion(widget.invert));
+    if (result != null) {
+      pickedColor = result;
+      widget.setColor(result.withInversion(widget.invert));
     }
   }
-
-  Widget _colorPickerDialog(BuildContext context) => AdaptiveAlertDialog(
-    title: Text(t.settings.accentColorPicker.pickAColor),
-    content: SingleChildScrollView(
-      child: ColorPicker(
-        color: pickedColor,
-        pickersEnabled: const {ColorPickerType.wheel: true},
-        showColorCode: true,
-        colorCodeHasColor: true,
-        enableOpacity: false,
-        onColorChanged: (Color color) {
-          pickedColor = color;
-        },
-      ),
-    ),
-    actions: [
-      CupertinoDialogAction(
-        child: Text(MaterialLocalizations.of(context).saveButtonLabel),
-        onPressed: () {
-          Navigator.of(context).pop(true);
-        },
-      ),
-    ],
-  );
 }

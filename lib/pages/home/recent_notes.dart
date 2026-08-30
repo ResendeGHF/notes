@@ -3,15 +3,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:collapsible/collapsible.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:logging/logging.dart';
 import 'package:saber/components/editor/note_properties_dialog.dart';
 import 'package:saber/components/home/delete_note_button.dart';
 import 'package:saber/components/home/export_note_button.dart';
+import 'package:saber/components/home/home_selection_action_bar.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/home/masonry_files.dart';
 import 'package:saber/components/home/move_note_button.dart';
 import 'package:saber/components/home/new_note_button.dart';
@@ -19,30 +21,45 @@ import 'package:saber/components/home/rename_note_button.dart';
 import 'package:saber/components/home/select_all_button.dart';
 import 'package:saber/components/home/sort_button.dart';
 import 'package:saber/components/home/welcome.dart';
+import 'package:saber/components/navbar/responsive_navbar.dart';
+import 'package:saber/components/navbar/vertical_navbar.dart';
 import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
 import 'package:saber/data/prefs.dart';
+import 'package:saber/data/recent_notes_index.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/services/vault_adapter.dart';
 
 class RecentPage extends StatefulWidget {
-  const RecentPage({super.key});
+  const RecentPage({super.key, this.isActive = true});
+
+  /// Home keeps this page in an [IndexedStack]; sort resets when this goes false.
+  final bool isActive;
 
   @override
   State<RecentPage> createState() => _RecentPageState();
 }
 
 class _RecentPageState extends State<RecentPage> {
-  List<String> filePaths =
-      [];
+  final RecentNotesIndex _index = RecentNotesIndex();
+  List<String> filePaths = [];
   var failed = false;
-  int? _totalFileCount;
+  var _loaded = false;
 
   final ValueNotifier<List<String>> selectedFiles = ValueNotifier([]);
 
   final log = Logger('RecentPage');
+
+  final List<FileOperation> _pendingOps = [];
+  Timer? _flushOpsTimer;
+  final Map<String, Timer> _verifyGone = {};
+
+  /// Grid columns are locked to the window size, not the content width, so
+  /// expanding/collapsing the vertical navbar only rescales cards in place.
+  double? _gridColumnWindowWidth;
+  int _gridCrossAxisCount = 2;
 
   void moveIncorrectlyImportedFiles() async {
     for (final filePath in stows.recentFiles.value) {
@@ -74,85 +91,162 @@ class _RecentPageState extends State<RecentPage> {
     );
     selectedFiles.addListener(_setState);
     moveIncorrectlyImportedFiles();
-    _loadWithCache();
+    _loadInitial();
+  }
+
+  @override
+  void didUpdateWidget(RecentPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive && !widget.isActive) {
+      final sort = _index.sort;
+      final needsReset =
+          sort.functionIdx != SortOverride.recentDefaultFunctionIdx ||
+          sort.increasing != SortOverride.recentDefaultIncreasing;
+      if (needsReset) {
+        sort.resetToRecentDefault();
+        _publish();
+      }
+    }
   }
 
   @override
   void dispose() {
-    _fileWriteDebounce?.cancel();
+    _flushOpsTimer?.cancel();
+    for (final timer in _verifyGone.values) {
+      timer.cancel();
+    }
+    _verifyGone.clear();
     selectedFiles.removeListener(_setState);
     fileWriteSubscription?.cancel();
     super.dispose();
   }
 
   StreamSubscription? fileWriteSubscription;
-  Timer? _fileWriteDebounce;
+
   void fileWriteListener(FileOperation event) {
+    if (event.isThumbnail) return;
+    _pendingOps.add(event);
+    _flushOpsTimer ??= Timer(Duration.zero, _flushPendingOps);
+  }
 
-    if (selectedFiles.value.isNotEmpty) return;
+  void _flushPendingOps() {
+    _flushOpsTimer = null;
+    if (!mounted) return;
+    final ops = List<FileOperation>.from(_pendingOps);
+    _pendingOps.clear();
+    if (ops.isEmpty) return;
 
-    _fileWriteDebounce?.cancel();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _fileWriteDebounce?.cancel();
-      _fileWriteDebounce = Timer(const Duration(milliseconds: 250), () {
-        _fileWriteDebounce = null;
-        if (mounted) findRecentlyAccessedNotes(fromFileListener: true);
-      });
+    final result = _index.applyOperations(ops);
+    for (final path in result.written) {
+      _cancelVerifyGone(path);
+      final entry = _index[path];
+      if (entry != null) HomeDataCache.instance.upsertNoteIndex(entry);
+    }
+    for (final path in result.removed) {
+      _cancelVerifyGone(path);
+      HomeDataCache.instance.removeNoteIndex(path);
+    }
+    for (final path in result.unverifiedDeletes) {
+      _scheduleVerifyGone(path);
+    }
+
+    if (result.written.isNotEmpty || result.removed.isNotEmpty) {
+      _loaded = true;
+      _publish();
+    }
+    for (final path in result.written) {
+      unawaited(_refreshMeta(path));
+    }
+  }
+
+  void _cancelVerifyGone(String path) {
+    _verifyGone.remove(path)?.cancel();
+  }
+
+  void _scheduleVerifyGone(String path) {
+    _cancelVerifyGone(path);
+    _verifyGone[path] = Timer(const Duration(milliseconds: 280), () {
+      _verifyGone.remove(path);
+      unawaited(_confirmGone(path));
     });
+  }
+
+  Future<void> _confirmGone(String path) async {
+    if (!mounted || !_index.contains(path)) return;
+    if (await FileManager.doesNoteExist(path)) return;
+    if (!mounted || !_index.contains(path)) return;
+    _index.remove(path);
+    HomeDataCache.instance.removeNoteIndex(path);
+    _publish();
+  }
+
+  Future<void> _refreshMeta(String path) async {
+    final peeked = await FileManager.peekNoteIndexEntry(path);
+    if (!mounted || !_index.contains(path)) return;
+    _index.applyPeekedMeta(peeked);
+    final merged = _index[path];
+    if (merged != null) HomeDataCache.instance.upsertNoteIndex(merged);
+    _publish();
   }
 
   void _setState() => setState(() {});
 
-  void _loadWithCache() {
-    final cache = HomeDataCache.instance;
-    if (cache.recentCached != null) {
-      filePaths = List<String>.from(cache.recentCached!);
-      failed = filePaths.isEmpty;
+  void _publish({bool notify = true}) {
+    final nextPaths = _index.sortedPaths();
+    final nextFailed = nextPaths.isEmpty && _loaded;
+    if (listEquals(nextPaths, filePaths) && nextFailed == failed) {
+      return;
+    }
+    failed = nextFailed;
+    filePaths = nextPaths;
+    if (notify) setState(() {});
+  }
+
+  void _loadInitial() {
+    final cached = HomeDataCache.instance.allNotesCached;
+    if (cached != null) {
+      _index.mergeFromDisk(cached);
+      _loaded = true;
+      _publish(notify: false);
       if (mounted) setState(() {});
     }
-    cache.getRecentOrLoad().then((list) {
+    HomeDataCache.instance.getAllNotesOrLoad().then((list) {
       if (!mounted) return;
-      filePaths = List<String>.from(list);
-      failed = filePaths.isEmpty;
-      setState(() {});
-    });
-    FileManager.getTotalFileCount().then((count) {
-      if (mounted) setState(() => _totalFileCount = count);
+      if (list.isEmpty && _index.isNotEmpty) return;
+      _index.mergeFromDisk(list);
+      _loaded = true;
+      _publish();
     });
   }
 
-  Future findRecentlyAccessedNotes({bool fromFileListener = false}) async {
+  Future<void> _reloadFromDisk() async {
+    final list = await HomeDataCache.instance.reloadAllNotes();
     if (!mounted) return;
-
-    if (fromFileListener) {
-      HomeDataCache.instance.invalidate();
+    if (list.isEmpty && _index.isNotEmpty) return;
+    _index.mergeFromDisk(list);
+    final diskPaths = {for (final e in list) e.path};
+    final extras = [
+      for (final path in _index.paths)
+        if (!diskPaths.contains(path)) path,
+    ];
+    for (final path in extras) {
+      if (await FileManager.doesNoteExist(path)) continue;
+      if (!mounted) return;
+      _index.remove(path);
+      HomeDataCache.instance.removeNoteIndex(path);
     }
-
-    final list = await HomeDataCache.instance.getRecentOrLoad();
-    final totalFileCount = await FileManager.getTotalFileCount();
-
-    if (list.isEmpty) {
-      failed = true;
-      filePaths = [];
-    } else {
-      failed = false;
-      filePaths = List<String>.from(list);
-    }
-
-    if (mounted) {
-      setState(() {
-        _totalFileCount = totalFileCount;
-      });
-    }
+    _loaded = true;
+    _publish();
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = ColorScheme.of(context);
-    final platform = Theme.of(context).platform;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final platform = theme.platform;
 
     final isSelecting = selectedFiles.value.isNotEmpty;
+    final totalFileCount = _index.length;
 
     return PopScope(
       canPop: !isSelecting,
@@ -162,169 +256,187 @@ class _RecentPageState extends State<RecentPage> {
       },
       child: Scaffold(
         extendBody: true,
-
+        appBar: AppBar(
+          toolbarHeight: kToolbarHeight,
+          scrolledUnderElevation: 2,
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          backgroundColor: homeAppBarBackgroundColor(context),
+          titleSpacing: 16,
+          title: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Ícone decorativo com fundo colorido
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: colorScheme.primary.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.history_rounded,
+                  size: 18,
+                  color: colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Título Principal
+              Text(
+                t.home.titles.home,
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: colorScheme.onSurface,
+                  letterSpacing: -0.5,
+                ),
+              ),
+              // Badge/Pílula de contagem de arquivos
+              if (_loaded && totalFileCount > 0) ...[
+                const SizedBox(width: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: colorScheme.outlineVariant.withValues(alpha: 0.5),
+                    ),
+                  ),
+                  child: Text(
+                    '$totalFileCount itens',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 12),
+              child: ValueListenableBuilder<bool>(
+                valueListenable: stows.homeListMode,
+                builder: (context, listMode, _) {
+                  return ValueListenableBuilder<bool>(
+                    valueListenable: stows.localEncryptionEnabled,
+                    builder: (context, encryptionOn, _) {
+                      return ValueListenableBuilder<bool>(
+                        valueListenable: VaultAdapter.unlockListenable,
+                        builder: (context, vaultUnlocked, _) {
+                          return _RecentNotesToolbarStrip(
+                            listMode: listMode,
+                            showVaultLock: encryptionOn && vaultUnlocked,
+                            onToggleViewMode: () =>
+                                stows.homeListMode.value = !listMode,
+                            onLockVault: () {
+                              unawaited(VaultAdapter.lockAndGoToLogin());
+                            },
+                            sortButton: SortButton(
+                              sortContext: SortContext.recent,
+                              sortOverride: _index.sort,
+                              callback: () async {
+                                _publish();
+                              },
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
         body: LayoutBuilder(
           builder: (context, constraints) {
             return ValueListenableBuilder<bool>(
               valueListenable: stows.homeListMode,
               builder: (context, listMode, _) {
-                final screenWidth = MediaQuery.sizeOf(context).width;
-                final crossAxisCount = listMode
-                    ? 1
-                    : (screenWidth ~/ 200).clamp(1, 10);
+                final windowWidth = MediaQuery.sizeOf(context).width;
+                if (_gridColumnWindowWidth != windowWidth) {
+                  _gridColumnWindowWidth = windowWidth;
+                  // Size columns for the widest content area (collapsed rail).
+                  // Expanding the rail shrinks tiles but must not reflow rows.
+                  final columnBasis = ResponsiveNavbar.isLargeScreen
+                      ? windowWidth - VerticalNavbar.collapsedWidth
+                      : windowWidth;
+                  _gridCrossAxisCount = (columnBasis ~/ 200).clamp(1, 10);
+                }
+                final crossAxisCount = listMode ? 1 : _gridCrossAxisCount;
 
-                return RefreshIndicator(
+                // Lay out at the widest content width and Transform.scale into
+                // the current slot so rail toggle only scales cards — scroll
+                // offset (and what you see mid-list) stays put.
+                final slotW = constraints.maxWidth;
+                final slotH = constraints.maxHeight;
+                final layoutW = ResponsiveNavbar.isLargeScreen
+                    ? (windowWidth - VerticalNavbar.collapsedWidth)
+                        .clamp(1.0, double.infinity)
+                    : slotW;
+                final scale = (slotW / layoutW).clamp(0.01, 1.0);
+                final viewportH = slotH / scale;
+
+                final scrollBody = RefreshIndicator(
                   onRefresh: () => Future.wait([
-                    findRecentlyAccessedNotes(),
+                    _reloadFromDisk(),
                     Future.delayed(const Duration(milliseconds: 500)),
                   ]),
                   child: CustomScrollView(
+                    cacheExtent: 1400,
                     physics: const AlwaysScrollableScrollPhysics(),
                     slivers: [
-                      SliverAppBar(
-                        collapsedHeight: kToolbarHeight,
-                        expandedHeight: 140,
-                        pinned: true,
-                        scrolledUnderElevation: 1,
-                        leading: null,
-                        title: Text(
-                          t.home.titles.home,
-                          style: TextStyle(
-                            color: colorScheme.onSurface,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: -0.5,
-                          ),
-                        ),
-                        actions: [
-                          IconButton(
-                            tooltip: t.home.tooltips.viewMode,
-                            icon: Icon(
-                              listMode ? Icons.grid_view : Icons.view_list,
-                            ),
-                            onPressed: () =>
-                                stows.homeListMode.value = !listMode,
-                          ),
-                          // Security: Lock Vault Button
-                          if (stows.localEncryptionEnabled.value &&
-                              VaultAdapter.isUnlocked)
-                            IconButton(
-                              tooltip: 'Lock Vault',
-                              icon: const Icon(Icons.power_settings_new),
-                              onPressed: () async {
-                                await VaultAdapter.instance.lock();
-                                if (context.mounted) {
-                                  context.go(RoutePaths.login);
-                                }
-                              },
-                            ),
-                          SortButton(
-                            sortContext: SortContext.recent,
-                            callback: () async {
-                              HomeDataCache.instance.invalidate();
-                              await findRecentlyAccessedNotes();
-                            },
-                          ),
-                        ],
-                      ),
-                      if (_totalFileCount != null && _totalFileCount! > 0)
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 16,
-                                horizontal: 20,
-                              ),
-                              decoration: BoxDecoration(
-                                color: colorScheme.surfaceContainerLow,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: colorScheme.outlineVariant.withValues(
-                                    alpha: 0.3,
-                                  ),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(10),
-                                    decoration: BoxDecoration(
-                                      color: colorScheme.primaryContainer
-                                          .withValues(alpha: 0.5),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(
-                                      Icons.insert_drive_file_outlined,
-                                      color: colorScheme.onPrimaryContainer,
-                                      size: 20,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          '$_totalFileCount Files',
-                                          style: TextStyle(
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.w600,
-                                            color: colorScheme.onSurface,
-                                            letterSpacing: -0.5,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        ValueListenableBuilder<bool>(
-                                          valueListenable:
-                                              stows.localEncryptionEnabled,
-                                          builder: (context, isEncrypted, _) {
-                                            return Text(
-                                              isEncrypted
-                                                  ? 'Securely stored in your vault'
-                                                  : 'Stored on disk',
-                                              style: TextStyle(
-                                                fontSize: 13,
-                                                color: colorScheme
-                                                    .onSurfaceVariant,
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
                       if (failed) ...[
                         const SliverSafeArea(
+                          top: false,
                           sliver: SliverToBoxAdapter(child: Welcome()),
                         ),
                       ] else ...[
                         SliverSafeArea(
+                          top: false,
                           minimum: EdgeInsets.only(
-
                             bottom: isSelecting ? 16 : 100,
                           ),
                           sliver: MasonryFiles(
-
-                            key: ValueKey(
-                              Object.hashAll([
-                                crossAxisCount,
-                                ...filePaths.take(50),
-                              ]),
-                            ),
+                            key: const ValueKey('recent_notes_grid'),
                             crossAxisCount: crossAxisCount,
                             files: filePaths,
                             selectedFiles: selectedFiles,
+                            animateMutations: false,
+                            addAutomaticKeepAlives: true,
+                            showListMetadata: false,
                           ),
                         ),
                       ],
                     ],
+                  ),
+                );
+
+                if (!ResponsiveNavbar.isLargeScreen) {
+                  return scrollBody;
+                }
+
+                return SizedBox(
+                  width: slotW,
+                  height: slotH,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      minWidth: layoutW,
+                      maxWidth: layoutW,
+                      minHeight: viewportH,
+                      maxHeight: viewportH,
+                      child: Transform.scale(
+                        scale: scale,
+                        alignment: Alignment.topLeft,
+                        child: SizedBox(
+                          width: layoutW,
+                          height: viewportH,
+                          child: scrollBody,
+                        ),
+                      ),
+                    ),
                   ),
                 );
               },
@@ -334,106 +446,67 @@ class _RecentPageState extends State<RecentPage> {
 
         bottomNavigationBar: isSelecting
             ? SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-                  child: TweenAnimationBuilder<double>(
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutBack,
-                    tween: Tween<double>(begin: 0.0, end: 1.0),
-                    builder: (context, value, child) {
-                      return Transform.translate(
-                        offset: Offset(0, 50 * (1 - value)),
-                        child: Opacity(
-                          opacity: value.clamp(0.0, 1.0),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(36),
-                            child: BackdropFilter(
-                              filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                              child: Container(
-                                decoration: BoxDecoration(
-
-                                  color: Colors.black.withValues(alpha: 0.5),
-                                  borderRadius: BorderRadius.circular(36),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.15),
-                                    width: 1,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withValues(
-                                        alpha: 0.25,
-                                      ),
-                                      blurRadius: 20,
-                                      offset: const Offset(0, 8),
-                                    ),
-                                  ],
-                                ),
-                                child: child,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                    child: Theme(
-                      data: Theme.of(context).copyWith(
-                        iconTheme: IconThemeData(
-                          color: Theme.of(context).colorScheme.primary,
+                top: false,
+                child: HomeSelectionActionBar(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      Collapsible(
+                        axis: CollapsibleAxis.horizontal,
+                        collapsed: selectedFiles.value.length != 1,
+                        child: RenameNoteButton(
+                          existingPath: selectedFiles.value.isEmpty
+                              ? ''
+                              : selectedFiles.value.first,
+                          unselectNotes: () => selectedFiles.value = [],
                         ),
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            Collapsible(
-                              axis: CollapsibleAxis.horizontal,
-                              collapsed: selectedFiles.value.length != 1,
-                              child: RenameNoteButton(
-                                existingPath: selectedFiles.value.isEmpty
-                                    ? ''
-                                    : selectedFiles.value.first,
-                                unselectNotes: () => selectedFiles.value = [],
-                              ),
-                            ),
-                            MoveNoteButton(
-                              filesToMove: selectedFiles.value,
-                              unselectNotes: () => selectedFiles.value = [],
-                            ),
-                            DeleteNoteButton(
-                              selectedFiles: selectedFiles.value,
-                              unselectNotes: () => selectedFiles.value = [],
-                              onDeleted: findRecentlyAccessedNotes,
-                            ),
-                            ExportNoteButton(
-                              selectedFiles: selectedFiles.value,
-                            ),
-                            if (selectedFiles.value.length == 1)
-                              IconButton(
-                                tooltip: 'Properties',
-                                icon: const Icon(Icons.info_outline),
-                                onPressed: () {
-                                  showPropertiesForFile(
-                                    context,
-                                    selectedFiles.value.first,
-                                  );
-                                },
-                              ),
-                            SelectAllButton(
-                              selectedFiles: selectedFiles.value,
-                              allFiles: filePaths,
-                              selectAll: () {
-                                selectedFiles.value = List.from(filePaths);
-                              },
-                              deselectAll: () => selectedFiles.value = [],
-                            ),
-                          ],
-                        ),
+                      MoveNoteButton(
+                        filesToMove: selectedFiles.value,
+                        unselectNotes: () => selectedFiles.value = [],
                       ),
-                    ),
+                      DeleteNoteButton(
+                        selectedFiles: selectedFiles.value,
+                        unselectNotes: () => selectedFiles.value = [],
+                        onDeleted: _reloadFromDisk,
+                      ),
+                      ExportNoteButton(
+                        selectedFiles: selectedFiles.value,
+                        exportHostContext: context,
+                        onExportStarted: () => selectedFiles.value = [],
+                      ),
+                      if (selectedFiles.value.length == 1)
+                        IconButton(
+                          tooltip: 'Properties',
+                          icon: const Icon(Icons.info_outline),
+                          onPressed: () {
+                            showPropertiesForFile(
+                              context,
+                              selectedFiles.value.first,
+                            );
+                          },
+                        ),
+                      if (selectedFiles.value.length == 2)
+                        IconButton(
+                          tooltip: t.editor.splitView,
+                          icon: const Icon(Icons.vertical_split_outlined),
+                          onPressed: () {
+                            final paths = List<String>.from(selectedFiles.value);
+                            selectedFiles.value = [];
+                            context.push(
+                              RoutePaths.editSplit(paths[0], paths[1]),
+                            );
+                          },
+                        ),
+                      SelectAllButton(
+                        selectedFiles: selectedFiles.value,
+                        allFiles: filePaths,
+                        selectAll: () {
+                          selectedFiles.value = List.from(filePaths);
+                        },
+                        deselectAll: () => selectedFiles.value = [],
+                      ),
+                    ],
                   ),
                 ),
               )
@@ -442,6 +515,65 @@ class _RecentPageState extends State<RecentPage> {
             ? null
             : NewNoteButton(cupertino: platform.isCupertino),
       ),
+    );
+  }
+}
+
+// Pill-style controls: [HomeGlassIconStrip] + rail-matched colors.
+class _RecentNotesToolbarStrip extends StatelessWidget {
+  const _RecentNotesToolbarStrip({
+    required this.listMode,
+    required this.showVaultLock,
+    required this.onToggleViewMode,
+    required this.onLockVault,
+    required this.sortButton,
+  });
+
+  final bool listMode;
+  final bool showVaultLock;
+  final VoidCallback onToggleViewMode;
+  final VoidCallback onLockVault;
+  final Widget sortButton;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final actionStyle = homeToolbarCompactIconStyle(context);
+
+    return HomeGlassIconStrip(
+      children: [
+        IconButton(
+          style: actionStyle,
+          tooltip: t.home.tooltips.viewMode,
+          onPressed: onToggleViewMode,
+          icon: Icon(
+            listMode ? Icons.grid_view_rounded : Icons.view_list_rounded,
+            size: 22,
+          ),
+        ),
+        if (showVaultLock) ...[
+          const HomeToolbarDivider(),
+          IconButton(
+            style: actionStyle.copyWith(
+              foregroundColor: WidgetStatePropertyAll(colorScheme.primary),
+            ),
+            tooltip: 'Lock Vault',
+            onPressed: onLockVault,
+            icon: const Icon(Icons.power_settings_new, size: 22),
+          ),
+        ],
+        const HomeToolbarDivider(),
+        IconTheme.merge(
+          data: IconThemeData(size: 22, color: colorScheme.onSurfaceVariant),
+          child: Theme(
+            data: theme.copyWith(
+              iconButtonTheme: IconButtonThemeData(style: actionStyle),
+            ),
+            child: sortButton,
+          ),
+        ),
+      ],
     );
   }
 }

@@ -13,10 +13,11 @@ class InvertWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!invert) return child;
-    return ColorFiltered(colorFilter: _invertFilter, child: child);
+    return ColorFiltered(colorFilter: filter, child: child);
   }
 
-  static const _invertFilter = ColorFilter.matrix(_invertMatrix);
+  /// Same invert used by the canvas; keeps alpha so baked blits stay punched-out.
+  static const filter = ColorFilter.matrix(_invertMatrix);
   static const _invertMatrix = <double>[
     1 - 2 * 0.213,
     -2 * 0.715,

@@ -8,7 +8,6 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:logging/logging.dart';
 import 'package:mutex/mutex.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -17,8 +16,6 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/services/vault_adapter.dart';
 
 const int _largeAssetThresholdBytes = 50 * 1024 * 1024;
-
-const int _vaultLargePdfRamLimitBytes = 100 * 1024 * 1024;
 
 int _fnv1aInit(int fileSize) {
   int hash = 0x811C9DC5;
@@ -69,7 +66,6 @@ int _isolateComputePreviewHash(Map<String, dynamic> args) {
 }
 
 class RandomFileName {
-
   static String generateRandomFileName([String extension = '.txt']) {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final random = Random().nextInt(1 << 32);
@@ -78,19 +74,12 @@ class RandomFileName {
 }
 
 class PdfInfoExtractor {
-
   static Future<Map<String, String>> extractInfo(File file) async {
-
     return {};
   }
 }
 
-enum AssetType {
-  image,
-  pdf,
-  svg,
-  unknown,
-}
+enum AssetType { image, pdf, svg, unknown }
 
 class CacheItem {
   Object? value;
@@ -101,18 +90,15 @@ class CacheItem {
   String? fileInfo;
   int? fileSize;
 
-  String?
-  filePath;
+  String? filePath;
   final String? fileExt;
-  File?
-  originalFile;
+  File? originalFile;
 
   int _refCount = 0;
   int assetIdOnSave = -1;
   bool _dirtyForSave;
 
-  final ValueNotifier<ImageProvider?>
-  imageProviderNotifier;
+  final ValueNotifier<ImageProvider?> imageProviderNotifier;
 
   PdfDocument? _pdfDocument;
   final ValueNotifier<PdfDocument?> pdfDocumentNotifier;
@@ -219,14 +205,12 @@ class CacheItem {
         } else if (value is! Uint8List &&
             value is! MemoryImage &&
             value != null) {
-
           if (filePath != null) {
             final bytes = await FileManager.readFile(filePath!);
             if (bytes != null) value = bytes;
           }
         }
       } catch (e) {
-
         // SECURITY: If we cannot load the file into RAM, we must abort.
 
         rethrow;
@@ -267,9 +251,7 @@ class CacheItem {
         value = await sourceFile.readAsBytes();
         try {
           await sourceFile.delete();
-        } catch (_) {
-
-        }
+        } catch (_) {}
       }
       filePath = null;
       return;
@@ -302,9 +284,7 @@ class CacheItem {
         final newFile = await source.copy(newPath);
         try {
           await source.delete();
-        } on FileSystemException {
-
-        }
+        } on FileSystemException {}
         return newFile;
       } else {
         rethrow;
@@ -321,6 +301,12 @@ class _PdfLoadCancelledException implements Exception {}
 
 class AssetCacheAll {
   final List<CacheItem> _items = [];
+
+  /// Highest first: visible page / user-critical decodes.
+  static const int kImageDecodePriorityVisible = 1000000;
+
+  /// Neighbor pages while opening or scrolling.
+  static const int kImageDecodePriorityNearby = 500000;
 
   final Map<int, int> _previewHashIndex = {};
 
@@ -346,7 +332,28 @@ class AssetCacheAll {
   final Mutex _mutex = Mutex();
   final log = Logger('OrderedAssetCache');
 
+  /// pdfrx loads metadata for every page inside [PdfDocument.openFile]/[openData] by
+  /// default ([useProgressiveLoading]: false), which can take many seconds on large
+  /// PDFs. Opening with progressive mode and finishing metadata in the background
+  /// lets the editor show the first page quickly; [PdfPageView] listens for page
+  /// updates when each page's real size is known.
+  void _schedulePdfBackgroundPageLoad(PdfDocument doc) {
+    unawaited(
+      doc.loadPagesProgressively().catchError((Object e, StackTrace st) {
+        log.warning('PDF background page metadata load failed: $e');
+      }),
+    );
+  }
+
   bool allowRemovingAssets = true;
+
+  final Set<int> _pendingImageDecodes = {};
+  final Map<int, int> _imageDecodePriority = {};
+  final Set<int> _inflightImageDecodes = {};
+  int _activeImageDecodes = 0;
+
+  /// Product target is aarch64 Android only; keep decode parallelism modest.
+  int get _maxConcurrentImageDecodes => 4;
 
   void _trackFilePathChange(int index, String? oldPath, String? newPath) {
     if (oldPath != null && _filePathIndex[oldPath] == index) {
@@ -365,7 +372,6 @@ class AssetCacheAll {
 
     final item = _items[assetId];
     if (item.assetType != AssetType.pdf) {
-
       log.warning('getPdfNotifier called for non-pdf asset: ${item.assetType}');
       return ValueNotifier(null);
     }
@@ -374,7 +380,6 @@ class AssetCacheAll {
         item._pdfDocument == null &&
         (item.value != null || item.filePath != null);
     if (canOpen) {
-
       final failedAt = _pdfOpenFailedAt[assetId];
       if (failedAt != null &&
           DateTime.now().difference(failedAt) < const Duration(seconds: 3)) {
@@ -392,47 +397,45 @@ class AssetCacheAll {
           item.pdfDocumentNotifier.removeListener(onDocumentReady);
           clearProgressForAsset();
         }
+
         item.pdfDocumentNotifier.addListener(onDocumentReady);
 
-        _openingDocs[assetId] = _openPdfDocument(assetId, item)
-            .then((doc) {
-              if (_disposed || _cancelledPdfAssetIds.contains(assetId)) {
-                doc.dispose();
-                clearProgressForAsset();
-                _openingDocs.remove(assetId);
-                throw _PdfLoadCancelledException();
-              }
-              log.fine('_pdfDocument read for $assetId');
-              item.pdfDocumentNotifier.removeListener(onDocumentReady);
-              _pdfOpenFailedAt.remove(assetId);
-              clearProgressForAsset();
-              item._pdfDocument = doc;
-              item.pdfDocumentNotifier.value = doc;
-              _openingDocs.remove(assetId);
-              return doc;
-            })
-            .catchError((e, st) {
-              if (e is _PdfLoadCancelledException ||
-                  _disposed ||
-                  _cancelledPdfAssetIds.contains(assetId)) {
-                _pdfProgressMap.remove(assetId);
-                _pdfLoadingLabels.remove(assetId);
-                _updatePdfLoadingState();
-                _openingDocs.remove(assetId);
-                throw e;
-              }
-              _pdfOpenFailedAt[assetId] = DateTime.now();
-              _pdfProgressMap.remove(assetId);
-              _pdfLoadingLabels.remove(assetId);
-              _updatePdfLoadingState();
-              log.severe('Error opening PDF $assetId: $e\n$st');
-              _openingDocs.remove(assetId);
-              throw e;
-            });
+        final future = _openPdfDocument(assetId, item);
+        _openingDocs[assetId] = future;
+        
+        future.then((doc) {
+          if (_disposed || _cancelledPdfAssetIds.contains(assetId)) {
+            doc.dispose();
+            clearProgressForAsset();
+            _openingDocs.remove(assetId);
+            return;
+          }
+          log.fine('_pdfDocument read for $assetId');
+          item.pdfDocumentNotifier.removeListener(onDocumentReady);
+          _pdfOpenFailedAt.remove(assetId);
+          clearProgressForAsset();
+          item._pdfDocument = doc;
+          item.pdfDocumentNotifier.value = doc;
+          _openingDocs.remove(assetId);
+        }).catchError((e, st) {
+          _pdfOpenFailedAt[assetId] = DateTime.now();
+          _pdfProgressMap.remove(assetId);
+          _pdfLoadingLabels.remove(assetId);
+          _updatePdfLoadingState();
+          log.severe('Error opening PDF $assetId: $e\n$st');
+          _openingDocs.remove(assetId);
+        });
       }
     } else if (item._pdfDocument != null) {
       if (item.pdfDocumentNotifier.value != item._pdfDocument) {
-        item.pdfDocumentNotifier.value = item._pdfDocument;
+        final doc = item._pdfDocument;
+        scheduleMicrotask(() {
+          if (_disposed) return;
+          if (!identical(item._pdfDocument, doc)) return;
+          if (item.pdfDocumentNotifier.value != doc) {
+            item.pdfDocumentNotifier.value = doc;
+          }
+        });
       }
     }
     return item.pdfDocumentNotifier;
@@ -448,7 +451,9 @@ class AssetCacheAll {
     final name = last.replaceAll(RegExp(r'\.sbn2$'), '');
     if (name.isEmpty) return 'PDF';
     const maxLen = 72;
-    final display = name.length > maxLen ? '…${name.substring(name.length - maxLen + 1)}' : name;
+    final display = name.length > maxLen
+        ? '…${name.substring(name.length - maxLen + 1)}'
+        : name;
     return '$display.pdf';
   }
 
@@ -461,15 +466,7 @@ class AssetCacheAll {
   }
 
   void _updatePdfLoadingState() {
-    if (_pdfProgressMap.isEmpty) {
-      pdfLoadingState.value = null;
-      SchedulerBinding.instance.scheduleFrame();
-      return;
-    }
-    final firstId = _pdfProgressMap.keys.first;
-    final progress = _pdfProgressMap[firstId]!.value;
-    final label = _pdfLoadingLabels[firstId] ?? 'PDF';
-    pdfLoadingState.value = (progress: progress, label: label);
+    // Editor no longer shows a PDF/opening progress bar.
   }
 
   static bool _isAssetPath(String path) {
@@ -490,79 +487,6 @@ class AssetCacheAll {
     return false;
   }
 
-  Future<PdfDocument> _openVaultPdfRamOnly(
-    String path,
-    int assetId,
-    int fileSize,
-  ) async {
-    if (fileSize <= 0) {
-      throw StateError('Invalid vault PDF size: $path');
-    }
-    const int blockSize = 1024 * 1024;
-    const int maxBlocks = 32;
-    final blockCache = <int, Uint8List>{};
-    final accessOrder = <int>[];
-
-    return await PdfDocument.openCustom(
-      read: (destBuffer, position, size) async {
-        int totalRead = 0;
-        while (totalRead < size) {
-          final currentPos = position + totalRead;
-          final blockIndex = currentPos ~/ blockSize;
-          final offsetInBlock = currentPos % blockSize;
-          int toCopy = size - totalRead;
-          if (offsetInBlock + toCopy > blockSize) {
-            toCopy = blockSize - offsetInBlock;
-          }
-
-          Uint8List? block = blockCache[blockIndex];
-          if (block == null) {
-            final blockStart = blockIndex * blockSize;
-            final fetchSize = blockStart + blockSize > fileSize
-                ? fileSize - blockStart
-                : blockSize;
-            block = Uint8List(blockSize);
-            await VaultAdapter.instance.readEncryptedChunk(
-              path,
-              blockStart,
-              fetchSize,
-              block,
-            );
-            if (accessOrder.length >= maxBlocks) {
-              final oldest = accessOrder.removeAt(0);
-              blockCache.remove(oldest);
-            }
-            blockCache[blockIndex] = block;
-            accessOrder.add(blockIndex);
-          } else {
-            accessOrder.remove(blockIndex);
-            accessOrder.add(blockIndex);
-          }
-
-          final actualAvailable = (blockIndex * blockSize + blockSize > fileSize)
-              ? fileSize - (blockIndex * blockSize)
-              : blockSize;
-          int actualToCopy = toCopy;
-          if (offsetInBlock + actualToCopy > actualAvailable) {
-            actualToCopy = actualAvailable - offsetInBlock;
-          }
-          if (actualToCopy <= 0) break;
-
-          destBuffer.setRange(
-            totalRead,
-            totalRead + actualToCopy,
-            block,
-            offsetInBlock,
-          );
-          totalRead += actualToCopy;
-        }
-        return totalRead;
-      },
-      fileSize: fileSize,
-      sourceName: path,
-    );
-  }
-
   Future<PdfDocument> _openPdfDocument(int assetId, CacheItem item) async {
     try {
       final path = item.filePath;
@@ -570,10 +494,13 @@ class AssetCacheAll {
       if (item.value is Uint8List) {
         final bytes = item.value as Uint8List;
 
-        return await PdfDocument.openData(
+        final doc = await PdfDocument.openData(
           bytes,
           sourceName: 'memory_asset_$assetId',
+          useProgressiveLoading: true,
         );
+        _schedulePdfBackgroundPageLoad(doc);
+        return doc;
       }
 
       if (path == null) {
@@ -585,50 +512,86 @@ class AssetCacheAll {
       final isVaultAsset = AssetCacheAll._isAssetPath(path) && isVaultEnabled;
 
       if (isVaultAsset) {
-
         final progressNotifier = ValueNotifier<double>(0.0);
         _pdfProgressMap[assetId] = progressNotifier;
         _pdfLoadingLabels[assetId] = _pdfLabelFromPath(path);
         _updatePdfLoadingState();
 
-        final loadMode = getEffectiveVaultPdfLoadMode(path);
-        final fileSize = await VaultAdapter.instance.getFileSize(path) ?? 0;
-
-        final forceTempForSize = fileSize > _vaultLargePdfRamLimitBytes &&
-            !stows.vaultPdfAllowLargeRam.value;
-
-        if (loadMode == 'temp_file' || forceTempForSize) {
-          final tempPath = await FileManager.readFileToTempFile(
-            path,
-            onProgress: (p) {
-              progressNotifier.value = p;
-              _updatePdfLoadingState();
-            },
-          );
-          if (tempPath == null) {
-            _pdfProgressMap.remove(assetId);
-            _pdfLoadingLabels.remove(assetId);
-            _updatePdfLoadingState();
-            throw StateError('Failed to decrypt vault PDF: $path');
-          }
-          _pdfTempPaths[assetId] = tempPath;
-          return await PdfDocument.openFile(tempPath);
-        }
-
-        final bytes = await FileManager.readFile(
-          path,
-          onProgress: (p) {
+        var lastVaultProgressStep = -1;
+        void reportVaultProgress(double p) {
+          final step = (p * 32).floor();
+          if (step != lastVaultProgressStep || p >= 1.0) {
+            lastVaultProgressStep = step;
             progressNotifier.value = p;
             _updatePdfLoadingState();
-          },
-        );
-        if (bytes != null && bytes.isNotEmpty) {
-          return await PdfDocument.openData(
-            bytes,
-            sourceName: 'vault_asset_$assetId',
-          );
+          }
         }
-        return await _openVaultPdfRamOnly(path, assetId, fileSize);
+
+        void clearPdfProgress() {
+          _pdfProgressMap.remove(assetId);
+          _pdfLoadingLabels.remove(assetId);
+          _updatePdfLoadingState();
+        }
+
+        try {
+          final fileSize = await VaultAdapter.instance.getFileSize(path) ?? 0;
+          if (fileSize <= 0) {
+            throw StateError('Invalid or missing vault PDF size: $path');
+          }
+
+          /// Temp/mmap open whenever Secure PDF loading allows disk (global
+          /// Temp or per-note override). RAM-only never writes plaintext to
+          /// disk — open via [PdfDocument.openData] instead.
+          final allowTempDisk = vaultPathAllowsDiskBackedDecrypt(path);
+
+          if (allowTempDisk) {
+            final tempPath = await FileManager.readFileToTempFile(
+              path,
+              onProgress: reportVaultProgress,
+            );
+            if (tempPath == null) {
+              throw StateError('Failed to decrypt vault PDF: $path');
+            }
+            _pdfTempPaths[assetId] = tempPath;
+            final mmapDoc = await PdfDocument.openFile(
+              tempPath,
+              useProgressiveLoading: true,
+            );
+            _schedulePdfBackgroundPageLoad(mmapDoc);
+            return mmapDoc;
+          }
+
+          // RAM-only: decrypt entirely into memory.
+          if (fileSize >= 40 * 1024 * 1024 &&
+              !stows.vaultPdfAllowLargeRam.value) {
+            throw StateError(
+              'Vault PDF is too large for RAM-only mode ($fileSize B). '
+              'Enable Temp mode for this note, or allow large RAM PDFs in Settings.',
+            );
+          }
+
+          final bytes = await FileManager.readFile(
+            path,
+            onProgress: reportVaultProgress,
+          );
+          if (bytes == null || bytes.isEmpty) {
+            throw StateError('Failed to read vault PDF: $path');
+          }
+          final ramDoc = await PdfDocument.openData(
+            bytes,
+            sourceName: path,
+            useProgressiveLoading: true,
+          );
+          // Avoid holding a second full copy in the vault decrypt LRU while
+          // pdfrx already owns [bytes] for this open.
+          if (bytes.length > 12 * 1024 * 1024) {
+            VaultAdapter.instance.invalidateCachedReadForPath(path);
+          }
+          _schedulePdfBackgroundPageLoad(ramDoc);
+          return ramDoc;
+        } finally {
+          clearPdfProgress();
+        }
       }
 
       File diskFile;
@@ -641,7 +604,12 @@ class AssetCacheAll {
       }
 
       if (diskFile.existsSync()) {
-        return await PdfDocument.openFile(diskFile.path);
+        final diskDoc = await PdfDocument.openFile(
+          diskFile.path,
+          useProgressiveLoading: true,
+        );
+        _schedulePdfBackgroundPageLoad(diskDoc);
+        return diskDoc;
       }
 
       throw StateError('PDF file does not exist: $path');
@@ -667,9 +635,13 @@ class AssetCacheAll {
       item.pdfDocumentNotifier.value!.dispose();
       item.pdfDocumentNotifier.value = null;
     }
-    if (tempPath != null) {
+    // Do NOT delete [tempPath] here when it is a vault-managed plaintext temp
+    // (registered in VaultAdapter). Wiping it forced a full re-decrypt on
+    // reopen under Temp mode. Vault lock / RAM-only policy purge owns cleanup.
+    // Only delete orphan runtime temps that vault does not track.
+    if (tempPath != null &&
+        !VaultAdapter.instance.isTrackedPlaintextDecryptTemp(tempPath)) {
       try {
-        // SECURITY OPTIMIZATION: Do not leave unencrypted PDF remnants in SSD wear-leveling blocks
         await FileManager.secureDelete(File(tempPath));
       } catch (e) {
         log.warning('Failed to secure-delete temp PDF file: $tempPath');
@@ -701,19 +673,13 @@ class AssetCacheAll {
       return item.imageProviderNotifier;
     }
 
-    if (item.value == null && item.filePath != null) {
-      _loadImageFromPath(assetId);
-      return item.imageProviderNotifier;
-    }
-
     if (item.value is File) {
       final file = item.value as File;
 
       if (file.existsSync()) {
         item.imageProviderNotifier.value = FileImage(file);
       } else {
-        _loadImageFromPath(assetId);
-        return item.imageProviderNotifier;
+        _enqueueImageDecode(assetId);
       }
     } else if (item.value is Uint8List) {
       item.imageProviderNotifier.value = MemoryImage(item.value as Uint8List);
@@ -721,25 +687,112 @@ class AssetCacheAll {
       item.imageProviderNotifier.value = item.value as MemoryImage;
     } else if (item.value is FileImage) {
       item.imageProviderNotifier.value = item.value as FileImage;
+    } else if (item.filePath != null) {
+      _enqueueImageDecode(assetId);
     }
 
     return item.imageProviderNotifier;
   }
 
+  /// Prefer decoding these assets first (e.g. visible canvas pages). Higher [priority] wins.
+  void prioritizeImageDecode(int assetId, int priority) {
+    if (_disposed || assetId < 0 || assetId >= _items.length) return;
+    final item = _items[assetId];
+    if (item.assetType != AssetType.image) return;
+    if (item.imageProviderNotifier.value != null) return;
+    _enqueueImageDecode(assetId, priority: priority);
+  }
+
+  void _enqueueImageDecode(int assetId, {int priority = 0}) {
+    if (_disposed || assetId < 0 || assetId >= _items.length) return;
+    final item = _items[assetId];
+    if (item.assetType != AssetType.image) return;
+    if (item.imageProviderNotifier.value != null) return;
+
+    final prev = _imageDecodePriority[assetId] ?? 0;
+    _imageDecodePriority[assetId] = priority > prev ? priority : prev;
+    _pendingImageDecodes.add(assetId);
+    _scheduleImageDecodePump();
+  }
+
+  bool _imageDecodePumpScheduled = false;
+
+  void _scheduleImageDecodePump() {
+    if (_disposed || _imageDecodePumpScheduled) return;
+    _imageDecodePumpScheduled = true;
+    scheduleMicrotask(() {
+      _imageDecodePumpScheduled = false;
+      unawaited(_pumpImageDecodeQueue());
+    });
+  }
+
+  int? _takeHighestPriorityImageDecode() {
+    if (_pendingImageDecodes.isEmpty) return null;
+    var best = _pendingImageDecodes.first;
+    var bestP = _imageDecodePriority[best] ?? 0;
+    for (final id in _pendingImageDecodes) {
+      final p = _imageDecodePriority[id] ?? 0;
+      if (p > bestP || (p == bestP && id < best)) {
+        best = id;
+        bestP = p;
+      }
+    }
+    _pendingImageDecodes.remove(best);
+    return best;
+  }
+
+  Future<void> _pumpImageDecodeQueue() async {
+    if (_disposed) return;
+    while (_activeImageDecodes < _maxConcurrentImageDecodes &&
+        _pendingImageDecodes.isNotEmpty) {
+      final assetId = _takeHighestPriorityImageDecode();
+      if (assetId == null) break;
+      if (_inflightImageDecodes.contains(assetId)) continue;
+      final item = _items[assetId];
+      if (item.assetType != AssetType.image ||
+          item.imageProviderNotifier.value != null) {
+        _imageDecodePriority.remove(assetId);
+        continue;
+      }
+      _inflightImageDecodes.add(assetId);
+      _activeImageDecodes++;
+      final capturedId = assetId;
+      unawaited(_runOneImageDecode(capturedId));
+    }
+  }
+
+  Future<void> _runOneImageDecode(int assetId) async {
+    try {
+      await _loadImageFromPath(assetId);
+    } finally {
+      _activeImageDecodes--;
+      _inflightImageDecodes.remove(assetId);
+      _imageDecodePriority.remove(assetId);
+      if (!_disposed) {
+        unawaited(_pumpImageDecodeQueue());
+      }
+    }
+  }
+
   Future<void> _loadImageFromPath(int assetId) async {
     final item = _items[assetId];
     if (item.filePath == null) return;
+    if (item.imageProviderNotifier.value != null) return;
 
     try {
-      Uint8List? bytes = await FileManager.readFile(item.filePath!);
+      Uint8List? bytes = await FileManager.readFile(
+        item.filePath!,
+        suppressLogs: true,
+      );
       if (bytes != null && bytes.isNotEmpty) {
-
         if (!AssetCacheAll._looksLikeImage(bytes) &&
             AssetCacheAll._isAssetPath(item.filePath!) &&
             VaultAdapter.isUnlocked) {
           VaultAdapter.instance.invalidateCachedReadForPath(item.filePath!);
-          await Future<void>.delayed(const Duration(milliseconds: 500));
-          bytes = await FileManager.readFile(item.filePath!);
+          bytes = await FileManager.readFile(
+            item.filePath!,
+            suppressLogs: true,
+          );
         }
         if (bytes != null &&
             bytes.isNotEmpty &&
@@ -758,7 +811,6 @@ class AssetCacheAll {
     final startIndex = _items.length;
     final toAdd = count - _items.length;
     final newItems = List.generate(toAdd, (i) {
-
       final expectedPath = '$mainFilePath.${startIndex + i}';
       return CacheItem.placeholder()..filePath = expectedPath;
     });
@@ -797,7 +849,6 @@ class AssetCacheAll {
   }
 
   Future<int> calculateHashFromFile(File file, int fileSize) async {
-
     if (fileSize > 1024 * 1024) {
       final stat = await file.stat();
       return _initHash(fileSize) ^ stat.modified.millisecondsSinceEpoch;
@@ -837,8 +888,10 @@ class AssetCacheAll {
     int? fileSize,
     int? hash,
   ) {
+    if (assetIdNote < 0) {
+      assetIdNote = _items.length;
+    }
     if (value is File) {
-
       if (assetIdNote < _items.length) {
         final existing = _items[assetIdNote];
         if (existing.filePath == value.path) {
@@ -896,7 +949,6 @@ class AssetCacheAll {
       _trackFilePathChange(assetIdNote, null, newItem.filePath);
       return assetIdNote;
     } else {
-
       if (_items.length < assetIdNote) {
         final startIndex = _items.length;
         final toAdd = assetIdNote - _items.length;
@@ -1051,7 +1103,6 @@ class AssetCacheAll {
           return file.readAsBytesSync();
         }
       } else {
-
         final path = file.path;
         final isTempOrCache =
             path.contains('cache') ||
@@ -1077,17 +1128,21 @@ class AssetCacheAll {
   String getAssetFileInfo(int index) => _items[index].fileInfo ?? '';
   int getAssetFileSize(int index) => _items[index].fileSize ?? 0;
 
-  String getAssetExtension(int index) =>
-      index >= 0 && index < _items.length
-          ? (_items[index].fileExt ?? '.bin')
-          : '.bin';
+  String getAssetExtension(int index) => index >= 0 && index < _items.length
+      ? (_items[index].fileExt ?? '.bin')
+      : '.bin';
 
   File getAssetFile(int id) {
     final item = _items[id];
     if (item.value is File) {
       return (item.value as File);
-    } else if (item is FileImage) {
+    } else if (item.value is FileImage) {
       return (item.value as FileImage).file;
+    }
+    if (item.filePath != null && !VaultAdapter.isUnlocked) {
+      final rawFile = File(item.filePath!);
+      if (rawFile.existsSync()) return rawFile;
+      return FileManager.getFile(item.filePath!);
     }
     throw Exception('getAssetFile: item is not a file');
   }
@@ -1113,7 +1168,6 @@ class AssetCacheAll {
             oldItem.imageProviderNotifier.value is MemoryImage;
         MemoryImage? preservedMemoryImage;
         if (wasMemoryImage) {
-
           final bytes = await value.readAsBytes();
           preservedMemoryImage = MemoryImage(bytes);
         }
@@ -1124,8 +1178,7 @@ class AssetCacheAll {
           previewHash: previewHash,
           hash: oldItem.hash,
           fileSize: fileSize,
-          fileInfo:
-              oldItem.fileInfo,
+          fileInfo: oldItem.fileInfo,
           imageProviderNotifier: oldItem.imageProviderNotifier,
           dirtyForSave: true,
         ).._refCount = oldItem._refCount;
@@ -1233,18 +1286,27 @@ class AssetCacheAll {
     return null;
   }
 
-  Future<void> renumberBeforeSave(
+  /// Resolves/compacts on-disk asset paths for this note before BSON write.
+  ///
+  /// Returns true when any in-memory image path or layout was updated such that
+  /// embedded page binary may need a full re-encode.
+  Future<bool> renumberBeforeSave(
     String noteFilePath, {
     bool awaitWrite = false,
+    bool? awaitDbCommit,
+    bool hasLazyPages = false,
   }) async {
-    if (_items.isEmpty) return;
+    final commitVaultDb = awaitDbCommit ?? awaitWrite;
+    if (_items.isEmpty) return false;
     final sw = Stopwatch()..start();
+    var pathsMutated = false;
     await _mutex.protect(() async {
-
       int currentId = -1;
       for (int i = 0; i < _items.length; i++) {
         final item = _items[i];
-        if (item.refCount > 0) {
+        // Proteção Crítica: Se existem páginas Lazy que não entraram na memória, 
+        // ASSUMA que os itens do cache podem estar sendo utilizados nelas.
+        if (item.refCount > 0 || hasLazyPages) {
           currentId++;
           item.assetIdOnSave = currentId;
         } else {
@@ -1326,9 +1388,9 @@ class AssetCacheAll {
           }
           final data = await _resolveAssetBytesForSave(item, shouldUseVault);
           if (data == null || data.isEmpty) {
-
             if (shouldUseVault &&
                 await VaultAdapter.instance.fileExists(c.newPath)) {
+              pathsMutated = true;
               await _applySaveResultToItem(c.index, c.newPath, shouldUseVault);
               continue;
             }
@@ -1349,8 +1411,10 @@ class AssetCacheAll {
             await FileManager.writeFilesBulk(
               batchWrites,
               awaitWrite: awaitWrite,
+              awaitDbCommit: commitVaultDb,
             );
             for (final entry in itemsToUpdate.entries) {
+              pathsMutated = true;
               await _applySaveResultToItem(
                 entry.key,
                 entry.value,
@@ -1369,7 +1433,9 @@ class AssetCacheAll {
               e.sourcePath,
               e.newPath,
               awaitWrite: awaitWrite,
+              awaitDbCommit: commitVaultDb,
             );
+            pathsMutated = true;
             await _applySaveResultToItem(e.index, e.newPath, shouldUseVault);
           } catch (err, stack) {
             log.severe(
@@ -1393,10 +1459,15 @@ class AssetCacheAll {
     } else {
       log.fine(msg);
     }
+    return pathsMutated;
   }
 
   void dispose() {
     _disposed = true;
+    _pendingImageDecodes.clear();
+    _imageDecodePriority.clear();
+    _inflightImageDecodes.clear();
+    _activeImageDecodes = 0;
     for (final item in _items) {
       item.dispose();
     }

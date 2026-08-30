@@ -24,6 +24,7 @@ class EditorHistory {
     if (_past.isEmpty) throw Exception('Nothing to undo');
     final item = _past.removeLast();
     _future.add(item);
+    _isRedoPossible = true;
     return item;
   }
 
@@ -52,6 +53,7 @@ class EditorHistory {
 
     _past.add(item);
     if (_past.length > maxHistoryLength) _past.removeAt(0);
+    _future.clear();
     _isRedoPossible = false;
   }
 
@@ -139,6 +141,15 @@ class EditorHistoryItem {
        assert(
          type != .areaErase || strokesAdded != null,
          'strokesAdded must be provided for areaErase',
+       ),
+       assert(
+         type != .changeStrokeType || strokesAdded != null,
+         'strokesAdded must be provided for changeStrokeType',
+       ),
+       assert(
+         type != .changeStrokeType ||
+             (strokesAdded != null && strokesAdded.length == strokes.length),
+         'changeStrokeType requires a 1:1 strokes → strokesAdded mapping',
        );
 
   final EditorHistoryItemType type;
@@ -204,4 +215,5 @@ enum EditorHistoryItemType {
   quillChange,
   quillUndoneChange,
   changeColor,
+  changeStrokeType,
 }

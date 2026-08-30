@@ -50,7 +50,6 @@ class ComplexParser {
       } else if (_match('/')) {
         left /= _parseFactor();
       } else if (_peek() == '(' || _peekAlpha()) {
-
         left *= _parseFactor();
       } else {
         break;
@@ -87,8 +86,13 @@ class ComplexParser {
     if (_peekAlpha()) {
       final name = _parseIdentifier();
       if (_match('(')) {
-        if (name == 'sum' || name == 'sigma' || name == 'product' || name == 'prod') {
-          final actual = (name == 'sigma') ? 'sum' : (name == 'prod' ? 'product' : name);
+        if (name == 'sum' ||
+            name == 'sigma' ||
+            name == 'product' ||
+            name == 'prod') {
+          final actual = (name == 'sigma')
+              ? 'sum'
+              : (name == 'prod' ? 'product' : name);
           return _parseSumOrProduct(actual);
         }
         final args = <Complex>[];
@@ -107,6 +111,32 @@ class ComplexParser {
   }
 
   Complex _parseSumOrProduct(String name) {
+    final startPos = _pos;
+    try {
+      if (!_peekAlpha()) {
+        throw FormatException('sum/product: expected index variable name');
+      }
+      final indexVar = _parseIdentifier();
+      _expect(',');
+      final fromExpr = _parseExpression();
+      _expect(',');
+      final toExpr = _parseExpression();
+      _expectOrAssumeClosingParen();
+      _expect('(');
+      final bodyStr = _readBalancedExpressionUntilClosingParen();
+      return _evaluateSumOrProduct(
+        name: name,
+        indexVar: indexVar,
+        fromExpr: fromExpr,
+        toExpr: toExpr,
+        bodyStr: bodyStr,
+      );
+    } catch (_) {
+      _pos = startPos;
+    }
+
+    final bodyStr = _readTopLevelExpressionUntilComma();
+    _expect(',');
     if (!_peekAlpha()) {
       throw FormatException('sum/product: expected index variable name');
     }
@@ -116,13 +146,58 @@ class ComplexParser {
     _expect(',');
     final toExpr = _parseExpression();
     _expectOrAssumeClosingParen();
-    _expect('(');
-    final bodyStart = _pos;
-    _parseExpression();
-    final bodyEnd = _pos;
-    final bodyStr = _input.substring(bodyStart, bodyEnd);
-    _expectOrAssumeClosingParen();
 
+    return _evaluateSumOrProduct(
+      name: name,
+      indexVar: indexVar,
+      fromExpr: fromExpr,
+      toExpr: toExpr,
+      bodyStr: bodyStr,
+    );
+  }
+
+  String _readTopLevelExpressionUntilComma() {
+    final start = _pos;
+    var depth = 0;
+    while (_pos < _input.length) {
+      final ch = _input[_pos];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        if (depth == 0) break;
+        depth--;
+      } else if (ch == ',' && depth == 0) {
+        break;
+      }
+      _pos++;
+    }
+    if (_pos == start) {
+      throw FormatException('sum/product: empty expression');
+    }
+    return _input.substring(start, _pos);
+  }
+
+  String _readBalancedExpressionUntilClosingParen() {
+    final start = _pos;
+    var depth = 1;
+    while (_pos < _input.length) {
+      final ch = _input[_pos++];
+      if (ch == '(') depth++;
+      if (ch == ')') depth--;
+      if (depth == 0) {
+        return _input.substring(start, _pos - 1);
+      }
+    }
+    throw FormatException('Expected ) at $_pos');
+  }
+
+  Complex _evaluateSumOrProduct({
+    required String name,
+    required String indexVar,
+    required Complex fromExpr,
+    required Complex toExpr,
+    required String bodyStr,
+  }) {
     final fromVal = fromExpr.real.round();
     final toVal = toExpr.real.round();
     if (fromVal > toVal) {
@@ -141,14 +216,16 @@ class ComplexParser {
       if (name == 'sum') {
         Complex acc = const Complex(0);
         for (int k = fromVal; k <= toVal; k++) {
-          final vars = Map<String, Complex>.from(_vars)..[indexVar] = Complex(k.toDouble());
+          final vars = Map<String, Complex>.from(_vars)
+            ..[indexVar] = Complex(k.toDouble());
           acc += evaluate(bodyStr, isRad: _isRad, ans: _ans, variables: vars);
         }
         return acc;
       } else {
         Complex acc = const Complex(1);
         for (int k = fromVal; k <= toVal; k++) {
-          final vars = Map<String, Complex>.from(_vars)..[indexVar] = Complex(k.toDouble());
+          final vars = Map<String, Complex>.from(_vars)
+            ..[indexVar] = Complex(k.toDouble());
           acc *= evaluate(bodyStr, isRad: _isRad, ans: _ans, variables: vars);
         }
         return acc;
@@ -208,7 +285,10 @@ class ComplexParser {
       case 'exp':
         return arg1().exp();
       case 'log':
+      case 'ln':
         return arg1().log();
+      case 'log10':
+        return arg1().log() / const Complex(math.ln10);
       case 'sqrt':
         return arg1().sqrt();
       case 'abs':
@@ -229,9 +309,7 @@ class ComplexParser {
       case 'gamma':
         return arg1().gamma();
       case 'beta':
-        return Complex(
-          SpecialFunctions.beta(asReal(arg1()), asReal(arg2())),
-        );
+        return Complex(SpecialFunctions.beta(asReal(arg1()), asReal(arg2())));
       case 'factorial':
         return Complex(SpecialFunctions.factorial(asReal(arg1()).round()));
       case 'ncr':

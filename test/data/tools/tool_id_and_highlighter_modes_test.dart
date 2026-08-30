@@ -15,7 +15,7 @@ void main() {
           ToolId.highlighter);
     });
 
-    test('legacy pencil maps to ballpoint', () {
+    test('legacy pencil ids map to ballpointPen', () {
       expect(ToolId.parsePenType('pencilPen', fallback: ToolId.fountainPen),
           ToolId.ballpointPen);
       expect(ToolId.parsePenType('Pencil', fallback: ToolId.fountainPen),

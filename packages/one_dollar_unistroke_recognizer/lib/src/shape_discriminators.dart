@@ -8,28 +8,87 @@ import 'dart:ui' show Offset, Rect;
 
 /// Returns a roundness score in [0, 1]: 1 = smooth/elliptical, 0 = angular/rectangular.
 ///
-/// Rectangles have exactly 4 sharp corners (~90°). Ellipses have 0–2 (at narrow ends).
-/// Elongated ellipses can have sharp curvature at ends, so we use corner count, not max angle.
+/// Rectangles have four ~90° corners. Ellipses are mostly smooth (tips may be a
+/// bit sharper when elongated). We downsample so dense sampling does not invent
+/// dozens of fake corners, then score from sharp/strong turn counts.
 double computeRoundness(List<Offset> points) {
   if (points.length < 4) return 0.5;
-  int sharpCorners = 0; // points with turn angle > 55°
-  const sharpThreshold = 55.0 * math.pi / 180;
-  for (int i = 1; i < points.length - 1; i++) {
-    final a = points[i] - points[i - 1];
-    final b = points[i + 1] - points[i];
+
+  final sampled = _resampleClosedPolyline(points, targetCount: 48);
+  if (sampled.length < 4) return 0.5;
+
+  // Higher thresholds: freehand ellipse tips often sit around 30–45°.
+  const sharpThreshold = 48.0 * math.pi / 180;
+  const strongThreshold = 70.0 * math.pi / 180;
+  final n = sampled.length;
+  var sharpSamples = 0;
+  var strongSamples = 0;
+  for (var i = 0; i < n; i++) {
+    final prev = sampled[(i - 1 + n) % n];
+    final cur = sampled[i];
+    final next = sampled[(i + 1) % n];
+    final a = cur - prev;
+    final b = next - cur;
     final la = a.distance;
     final lb = b.distance;
     if (la < 1e-6 || lb < 1e-6) continue;
     final cross = a.dx * b.dy - a.dy * b.dx;
     final dot = a.dx * b.dx + a.dy * b.dy;
     final angle = math.atan2(cross.abs(), dot.clamp(-1e10, 1e10));
-    if (angle > sharpThreshold) sharpCorners++;
+    if (angle > sharpThreshold) sharpSamples++;
+    if (angle > strongThreshold) strongSamples++;
   }
-  // Rectangles: 4 corners. Ellipses: 0–2 (elongated have 2 at ends). Circle: 0.
-  // roundness = 1 when sharpCorners <= 2, 0 when >= 4
-  if (sharpCorners >= 4) return 0.0;
-  if (sharpCorners <= 2) return 1.0;
-  return 1.0 - (sharpCorners - 2) / 2.0; // 3 corners -> 0.5
+
+  // Rectangles: several near-90° corner samples. Ellipses: few milder tips.
+  if (strongSamples >= 4 || sharpSamples >= 10) return 0.0;
+  if (sharpSamples <= 2 && strongSamples == 0) return 1.0;
+  if (strongSamples >= 3 || sharpSamples >= 7) return 0.3;
+  if (sharpSamples >= 4) return 0.55;
+  return 0.8;
+}
+
+/// Evenly spaced samples along the polyline (treated as closed when ends meet).
+List<Offset> _resampleClosedPolyline(List<Offset> points, {required int targetCount}) {
+  if (points.length <= targetCount) return List<Offset>.from(points);
+  final closed = (points.first - points.last).distance <=
+      math.max(4.0, _polylineLength(points) * 0.02);
+  final ring = <Offset>[...points];
+  if (closed && (ring.first - ring.last).distance > 1e-6) {
+    ring.add(ring.first);
+  }
+
+  final total = _polylineLength(ring);
+  if (total < 1e-6) return points.sublist(0, math.min(points.length, targetCount));
+
+  final out = <Offset>[];
+  final step = total / targetCount;
+  var seg = 0;
+  var segStart = 0.0;
+  out.add(ring.first);
+  for (var i = 1; i < targetCount; i++) {
+    final target = i * step;
+    while (seg < ring.length - 1) {
+      final a = ring[seg];
+      final b = ring[seg + 1];
+      final len = (b - a).distance;
+      if (segStart + len >= target || seg == ring.length - 2) {
+        final t = len < 1e-9 ? 0.0 : ((target - segStart) / len).clamp(0.0, 1.0);
+        out.add(Offset.lerp(a, b, t)!);
+        break;
+      }
+      segStart += len;
+      seg++;
+    }
+  }
+  return out;
+}
+
+double _polylineLength(List<Offset> points) {
+  var len = 0.0;
+  for (var i = 1; i < points.length; i++) {
+    len += (points[i] - points[i - 1]).distance;
+  }
+  return len;
 }
 
 /// Returns true if stroke is V-shaped and simple (few segments), favoring angle bracket over brace.

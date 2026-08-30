@@ -29,8 +29,8 @@ class VaultPdfLoadSettings extends StatelessWidget {
             title: const Text('Secure PDF loading'),
             subtitle: Text(
               isRamOnly
-                  ? 'RAM only · No temp files · Most secure'
-                  : 'Temp file · Faster · Secure-deleted when closed',
+                  ? 'Decrypted content stays in RAM only — never written to disk'
+                  : 'Large PDFs decrypt to a temp file (mmap) · Deleted when closed',
             ),
             childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             children: [
@@ -69,6 +69,7 @@ class VaultPdfLoadSettings extends StatelessWidget {
               selected: {mode},
               onSelectionChanged: (selection) {
                 stows.vaultPdfLoadMode.value = selection.first;
+                // Listener on VaultAdapter prunes plaintext temps for RAM-only paths.
               },
               style: ButtonStyle(
                 padding: WidgetStateProperty.all(
@@ -81,7 +82,7 @@ class VaultPdfLoadSettings extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         Text(
-          'Temp mode decrypts to file, faster for large PDFs.',
+          'RAM keeps plaintext off disk (default). Temp is faster for large PDFs and may write short-lived decrypted files.',
           style: theme.textTheme.bodySmall?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),

@@ -4,7 +4,6 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
-import 'package:saber/data/prefs.dart';
 import 'package:stow_codecs/stow_codecs.dart';
 
 abstract class Tool {
@@ -30,14 +29,16 @@ enum ToolId {
   ballpointPen('ballpointPen'),
   calligraphyPen('calligraphyPen'),
   shapePen('ShapePen'),
-  verticalSpacePen('VerticalSpacePen'),
-  horizontalSpacePen('HorizontalSpacePen'),
   advancedPen('advancedPen'),
+  experimentalPen('experimentalPen'),
   shapeTool('ShapeTool'),
   eraser('Eraser'),
   select('Select'),
   textEditing('TextEditingTool'),
-  laserPointer('LaserPointer');
+  laserPointer('LaserPointer'),
+
+  /// Procedural-noise pencil (geometry like Advanced Pen; separate presets).
+  advancedPencil('advancedPencil');
 
   final String id;
   const ToolId(this.id);
@@ -56,12 +57,20 @@ enum ToolId {
       return .ballpointPen;
     }
 
+    // Legacy pencil tool removed; treat as ballpoint.
     if (penType == 'Pencil' || penType == 'pencilPen') {
       return .ballpointPen;
     }
 
-    if (penType == 'InsertPen') {
-      return .verticalSpacePen;
+    // Legacy V-Space / H-Space / InsertPen tools removed.
+    if (penType == 'InsertPen' ||
+        penType == 'VerticalSpacePen' ||
+        penType == 'HorizontalSpacePen') {
+      return .ballpointPen;
+    }
+    // Legacy experimental pen maps to Advanced.
+    if (penType == ToolId.experimentalPen.id) {
+      return .advancedPen;
     }
     for (final toolId in ToolId.values) {
       if (penType == toolId.id) {
@@ -86,14 +95,36 @@ class _ToolIdPrefCodec extends AbstractCodec<ToolId, Object?> {
   const _ToolIdPrefCodec();
 
   @override
-  Object? encode(ToolId input) => ToolId.codec.encode(input);
+  Object? encode(ToolId input) => input.id;
 
   @override
   ToolId decode(Object? input) {
-    if (input == 'pencilPen' || input == 'Pencil') return ToolId.ballpointPen;
+    if (input is String) {
+      return ToolId.parsePenType(input, fallback: ToolId.ballpointPen);
+    }
+    // Legacy int indices from before V/H-space removal (and pencil).
+    // Order matches ToolId.values when verticalSpacePen=5, horizontalSpacePen=6.
+    const legacyByIndex = <ToolId>[
+      ToolId.highlighter, // 0
+      ToolId.fountainPen, // 1
+      ToolId.ballpointPen, // 2
+      ToolId.calligraphyPen, // 3
+      ToolId.shapePen, // 4
+      ToolId.ballpointPen, // 5 was verticalSpacePen
+      ToolId.ballpointPen, // 6 was horizontalSpacePen
+      ToolId.advancedPen, // 7
+      ToolId.advancedPen, // 8 experimental → advanced
+      ToolId.shapeTool, // 9
+      ToolId.eraser, // 10
+      ToolId.select, // 11
+      ToolId.textEditing, // 12
+      ToolId.laserPointer, // 13
+      ToolId.advancedPencil, // 14
+    ];
     final i = input is int
         ? input
-        : (input is num ? input.toInt() : (input == null ? 0 : 0));
-    return ToolId.codec.decode(i);
+        : (input is num ? input.toInt() : -1);
+    if (i >= 0 && i < legacyByIndex.length) return legacyByIndex[i];
+    return ToolId.ballpointPen;
   }
 }

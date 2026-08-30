@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
@@ -35,9 +34,7 @@ Future<void> showNotePropertiesDialog(
   BuildContext context,
   EditorCoreInfo coreInfo,
 ) async {
-  final theme = Theme.of(context);
-  final colorScheme = theme.colorScheme;
-  final isDark = theme.brightness == Brightness.dark;
+  final isDark = Theme.of(context).brightness == Brightness.dark;
 
   final dateFormat = DateFormat('MMM dd, yyyy - HH:mm');
   final creation = coreInfo.creationDate > 0
@@ -65,43 +62,17 @@ Future<void> showNotePropertiesDialog(
       backgroundColor: Colors.transparent,
       elevation: 0,
       insetPadding: const EdgeInsets.all(24),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(24),
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            width: 480,
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: isDark
-                  ? const Color(0xFF1C1C1E).withValues(alpha: 0.85)
-                  : colorScheme.surface.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.1)
-                    : colorScheme.outlineVariant.withValues(alpha: 0.4),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 32,
-                  offset: const Offset(0, 16),
-                ),
-              ],
-            ),
-            child: _NotePropertiesDialogContent(
-              coreInfo: coreInfo,
-              creation: creation,
-              modified: modified,
-              accessed: accessed,
-              timeSpentStr: timeSpentStr,
-              timeSpentEditingStr: timeSpentEditingStr,
-              locationStr: locationStr,
-              isDark: isDark,
-            ),
-          ),
+      child: RuggedDialogShell(
+        maxWidth: 520,
+        child: _NotePropertiesDialogContent(
+          coreInfo: coreInfo,
+          creation: creation,
+          modified: modified,
+          accessed: accessed,
+          timeSpentStr: timeSpentStr,
+          timeSpentEditingStr: timeSpentEditingStr,
+          locationStr: locationStr,
+          isDark: isDark,
         ),
       ),
     ),
@@ -156,14 +127,9 @@ class _NotePropertiesDialogContentState
     if (!mounted) return;
     setState(() => _basePath = basePath);
 
-    int fileSize = 0;
-    fileSize += await FileManager.getFileSize(basePath);
-    fileSize += await FileManager.getFileSize('$basePath.p');
-    for (int assetNumber = 0; true; assetNumber++) {
-      final assetSize = await FileManager.getFileSize('$basePath.$assetNumber');
-      if (assetSize == 0) break;
-      fileSize += assetSize;
-    }
+    final fileSize = await FileManager.getNoteBundleSizeBytes(
+      widget.coreInfo.filePath,
+    );
 
     if (mounted) setState(() => _fileSize = fileSize);
   }

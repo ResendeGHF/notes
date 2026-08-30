@@ -18,6 +18,11 @@ class NoteLayer extends ChangeNotifier {
   List<Stroke> get strokes => _strokes;
   List<EditorImage> get images => _images;
 
+  /// Backing lists for [EditorPage] incremental-save dirty tracking (see
+  /// [_SaveDirtyDelegatingList]).
+  List<Stroke> get backingStrokes => _strokes;
+  List<EditorImage> get backingImages => _images;
+
   bool get isEmpty => _strokes.isEmpty && _images.isEmpty;
 
   void insertStroke(Stroke stroke) {

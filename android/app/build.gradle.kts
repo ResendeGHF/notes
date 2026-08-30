@@ -23,6 +23,12 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "28.2.13676358"
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -41,6 +47,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["applicationName"] = "com.resendeghf.notes.NotesApplication"
+        // Android-only aarch64 product: skip v7a/x86_64 APK/native paths.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -72,10 +83,12 @@ flutter {
 dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.20")
     implementation("com.google.android.material:material:1.13.0")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }
 
-val abiCodes = mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86_64" to 3)
+// Single-ABI (arm64-v8a) builds; keep a stable versionCode override if splits appear.
+val abiCodes = mapOf("arm64-v8a" to 2)
 android.applicationVariants.configureEach {
     val variant = this
     variant.outputs.forEach { output ->

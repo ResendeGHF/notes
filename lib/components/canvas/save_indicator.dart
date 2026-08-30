@@ -22,46 +22,13 @@ class SaveIndicator extends StatelessWidget {
     return IconButton(
       tooltip: MaterialLocalizations.of(context).backButtonTooltip,
       onPressed: () => _onPressed(context),
-      icon: ValueListenableBuilder(
-        valueListenable: savingState,
-        builder: (context, state, _) {
-          return Stack(
-            alignment: Alignment.center,
-            children: [
-              const Icon(Icons.arrow_back),
-
-              if (state == SavingState.waitingToSave)
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                      color: Colors.orange,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
+      icon: const Icon(Icons.arrow_back),
     );
   }
 
   void _onPressed(BuildContext context) {
-    switch (savingState.value) {
-      case SavingState.waitingToSave:
-        triggerSave();
-        return;
-      case SavingState.saving:
-        _back(context);
-        return;
-      case SavingState.saved:
-        _back(context);
-        return;
-    }
+    if (savingState.value == SavingState.waitingToSave) triggerSave();
+    _back(context);
   }
 
   void _back(BuildContext context) {

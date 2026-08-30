@@ -1,6 +1,8 @@
 # `lib/components/toolbar/editor_page_manager.dart`
 
-This file is part of the application library under `lib/`. Long-form comments and `///` documentation were moved here from the Dart source to keep implementation files minimal.
+Editor **Pages** side panel: page previews with insert/duplicate/clear/delete, plus an **Outlines** tab when the note has PDF outline data.
+
+When `pdfOutlines` is non-empty, the panel body is a two-tab `TabBar` / `TabBarView` (Pages | Outlines). Outlines use `PdfOutlineListView`; selecting an entry closes the panel and jumps to that page.
 
 ## License (REUSE / SPDX)
 

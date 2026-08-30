@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:math' as math;
-import 'dart:typed_data';
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:saber/components/toolbar/3Dplot.dart'
+    show
+        AxisGizmoPainter3D,
+        CoordSystem3D,
+        MainAxesLabelsPainter3D,
+        SurfacePainter3D,
+        SurfaceTriangle3D;
 import 'package:saber/services/math_engine/math_engine.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
 
@@ -20,6 +24,8 @@ class ScalarSurfaceDef {
   final double vMin, vMax;
   final double tMin, tMax;
   final int durationMs;
+  final double? xMin, xMax, yMin, yMax, zMin, zMax;
+  final CoordSystem3D coordSystem;
 
   ScalarSurfaceDef({
     required this.exprX,
@@ -33,6 +39,13 @@ class ScalarSurfaceDef {
     this.tMin = 0,
     this.tMax = 0,
     this.durationMs = 0,
+    this.xMin,
+    this.xMax,
+    this.yMin,
+    this.yMax,
+    this.zMin,
+    this.zMax,
+    this.coordSystem = CoordSystem3D.cartesian,
   });
 
   bool get hasAnimation => tMax > tMin && durationMs > 0;
@@ -49,6 +62,7 @@ class Scalar3DWidget extends StatefulWidget {
   final bool isDarkMode;
   final bool showLabels;
   final bool autoRotate;
+  final CoordSystem3D gridCoordSystem;
 
   const Scalar3DWidget({
     super.key,
@@ -62,6 +76,7 @@ class Scalar3DWidget extends StatefulWidget {
     required this.isDarkMode,
     required this.showLabels,
     this.autoRotate = false,
+    this.gridCoordSystem = CoordSystem3D.cartesian,
   });
 
   @override
@@ -70,7 +85,7 @@ class Scalar3DWidget extends StatefulWidget {
 
 class _Scalar3DWidgetState extends State<Scalar3DWidget>
     with SingleTickerProviderStateMixin {
-  List<_RenderTriangle> _triangles = [];
+  List<SurfaceTriangle3D> _triangles = [];
   bool _needsRecalc = true;
   final ComplexParser _parser = ComplexParser();
   late final Ticker _ticker;
@@ -142,8 +157,21 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
     return HSLColor.fromAHSL(1.0, hue, 1.0, 0.5).toColor();
   }
 
+  double _visibleHalfRange() {
+    final range = 15.0 / widget.zoom.clamp(0.001, 1000000.0);
+    return range.clamp(0.01, 100000.0);
+  }
+
+  int _gridSteps() {
+    final rangeScale = math.sqrt(_visibleHalfRange() / 15.0).clamp(0.75, 1.9);
+    final zoomDetail = widget.zoom < 0.7
+        ? 1.12
+        : (widget.zoom > 1.6 ? 1.08 : 1.0);
+    return (78 * rangeScale * zoomDetail).round().clamp(64, 150);
+  }
+
   void _calculateGeometry() {
-    _triangles.clear();
+    _triangles = [];
 
     for (var def in widget.surfaces) {
       try {
@@ -174,13 +202,22 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
           }
         }
 
-        final double viewRange = 12.0;
-        final double uStart = widget.centerX - viewRange;
-        final double uEnd = widget.centerX + viewRange;
-        final double vStart = widget.centerY - viewRange;
-        final double vEnd = widget.centerY + viewRange;
+        final isCart = def.coordSystem == CoordSystem3D.cartesian;
+        final isCyl = def.coordSystem == CoordSystem3D.cylindrical;
+        final isSph = def.coordSystem == CoordSystem3D.spherical;
 
-        int steps = 45;
+        final viewRange = _visibleHalfRange();
+        final double uStart =
+            def.xMin ?? (isCart ? widget.centerX - viewRange : 0.0);
+        final double uEnd =
+            def.xMax ?? (isCart ? widget.centerX + viewRange : 2 * math.pi);
+        final double vStart =
+            def.yMin ??
+            (isCart ? widget.centerY - viewRange : (isSph ? 0.0 : -math.pi));
+        final double vEnd =
+            def.yMax ?? (isCart ? widget.centerY + viewRange : math.pi);
+
+        final steps = _gridSteps();
         double uStep = (uEnd - uStart) / steps;
         double vStep = (vEnd - vStart) / steps;
 
@@ -203,16 +240,30 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
             vars['u'] = Complex(u);
             vars['v'] = Complex(v);
 
-            final x = evalReal(exprX);
-            final y = evalReal(exprY);
-            final z = evalReal(exprZ);
+            final xRaw = evalReal(exprX);
+            final yRaw = evalReal(exprY);
+            final zRaw = evalReal(exprZ);
 
-            if (x != null && y != null && z != null) {
-              points[i][j] = vmath.Vector3(x, y, z);
+            if (xRaw != null && yRaw != null && zRaw != null) {
+              double finalX = xRaw, finalY = yRaw, finalZ = zRaw;
+              if (isCyl) {
+                finalX = xRaw * math.cos(yRaw);
+                finalY = xRaw * math.sin(yRaw);
+                finalZ = zRaw;
+              } else if (isSph) {
+                finalX = xRaw * math.sin(zRaw) * math.cos(yRaw);
+                finalY = xRaw * math.sin(zRaw) * math.sin(yRaw);
+                finalZ = xRaw * math.cos(zRaw);
+              }
 
-              vars['x'] = Complex(x);
-              vars['y'] = Complex(y);
-              vars['z'] = Complex(z);
+              if (def.zMin != null && finalZ < def.zMin!) continue;
+              if (def.zMax != null && finalZ > def.zMax!) continue;
+
+              points[i][j] = vmath.Vector3(finalX, finalY, finalZ);
+
+              vars['x'] = Complex(finalX);
+              vars['y'] = Complex(finalY);
+              vars['z'] = Complex(finalZ);
               final s = evalReal(exprS);
               if (s != null && s.isFinite) {
                 scalars[i][j] = s;
@@ -225,7 +276,6 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
 
         for (int i = 0; i < steps; i++) {
           for (int j = 0; j < steps; j++) {
-
             void addTri(int i1, int j1, int i2, int j2, int i3, int j3) {
               final pA = points[i1][j1];
               final pB = points[i2][j2];
@@ -242,14 +292,27 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
                   sB != null &&
                   sC != null &&
                   minVal != double.infinity) {
-
-                Color cA = _getColor(sA, minVal, maxVal);
-                Color cB = _getColor(sB, minVal, maxVal);
-                Color cC = _getColor(sC, minVal, maxVal);
-
-                double zAvg = (pA.z + pB.z + pC.z) / 3;
-
-                _triangles.add(_RenderTriangle(pA, pB, pC, cA, cB, cC, zAvg));
+                final sAvg = (sA + sB + sC) / 3;
+                _triangles.add(
+                  SurfaceTriangle3D(
+                    vmath.Vector3(
+                      pA.x - widget.centerX,
+                      pA.y - widget.centerY,
+                      pA.z - widget.centerZ,
+                    ),
+                    vmath.Vector3(
+                      pB.x - widget.centerX,
+                      pB.y - widget.centerY,
+                      pB.z - widget.centerZ,
+                    ),
+                    vmath.Vector3(
+                      pC.x - widget.centerX,
+                      pC.y - widget.centerY,
+                      pC.z - widget.centerZ,
+                    ),
+                    _getColor(sAvg, minVal, maxVal),
+                  ),
+                );
               }
             }
 
@@ -258,7 +321,7 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
           }
         }
       } catch (e) {
-        debugPrint("Scalar calc error: $e");
+        debugPrint('Scalar calc error: $e');
       }
     }
     _needsRecalc = false;
@@ -275,309 +338,84 @@ class _Scalar3DWidgetState extends State<Scalar3DWidget>
     return LayoutBuilder(
       builder: (ctx, constraints) {
         if (_needsRecalc) _calculateGeometry();
+        final halfRange = _visibleHalfRange();
+        final yaw = widget.yaw + _autoRotationOffset;
         return Listener(
           onPointerDown: (_) => _isInteracting = true,
           onPointerUp: (_) => _isInteracting = false,
           onPointerCancel: (_) => _isInteracting = false,
-          child: CustomPaint(
-            size: Size(constraints.maxWidth, constraints.maxHeight),
-            painter: _ScalarPainter(
-              triangles: _triangles,
-              yaw: widget.yaw + _autoRotationOffset,
-              pitch: widget.pitch,
-              zoom: widget.zoom,
-              cx: widget.centerX,
-              cy: widget.centerY,
-              cz: widget.centerZ,
-              showLabels: widget.showLabels,
-              isDarkMode: widget.isDarkMode,
-            ),
+          child: Stack(
+            children: [
+              if (widget.showLabels)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: MainAxesLabelsPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                        zoom: widget.zoom,
+                        centerX: widget.centerX,
+                        centerY: widget.centerY,
+                        centerZ: widget.centerZ,
+                        halfRange: halfRange,
+                        gridCoordSystem: widget.gridCoordSystem,
+                        showGrid: true,
+                        showAxesAndLabels: false,
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: SurfacePainter3D(
+                    triangles: _triangles,
+                    yawDeg: yaw,
+                    pitchDeg: widget.pitch,
+                    zoom: widget.zoom,
+                    isDarkMode: widget.isDarkMode,
+                  ),
+                ),
+              ),
+              if (widget.showLabels)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: MainAxesLabelsPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                        zoom: widget.zoom,
+                        centerX: widget.centerX,
+                        centerY: widget.centerY,
+                        centerZ: widget.centerZ,
+                        halfRange: halfRange,
+                        gridCoordSystem: widget.gridCoordSystem,
+                        showGrid: false,
+                        showAxesAndLabels: true,
+                      ),
+                    ),
+                  ),
+                ),
+              if (widget.showLabels)
+                Positioned(
+                  left: 12,
+                  bottom: 12,
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      size: const Size(92, 92),
+                      painter: AxisGizmoPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         );
       },
     );
   }
-}
-
-class _RenderTriangle {
-  final vmath.Vector3 p1, p2, p3;
-  final Color c1, c2, c3;
-  final double zCentroid;
-  _RenderTriangle(
-    this.p1,
-    this.p2,
-    this.p3,
-    this.c1,
-    this.c2,
-    this.c3,
-    this.zCentroid,
-  );
-}
-
-class _SortedTriIndex {
-  final int index;
-  final double depth;
-  _SortedTriIndex(this.index, this.depth);
-}
-
-class _ScalarPainter extends CustomPainter {
-  final List<_RenderTriangle> triangles;
-  final double yaw, pitch, zoom, cx, cy, cz;
-  final bool showLabels, isDarkMode;
-
-  _ScalarPainter({
-    required this.triangles,
-    required this.yaw,
-    required this.pitch,
-    required this.zoom,
-    required this.cx,
-    required this.cy,
-    required this.cz,
-    required this.showLabels,
-    required this.isDarkMode,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width / 2;
-    final h = size.height / 2;
-    final scale = 15.0 * zoom;
-
-    final rot =
-        vmath.Matrix3.rotationX(vmath.radians(pitch) - math.pi / 2) *
-        vmath.Matrix3.rotationZ(vmath.radians(yaw));
-
-    vmath.Vector3 proj(vmath.Vector3 v) {
-      double x = v.x - cx;
-      double y = v.y - cy;
-      double z = v.z - cz;
-      return vmath.Vector3(
-        rot[0] * x + rot[3] * y + rot[6] * z,
-        rot[1] * x + rot[4] * y + rot[7] * z,
-        rot[2] * x + rot[5] * y + rot[8] * z,
-      );
-    }
-
-    List<_SortedTriIndex> sortList = [];
-    List<Float32List> projectedVerts = [];
-
-    for (int i = 0; i < triangles.length; i++) {
-      var tri = triangles[i];
-
-      var r1 = proj(tri.p1);
-      var r2 = proj(tri.p2);
-      var r3 = proj(tri.p3);
-
-      projectedVerts.add(
-        Float32List.fromList([w + r1.x * scale, h - r1.y * scale]),
-      );
-      projectedVerts.add(
-        Float32List.fromList([w + r2.x * scale, h - r2.y * scale]),
-      );
-      projectedVerts.add(
-        Float32List.fromList([w + r3.x * scale, h - r3.y * scale]),
-      );
-
-      double depth = (r1.z + r2.z + r3.z) / 3;
-      sortList.add(_SortedTriIndex(i, depth));
-    }
-
-    sortList.sort((a, b) => a.depth.compareTo(b.depth));
-
-    int vertexCount = triangles.length * 3;
-    Float32List positions = Float32List(vertexCount * 2);
-    Int32List colors = Int32List(vertexCount);
-
-    for (int i = 0; i < sortList.length; i++) {
-      int triIdx = sortList[i].index;
-      _RenderTriangle tri = triangles[triIdx];
-
-      int vBase = triIdx * 3;
-      int bufBase = i * 6;
-      int colBase = i * 3;
-
-      var v1 = projectedVerts[vBase];
-      positions[bufBase] = v1[0];
-      positions[bufBase + 1] = v1[1];
-      colors[colBase] = tri.c1.value;
-
-      var v2 = projectedVerts[vBase + 1];
-      positions[bufBase + 2] = v2[0];
-      positions[bufBase + 3] = v2[1];
-      colors[colBase + 1] = tri.c2.value;
-
-      var v3 = projectedVerts[vBase + 2];
-      positions[bufBase + 4] = v3[0];
-      positions[bufBase + 5] = v3[1];
-      colors[colBase + 2] = tri.c3.value;
-    }
-
-    if (showLabels) {
-      _drawGridAndLabels(canvas, size, rot, scale, w, h);
-    }
-
-    final vertices = ui.Vertices.raw(
-      ui.VertexMode.triangles,
-      positions,
-      colors: colors,
-    );
-
-    Paint paint = Paint()..style = PaintingStyle.fill;
-    canvas.drawVertices(vertices, BlendMode.srcOver, paint);
-  }
-
-  void _drawGridAndLabels(
-    Canvas canvas,
-    Size size,
-    vmath.Matrix3 rot,
-    double scale,
-    double cx,
-    double cy,
-  ) {
-    final axisPaint = Paint()
-      ..color = (isDarkMode ? Colors.white : Colors.black).withValues(
-        alpha: 0.3,
-      )
-      ..strokeWidth = 1.0;
-    final textPainter = TextPainter(textDirection: TextDirection.ltr);
-
-    Offset project(double x, double y, double z) {
-      final relX = x - this.cx;
-      final relY = y - this.cy;
-      final relZ = z - this.cz;
-      final rx = rot[0] * relX + rot[3] * relY + rot[6] * relZ;
-      final ry = rot[1] * relX + rot[4] * relY + rot[7] * relZ;
-      return Offset(cx + rx * scale, cy - ry * scale);
-    }
-
-    final double step = MathGrid.calculateStepSize(80.0, scale);
-
-    final double L = 10000.0;
-    canvas.drawLine(
-      project(-L, 0, 0),
-      project(L, 0, 0),
-      axisPaint..color = Colors.red.withOpacity(0.4),
-    );
-    canvas.drawLine(
-      project(0, -L, 0),
-      project(0, L, 0),
-      axisPaint..color = Colors.green.withOpacity(0.4),
-    );
-    canvas.drawLine(
-      project(0, 0, -L),
-      project(0, 0, L),
-      axisPaint..color = Colors.blue.withOpacity(0.4),
-    );
-
-    final int ticks = 6;
-    TextStyle style = TextStyle(
-      color: isDarkMode ? Colors.white70 : Colors.black87,
-      fontSize: 10,
-      backgroundColor: isDarkMode ? const Color(0xFF1E1E1E) : Colors.white,
-    );
-
-    final lx = math.sqrt(rot[0] * rot[0] + rot[1] * rot[1]);
-    final ly = math.sqrt(rot[3] * rot[3] + rot[4] * rot[4]);
-    final lz = math.sqrt(rot[6] * rot[6] + rot[7] * rot[7]);
-    final ax = lx > 1e-6 ? Offset(rot[0] / lx, -rot[1] / lx) : Offset.zero;
-    final ay = ly > 1e-6 ? Offset(rot[3] / ly, -rot[4] / ly) : Offset.zero;
-    final az = lz > 1e-6 ? Offset(rot[6] / lz, -rot[7] / lz) : Offset.zero;
-    const labelOffset = 8.0;
-
-    void drawTicks(String axis) {
-      final unit = axis == 'x' ? ax : (axis == 'y' ? ay : az);
-
-      double centerVal = axis == 'x'
-          ? this.cx
-          : (axis == 'y' ? this.cy : this.cz);
-      double start = (centerVal / step).floor() * step;
-
-      for (int i = -ticks; i <= ticks; i++) {
-        double val = start + (i * step);
-        if (val.abs() < 1e-5) continue;
-
-        double wx = 0, wy = 0, wz = 0;
-        if (axis == 'x') {
-          wx = val;
-        } else if (axis == 'y') {
-          wy = val;
-        } else {
-          wz = val;
-        }
-
-        Offset p = project(wx, wy, wz);
-        if (p.dx < -50 ||
-            p.dx > size.width + 50 ||
-            p.dy < -50 ||
-            p.dy > size.height + 50)
-          continue;
-        canvas.drawCircle(
-          p,
-          2,
-          axisPaint..color = (isDarkMode ? Colors.white : Colors.black),
-        );
-        textPainter.text = TextSpan(
-          text: MathFormatter.formatAxisLabel(val, precision: 2),
-          style: style,
-        );
-        textPainter.layout();
-        textPainter.paint(
-          canvas,
-          p + Offset(unit.dx * labelOffset, unit.dy * labelOffset),
-        );
-      }
-    }
-
-    drawTicks('x');
-    drawTicks('y');
-    drawTicks('z');
-    _drawGizmo(canvas, size, rot);
-  }
-
-  void _drawGizmo(Canvas canvas, Size size, vmath.Matrix3 rot) {
-    final paint = Paint()..strokeWidth = 2.0;
-    final origin = Offset(35, size.height - 35);
-    final len = 20.0;
-    const labelOffset = 10.0;
-    Offset proj(double x, double y, double z) {
-      final rx = rot[0] * x + rot[3] * y + rot[6] * z;
-      final ry = rot[1] * x + rot[4] * y + rot[7] * z;
-      return origin + Offset(rx, -ry);
-    }
-
-    canvas.drawLine(origin, proj(len, 0, 0), paint..color = Colors.red);
-    canvas.drawLine(origin, proj(0, len, 0), paint..color = Colors.green);
-    canvas.drawLine(origin, proj(0, 0, len), paint..color = Colors.blue);
-
-    final lx = math.sqrt(rot[0] * rot[0] + rot[1] * rot[1]);
-    final ly = math.sqrt(rot[3] * rot[3] + rot[4] * rot[4]);
-    final lz = math.sqrt(rot[6] * rot[6] + rot[7] * rot[7]);
-    final ux = lx > 1e-6 ? Offset(rot[0] / lx, -rot[1] / lx) : Offset.zero;
-    final uy = ly > 1e-6 ? Offset(rot[3] / ly, -rot[4] / ly) : Offset.zero;
-    final uz = lz > 1e-6 ? Offset(rot[6] / lz, -rot[7] / lz) : Offset.zero;
-    final tp = TextPainter(textDirection: TextDirection.ltr);
-    void lbl(String s, Offset axisTip, Offset unit, Color c) {
-      final p = axisTip + Offset(unit.dx * labelOffset, unit.dy * labelOffset);
-      tp.text = TextSpan(
-        text: s,
-        style: TextStyle(color: c, fontWeight: FontWeight.bold, fontSize: 9),
-      );
-      tp.layout();
-      tp.paint(canvas, p);
-    }
-
-    lbl("X", proj(len, 0, 0), ux, Colors.red);
-    lbl("Y", proj(0, len, 0), uy, Colors.green);
-    lbl("Z", proj(0, 0, len), uz, Colors.blue);
-  }
-
-  @override
-  bool shouldRepaint(covariant _ScalarPainter old) =>
-      old.yaw != yaw ||
-      old.pitch != pitch ||
-      old.zoom != zoom ||
-      old.cx != cx ||
-      old.cy != cy ||
-      old.cz != cz ||
-      old.showLabels != showLabels;
 }

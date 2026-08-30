@@ -7,16 +7,28 @@ import 'dart:math';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
+import 'package:saber/data/extensions/svg_path_formatting.dart';
 import 'package:saber/data/tools/_tool.dart';
 
 class CircleStroke extends Stroke {
-  Offset center;
-  double radius;
+  Offset _center;
+  Offset get center => _center;
+  set center(Offset value) {
+    _center = value;
+    markPolygonNeedsUpdating();
+  }
+
+  double _radius;
+  double get radius => _radius;
+  set radius(double value) {
+    _radius = value;
+    markPolygonNeedsUpdating();
+  }
 
   CircleStroke({
     required super.color,
@@ -25,9 +37,10 @@ class CircleStroke extends Stroke {
     required super.pageIndex,
     required super.page,
     required super.toolId,
-    required this.center,
-    required this.radius,
-  }) {
+    required Offset center,
+    required double radius,
+  }) : _center = center,
+       _radius = radius {
     options.isComplete = true;
   }
 
@@ -111,10 +124,7 @@ class CircleStroke extends Stroke {
           pageIndex = reader.readIntNoKey();
           break;
         case StrokeBinaryKeys.cx:
-          center = Offset(
-            reader.readScaledFloat(),
-            center?.dy ?? 0,
-          );
+          center = Offset(reader.readScaledFloat(), center?.dy ?? 0);
           break;
         case StrokeBinaryKeys.cy:
           center = Offset(center?.dx ?? 0, reader.readScaledFloat());
@@ -152,6 +162,44 @@ class CircleStroke extends Stroke {
       center: center,
       radius: radius,
     );
+  }
+
+  static void skipFromBinary(BinaryReader reader) {
+    int key = reader.readKey();
+    while (key != StrokeBinaryKeys.size &&
+        key != StrokeBinaryKeys.thinning &&
+        key != StrokeBinaryKeys.smoothing &&
+        key != StrokeBinaryKeys.streamline &&
+        key != StrokeBinaryKeys.simulatePressure &&
+        key != StrokeBinaryKeys.isComplete &&
+        key != StrokeBinaryKeys.startTaperEnabled &&
+        key != StrokeBinaryKeys.startCustomTaper &&
+        key != StrokeBinaryKeys.startCap &&
+        key != StrokeBinaryKeys.endTaperEnabled &&
+        key != StrokeBinaryKeys.endCustomTaper &&
+        key != StrokeBinaryKeys.endCap &&
+        key != StrokeBinaryKeys.endOptions) {
+      switch (key) {
+        case StrokeBinaryKeys.pageIndex:
+          reader.readIntNoKey();
+          break;
+        case StrokeBinaryKeys.cx:
+        case StrokeBinaryKeys.cy:
+        case StrokeBinaryKeys.r:
+          reader.readScaledFloat();
+          break;
+        case StrokeBinaryKeys.pressureEnabled:
+          reader.readBoolNoKey();
+          break;
+        case StrokeBinaryKeys.color:
+          reader.readColor();
+          break;
+        default:
+          break;
+      }
+      key = reader.readKey();
+    }
+    BinaryOptions().optionsFromBinary(reader, initialKey: key);
   }
 
   @override
@@ -221,13 +269,15 @@ class CircleStroke extends Stroke {
   }
 
   @override
-  void optimisePoints({double thresholdMultiplier = 0}) {
-
-  }
+  void optimisePoints({double thresholdMultiplier = 0}) {}
 
   @override
   String toSvgPath() {
-    return 'M${center.dx},${center.dy} m${-radius},0 a$radius,$radius 0 1,0 ${radius * 2},0 a$radius,$radius 0 1,0 ${-radius * 2},0';
+    final r = formatSvgPathDouble(radius);
+    return 'M${formatSvgPathDouble(center.dx)},${formatSvgPathDouble(center.dy)} '
+        'm${formatSvgPathDouble(-radius)},0 '
+        'a$r,$r 0 1,0 ${formatSvgPathDouble(radius * 2)},0 '
+        'a$r,$r 0 1,0 ${formatSvgPathDouble(-radius * 2)},0';
   }
 
   @override
@@ -276,6 +326,7 @@ class CircleStroke extends Stroke {
       center.dy + (this.center.dy - center.dy) * factor,
     );
     radius *= factor;
+    options.size *= factor;
     markPolygonNeedsUpdating();
   }
 }

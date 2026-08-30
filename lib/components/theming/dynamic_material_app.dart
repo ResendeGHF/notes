@@ -21,7 +21,7 @@ class DynamicMaterialApp extends StatefulWidget {
     super.key,
     required this.title,
     required this.router,
-    this.defaultSwatch = Colors.blueGrey,
+    this.defaultSwatch = Colors.grey,
   });
 
   final String title;
@@ -40,10 +40,10 @@ class DynamicMaterialApp extends StatefulWidget {
 
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       windowManager.setFullScreen(value);
+    } else if (Platform.isAndroid) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     } else {
-      SystemChrome.setEnabledSystemUIMode(
-        value ? SystemUiMode.immersive : SystemUiMode.edgeToEdge,
-      );
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
   }
 
@@ -101,14 +101,14 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
       themeMode: stows.appTheme.value,
       theme: lightTheme.copyWith(
         colorScheme: lightTheme.colorScheme.copyWith(
-          primary: Colors.blueGrey,
-          secondary: Colors.blueGrey.shade600,
+          primary: Colors.grey,
+          secondary: Colors.grey.shade600,
         ),
       ),
       darkTheme: darkTheme.copyWith(
         colorScheme: darkTheme.colorScheme.copyWith(
-          primary: Colors.blueGrey.shade300,
-          secondary: Colors.blueGrey.shade400,
+          primary: Colors.grey.shade300,
+          secondary: Colors.grey.shade400,
         ),
       ),
     );
@@ -185,9 +185,31 @@ class ExplicitlyThemedApp extends StatelessWidget {
       highContrastTheme: highContrastTheme,
       highContrastDarkTheme: highContrastDarkTheme,
       debugShowCheckedModeBanner: false,
-      builder: (Platform.isWindows || Platform.isLinux)
-          ? (context, child) => _BorderedWindow(child: child)
-          : null,
+      builder: (context, child) {
+        Widget result = child ?? const SizedBox.shrink();
+        if (Platform.isAndroid || Platform.isIOS) {
+          final brightness = Theme.of(context).brightness;
+          result = AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              systemNavigationBarColor: Colors.transparent,
+              systemNavigationBarContrastEnforced: false,
+              statusBarIconBrightness: brightness == Brightness.dark
+                  ? Brightness.light
+                  : Brightness.dark,
+              systemNavigationBarIconBrightness:
+                  brightness == Brightness.dark
+                      ? Brightness.light
+                      : Brightness.dark,
+            ),
+            child: result,
+          );
+        }
+        if (Platform.isWindows || Platform.isLinux) {
+          result = _BorderedWindow(child: result);
+        }
+        return result;
+      },
     );
   }
 }

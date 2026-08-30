@@ -170,20 +170,19 @@ class CanvasBackgroundPainter extends CustomPainter {
           );
         }
       case .grid:
-        for (double y = 0; y < size.height; y += lineHeight) {
-          yield PatternElement(
-            Offset(0, y),
-            Offset(size.width, y),
-            isLine: true,
-          );
+        final int cols = size.width ~/ lineHeight;
+        final int rows = size.height ~/ lineHeight;
+        final double maxX = cols * lineHeight.toDouble();
+        final double maxY = rows * lineHeight.toDouble();
+
+        for (int i = 0; i <= rows; i++) {
+          final double y = i * lineHeight.toDouble();
+          yield PatternElement(Offset(0, y), Offset(maxX, y), isLine: true);
         }
 
-        for (double x = 0; x < size.width; x += lineHeight) {
-          yield PatternElement(
-            Offset(x, 0),
-            Offset(x, size.height),
-            isLine: true,
-          );
+        for (int i = 0; i <= cols; i++) {
+          final double x = i * lineHeight.toDouble();
+          yield PatternElement(Offset(x, 0), Offset(x, maxY), isLine: true);
         }
       case .dots:
         for (double y = lineHeight * 2; y <= size.height; y += lineHeight) {

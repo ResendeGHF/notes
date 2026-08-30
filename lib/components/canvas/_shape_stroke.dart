@@ -5,12 +5,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:path_drawing/path_drawing.dart';
-import 'package:perfect_freehand/perfect_freehand.dart';
+import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/shape_geometry.dart';
 import 'package:saber/data/tools/shape_tool.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
 
@@ -22,18 +23,18 @@ class ShapeStroke extends Stroke {
     required super.pageIndex,
     required super.page,
     required super.toolId,
-    required this.config,
+    required ShapeConfig config,
     bool fill = false,
     Color? fillColor,
     List<Offset>? shapeVertices,
   }) : fill = _isLinearShape(config.kind) ? false : fill,
        fillColor = fillColor ?? color.withOpacity(0.7),
        shapeVertices = shapeVertices,
+       _config = config.ensuredControlPoints(),
        super() {
+    _config = _config.copyWith(strokeWidth: options.size);
 
-    config = config.copyWith(strokeWidth: options.size);
-
-    options.size = config.strokeWidth;
+    options.size = _config.strokeWidth;
     options.isComplete = true;
 
     options.smoothing = 0;
@@ -44,7 +45,20 @@ class ShapeStroke extends Stroke {
     _regeneratePoints();
   }
 
-  ShapeConfig config;
+  ShapeConfig _config;
+  ShapeConfig get config => _config;
+  set config(ShapeConfig value) {
+    _config = value.ensuredControlPoints();
+    _cachedPath = null;
+    markPolygonNeedsUpdating();
+    _regeneratePoints();
+  }
+
+  /// Editable control points (canonical geometry).
+  List<Offset> get controlPoints => ShapeGeometry.controlPointsOf(config);
+
+  bool get isVertexEditable => config.kind.isVertexEditable;
+
   final bool fill;
   final Color fillColor;
 
@@ -343,7 +357,10 @@ class ShapeStroke extends Stroke {
       center.dy + (p.dx - center.dx) * sin + (p.dy - center.dy) * cos,
     );
 
-    if (_isMatrixRotatedShape(config.kind)) {
+    if (_isMatrixRotatedShape(config.kind) &&
+        (config.vertices == null ||
+            config.vertices!.isEmpty ||
+            !config.kind.isVertexEditable)) {
       final currentCenter = config.bounds.center;
       final newCenter = rot(currentCenter);
       final diff = newCenter - currentCenter;
@@ -454,7 +471,9 @@ class ShapeStroke extends Stroke {
       start: newStart,
       end: newEnd,
       vertices: newVertices,
+      strokeWidth: config.strokeWidth * factor,
     );
+    options.size *= factor;
 
     _regeneratePoints();
   }
@@ -506,6 +525,12 @@ class ShapeStroke extends Stroke {
     );
     writer.writeFloat(StrokeBinaryKeys.size, config.strokeWidth);
 
+    final cps = ShapeGeometry.controlPointsOf(config);
+    if (cps.isNotEmpty) {
+      final packed = cps.map((p) => '${p.dx},${p.dy}').join(';');
+      writer.writeString(StrokeBinaryKeys.shapeControlPoints, packed);
+    }
+
     writer.writeKey(StrokeBinaryKeys.endOptions);
   }
 
@@ -515,6 +540,7 @@ class ShapeStroke extends Stroke {
     Color? color, fillColor;
     bool? fill;
     String? packedData;
+    String? controlPointsPacked;
     Rect bounds = Rect.zero;
 
     double rot = 0, ecc = 0, ang = 45, width = 3;
@@ -537,6 +563,9 @@ class ShapeStroke extends Stroke {
           break;
         case StrokeBinaryKeys.penType:
           packedData = reader.readStringNoKey();
+          break;
+        case StrokeBinaryKeys.shapeControlPoints:
+          controlPointsPacked = reader.readStringNoKey();
           break;
         case StrokeBinaryKeys.left:
           bounds = Rect.fromLTWH(
@@ -647,6 +676,20 @@ class ShapeStroke extends Stroke {
       end = bounds.bottomRight;
     }
 
+    List<Offset>? loadedVerts;
+    if (controlPointsPacked != null && controlPointsPacked.isNotEmpty) {
+      loadedVerts = [];
+      for (final part in controlPointsPacked.split(';')) {
+        final xy = part.split(',');
+        if (xy.length >= 2) {
+          final x = double.tryParse(xy[0]);
+          final y = double.tryParse(xy[1]);
+          if (x != null && y != null) loadedVerts.add(Offset(x, y));
+        }
+      }
+      if (loadedVerts.isEmpty) loadedVerts = null;
+    }
+
     final stroke = ShapeStroke(
       color: color ?? Colors.black,
       fillColor: fillColor ?? (color ?? Colors.black).withOpacity(0.7),
@@ -668,10 +711,61 @@ class ShapeStroke extends Stroke {
         detail: detail,
         fill: fill ?? false,
         strokeStyle: strokeStyle,
+        vertices: loadedVerts,
       ),
+      shapeVertices: loadedVerts,
     );
     stroke.rotationDeg = rot;
     return stroke;
+  }
+
+  static void skipFromBinary(BinaryReader reader) {
+    int key = reader.readKey();
+    while (key != StrokeBinaryKeys.endOptions) {
+      switch (key) {
+        case StrokeBinaryKeys.pageIndex:
+          reader.readIntNoKey();
+          break;
+        case StrokeBinaryKeys.color:
+        case StrokeBinaryKeys.color + 1:
+          reader.readColor();
+          break;
+        case StrokeBinaryKeys.pressureEnabled:
+          reader.readBoolNoKey();
+          break;
+        case StrokeBinaryKeys.penType:
+        case StrokeBinaryKeys.shapeControlPoints:
+          reader.readStringNoKey();
+          break;
+        case StrokeBinaryKeys.left:
+        case StrokeBinaryKeys.top:
+        case StrokeBinaryKeys.width:
+        case StrokeBinaryKeys.height:
+          reader.readScaledFloat();
+          break;
+        case StrokeBinaryKeys.cy:
+        case StrokeBinaryKeys.r:
+        case StrokeBinaryKeys.startCustomTaper:
+        case StrokeBinaryKeys.size:
+        case StrokeBinaryKeys.thinning:
+        case StrokeBinaryKeys.smoothing:
+        case StrokeBinaryKeys.streamline:
+        case StrokeBinaryKeys.endCustomTaper:
+          reader.readFloatNoKey();
+          break;
+        case StrokeBinaryKeys.simulatePressure:
+        case StrokeBinaryKeys.isComplete:
+        case StrokeBinaryKeys.startTaperEnabled:
+        case StrokeBinaryKeys.endTaperEnabled:
+        case StrokeBinaryKeys.startCap:
+        case StrokeBinaryKeys.endCap:
+          reader.readBoolNoKey();
+          break;
+        default:
+          break;
+      }
+      key = reader.readKey();
+    }
   }
 
   Path get shapePath {
@@ -701,6 +795,8 @@ class ShapeStroke extends Stroke {
           path,
           dashArray: CircularIntervalList<double>([dot, gap]),
         );
+      default:
+        return path;
     }
   }
 
@@ -712,8 +808,16 @@ class ShapeStroke extends Stroke {
   }
 
   @override
+  bool get isEmpty =>
+      config.bounds.width == 0 &&
+      config.bounds.height == 0 &&
+      (config.vertices == null || config.vertices!.isEmpty);
+
+  @override
+  get vertices => null;
+
+  @override
   List<Offset> getPolygon({required StrokeQuality quality}) {
-    if (points.isNotEmpty) return super.getPolygon(quality: quality);
     return _defaultPolygon();
   }
 
@@ -730,7 +834,6 @@ class ShapeStroke extends Stroke {
 
   @override
   Path getPath(List<Offset> polygon, {bool smooth = true}) {
-    if (points.isNotEmpty) return super.getPath(polygon, smooth: smooth);
     return shapePath;
   }
 
@@ -744,6 +847,35 @@ class ShapeStroke extends Stroke {
         return true;
     }
     return false;
+  }
+
+  @override
+  void addPoint(Offset point, [double? pressure, Duration? timestamp]) {
+    super.addPoint(point, pressure, timestamp);
+    // Use the first recorded point as the fixed start
+    final start =
+        config.start ??
+        (points.isNotEmpty ? Offset(points.first.x, points.first.y) : point);
+
+    // Mutate the private _config to skip the setter's _regeneratePoints() wipeout
+    _config = _config.copyWith(
+      start: start,
+      end: point,
+      bounds: Rect.fromPoints(start, point),
+    );
+
+    _cachedPath = null;
+    markPolygonNeedsUpdating();
+  }
+
+  @override
+  void popFirstPoint() {
+    super.popFirstPoint();
+  }
+
+  @override
+  void optimisePoints({double thresholdMultiplier = 0}) {
+    _regeneratePoints();
   }
 
   @override
@@ -774,46 +906,75 @@ class ShapeStroke extends Stroke {
 
     switch (cfg.kind) {
       case ShapeKind.rectangle:
-        if (verts != null && verts.length >= 2)
+        if (verts != null && verts.length >= 4) {
+          base = Path()
+            ..moveTo(verts[0].dx, verts[0].dy)
+            ..lineTo(verts[1].dx, verts[1].dy)
+            ..lineTo(verts[2].dx, verts[2].dy)
+            ..lineTo(verts[3].dx, verts[3].dy)
+            ..close();
+        } else if (verts != null && verts.length >= 2) {
           base = Path()..addRect(Rect.fromPoints(verts.first, verts.last));
-        else
+        } else {
           base = Path()..addRect(rect);
+        }
         break;
       case ShapeKind.circle:
-        if (verts != null && verts.length >= 2) {
-          final r = (verts.last - verts.first).distance / 2;
-          base = _highQualityOvalPath(
-            Rect.fromCircle(
-              center: Offset.lerp(verts.first, verts.last, 0.5)!,
-              radius: r,
-            ),
-          );
-        } else {
-          base = _highQualityOvalPath(
-            Rect.fromCircle(
-              center: center,
-              radius: math.min(rect.width, rect.height) / 2,
-            ),
-          );
+        {
+          final pts = verts ?? const <Offset>[];
+          final params = ShapeGeometry.ellipseParamsFromControlPoints(pts);
+          if (params != null) {
+            final r = (params.rx + params.ry) / 2;
+            base = _orientedOvalPath(params.center, r, r, 0);
+          } else {
+            base = _highQualityOvalPath(
+              Rect.fromCircle(
+                center: center,
+                radius: math.min(rect.width, rect.height) / 2,
+              ),
+            );
+          }
         }
         break;
       case ShapeKind.ellipse:
-        if (verts != null && verts.length >= 2)
-          base = _highQualityOvalPath(Rect.fromPoints(verts.first, verts.last));
-        else
-          base = _highQualityOvalPath(
-            Rect.fromCenter(
-              center: center,
-              width: rect.width,
-              height: rect.height * (1 - cfg.eccentricity.clamp(0.0, 0.95)),
-            ),
-          );
+        {
+          final pts = verts ?? const <Offset>[];
+          final params = ShapeGeometry.ellipseParamsFromControlPoints(pts);
+          if (params != null) {
+            base = _orientedOvalPath(
+              params.center,
+              params.rx,
+              params.ry,
+              params.angleRad,
+            );
+          } else {
+            base = _highQualityOvalPath(rect);
+          }
+        }
         break;
       case ShapeKind.polygon:
-        base = _regularPolygonPath(rect, cfg);
+        if (verts != null && verts.length >= 3) {
+          base = Path()
+            ..moveTo(verts.first.dx, verts.first.dy);
+          for (var i = 1; i < verts.length; i++) {
+            base.lineTo(verts[i].dx, verts[i].dy);
+          }
+          base.close();
+        } else {
+          base = _regularPolygonPath(rect, cfg);
+        }
         break;
       case ShapeKind.star:
-        base = _starPath(rect);
+        if (verts != null && verts.length >= 3) {
+          base = Path()
+            ..moveTo(verts.first.dx, verts.first.dy);
+          for (var i = 1; i < verts.length; i++) {
+            base.lineTo(verts[i].dx, verts[i].dy);
+          }
+          base.close();
+        } else {
+          base = _starPath(rect);
+        }
         break;
 
       case ShapeKind.line:
@@ -832,21 +993,23 @@ class ShapeStroke extends Stroke {
         break;
 
       case ShapeKind.triangleIsosceles:
-        if (cfg.data['equilateral'] == true)
+        if (verts != null && verts.length >= 3) {
+          base = _triangleFromVertices(verts.take(3).toList());
+        } else if (cfg.data['equilateral'] == true) {
           base = _equilateralTrianglePath(
             rect,
             upward: cfg.data['upward'] != false,
           );
-        else if (verts != null && verts.length == 3)
-          base = _triangleFromVertices(verts);
-        else
+        } else {
           base = _triangleIsoscelesPath(start, end);
+        }
         break;
       case ShapeKind.triangleRight:
-        if (verts != null && verts.length == 3)
-          base = _triangleFromVertices(verts);
-        else
+        if (verts != null && verts.length >= 3) {
+          base = _triangleFromVertices(verts.take(3).toList());
+        } else {
           base = _triangleRightPath(start, end);
+        }
         break;
       case ShapeKind.cube:
         base = _cubePathFixed(rect, start, end);
@@ -928,14 +1091,30 @@ class ShapeStroke extends Stroke {
     }
 
     if (cfg.rotationDeg != 0) {
-      final rads = cfg.rotationDeg * math.pi / 180;
-      base = base.transform(
-        (vmath.Matrix4.identity()
-              ..translate(center.dx, center.dy)
-              ..rotateZ(rads)
-              ..translate(-center.dx, -center.dy))
-            .storage,
-      );
+      final orientationBakedInVerts = verts != null &&
+          verts.isNotEmpty &&
+          const {
+            ShapeKind.rectangle,
+            ShapeKind.ellipse,
+            ShapeKind.circle,
+            ShapeKind.triangleIsosceles,
+            ShapeKind.triangleRight,
+            ShapeKind.polygon,
+            ShapeKind.star,
+            ShapeKind.line,
+            ShapeKind.arrow,
+            ShapeKind.doubleArrow,
+          }.contains(cfg.kind);
+      if (!orientationBakedInVerts) {
+        final rads = cfg.rotationDeg * math.pi / 180;
+        base = base.transform(
+          (vmath.Matrix4.identity()
+                ..translate(center.dx, center.dy)
+                ..rotateZ(rads)
+                ..translate(-center.dx, -center.dy))
+              .storage,
+        );
+      }
     }
     return base;
   }
@@ -1260,21 +1439,40 @@ class ShapeStroke extends Stroke {
   }
 
   Path _highQualityOvalPath(Rect rect) {
+    return _orientedOvalPath(
+      rect.center,
+      rect.width / 2,
+      rect.height / 2,
+      0,
+    );
+  }
+
+  Path _orientedOvalPath(
+    Offset center,
+    double rx,
+    double ry,
+    double angleRad,
+  ) {
     final p = Path();
     const n = 64;
-    final cx = rect.center.dx;
-    final cy = rect.center.dy;
-    final rx = rect.width / 2;
-    final ry = rect.height / 2;
+    final cosA = math.cos(angleRad);
+    final sinA = math.sin(angleRad);
     for (int i = 0; i < n; i++) {
       final t0 = 2 * math.pi * i / n;
       final t1 = 2 * math.pi * (i + 1) / n;
-      final x0 = cx + rx * math.cos(t0);
-      final y0 = cy + ry * math.sin(t0);
-      final x1 = cx + rx * math.cos(t1);
-      final y1 = cy + ry * math.sin(t1);
-      if (i == 0) p.moveTo(x0, y0);
-      p.lineTo(x1, y1);
+      Offset pt(double t) {
+        final lx = rx * math.cos(t);
+        final ly = ry * math.sin(t);
+        return Offset(
+          center.dx + lx * cosA - ly * sinA,
+          center.dy + lx * sinA + ly * cosA,
+        );
+      }
+
+      final p0 = pt(t0);
+      final p1 = pt(t1);
+      if (i == 0) p.moveTo(p0.dx, p0.dy);
+      p.lineTo(p1.dx, p1.dy);
     }
     p.close();
     return p;

@@ -4,6 +4,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:ffi' show Abi;
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
@@ -12,99 +13,72 @@ import 'dart:typed_data';
 import 'package:archive/archive_io.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart' as pc;
+import 'package:saber/data/backup/backup_format.dart';
+import 'package:saber/data/backup/monolith_backup_core.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
 import 'package:saber/data/prefs.dart';
+import 'package:saber/data/routes.dart';
+import 'package:saber/services/background_operation_lock.dart';
+import 'package:saber/services/perf_timing.dart';
 import 'package:saber/services/sba_encryption.dart';
 import 'package:saber/services/thumbnail_cache.dart';
+import 'package:saber/services/vault_blob_crypto.dart';
+import 'package:saber/services/vault_worker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
-Future<bool> _isolateVaultBackupTask(Map<String, dynamic> args) async {
-  final vaultPath = args['vaultPath'] as String;
-  final configPath = args['configPath'] as String;
-  final dataDirPath = args['dataDirPath'] as String;
-  final destPath = args['destPath'] as String;
-  final password = args['password'] as String;
-  final prefsJson = args['prefsJson'] as List<int>;
-  final docsDir = Directory(args['docsDir'] as String);
-
-  final archive = Archive();
-
-  final indexFile = File(vaultPath);
-  archive.addFile(
-    ArchiveFile(
-      p.basename(vaultPath),
-      indexFile.lengthSync(),
-      indexFile.readAsBytesSync(),
-    ),
-  );
-
-  final configFile = File(configPath);
-  archive.addFile(
-    ArchiveFile(
-      p.basename(configPath),
-      configFile.lengthSync(),
-      configFile.readAsBytesSync(),
-    ),
-  );
-
-  final dataDir = Directory(dataDirPath);
-  if (dataDir.existsSync()) {
-    final rootPath = Directory(dataDirPath).parent.path;
-    final entities = dataDir.listSync(recursive: true);
-    for (final entity in entities) {
-      if (entity is File) {
-        final relative = p.relative(entity.path, from: rootPath);
-        archive.addFile(
-          ArchiveFile(relative, entity.lengthSync(), entity.readAsBytesSync()),
-        );
-      }
-    }
+bool _vaultUseAndroidNativeAesFileIo() {
+  if (kIsWeb) return false;
+  try {
+    return Platform.isAndroid && Abi.current() == Abi.androidArm64;
+  } catch (_) {
+    return false;
   }
+}
 
-  archive.addFile(
-    ArchiveFile('_preferences.json', prefsJson.length, prefsJson),
-  );
+Uint8List _archiveFileBytes(ArchiveFile file) {
+  final output = OutputMemoryStream();
+  file.writeContent(output);
+  return Uint8List.fromList(output.getBytes());
+}
 
-  if (docsDir.existsSync()) {
-    final entities = docsDir.listSync(recursive: false);
-    for (final entity in entities) {
-      if (entity is File) {
-        final name = p.basename(entity.path);
-        if (name.startsWith('.saber_')) {
-          archive.addFile(
-            ArchiveFile(name, entity.lengthSync(), entity.readAsBytesSync()),
-          );
-        }
-      }
-    }
-  }
-
-  const manifest = {'type': 'vault', 'version': 2};
-  final manifestJson = utf8.encode(jsonEncode(manifest));
-  archive.addFile(
-    ArchiveFile('_backup_manifest.json', manifestJson.length, manifestJson),
-  );
-
-  final zipBytes = ZipEncoder().encode(archive);
-
-  List<int> finalBytes = zipBytes;
-  if (password.isNotEmpty) {
-    finalBytes = SbaEncryption.encrypt(Uint8List.fromList(zipBytes), password);
-  }
-
-  final target = File(destPath);
-  if (target.existsSync()) {
-    target.deleteSync();
-  }
-  target.writeAsBytesSync(finalBytes);
+/// Worker entry: write bytes to a temp path (avoids MethodChannel copy for large notes).
+bool _isolateWriteTempBytes(Map<String, dynamic> args) {
+  final path = args['path'] as String;
+  final bytes = args['bytes'] as Uint8List;
+  File(path).writeAsBytesSync(bytes, flush: true);
   return true;
+}
+
+Future<bool> _isolateVaultBackupTask(Map<String, dynamic> args) async {
+  final receive = ReceivePort();
+  try {
+    await Isolate.spawn(monolithVaultBackupIsolateMain, {
+      ...args,
+      'sendPort': receive.sendPort,
+    });
+    await for (final raw in receive) {
+      if (raw is! Map) continue;
+      if (raw['error'] != null) {
+        throw Exception(raw['error'].toString());
+      }
+      if (raw['done'] == true) {
+        return File(args['destPath'] as String).existsSync();
+      }
+    }
+    return false;
+  } finally {
+    receive.close();
+  }
 }
 
 Future<bool> _isolateVaultRestoreTask(Map<String, dynamic> args) async {
@@ -112,37 +86,105 @@ Future<bool> _isolateVaultRestoreTask(Map<String, dynamic> args) async {
   final password = args['password'] as String;
   final tempDirPath = args['tempDirPath'] as String;
 
-  List<int> bytes = File(archivePath).readAsBytesSync();
-  final byteList = Uint8List.fromList(bytes);
+  final stamp = DateTime.now().microsecondsSinceEpoch;
+  final tmpZip = p.join(tempDirPath, '_monolith_dec_$stamp.zip');
+  var zipPath = archivePath;
+  var ownsZip = false;
 
-  if (SbaEncryption.isEncrypted(byteList)) {
+  final header = File(archivePath).openSync(mode: FileMode.read);
+  late final Uint8List peek;
+  try {
+    peek = Uint8List.fromList(header.readSync(32));
+  } finally {
+    header.closeSync();
+  }
+
+  if (SbaEncryption.isEncrypted(peek)) {
     if (password.isEmpty) {
       throw StateError('Backup is encrypted but no password was provided.');
     }
-    bytes = SbaEncryption.decrypt(byteList, password);
+    SbaEncryption.decryptFile(archivePath, tmpZip, password);
+    zipPath = tmpZip;
+    ownsZip = true;
   }
 
-  final archive = ZipDecoder().decodeBytes(bytes);
+  try {
+    final input = InputFileStream(zipPath);
+    final archive = ZipDecoder().decodeStream(input);
 
-  final hasIndex = archive.files.any((f) => f.name == 'saber_index.db');
-  final hasConfig = archive.files.any((f) => f.name == 'saber_index.db.config');
-  final hasData = archive.files.any((f) => f.name.startsWith('data/'));
+    final manifestFiles = archive.files
+        .where((f) => f.name == BackupFormat.manifestPath)
+        .toList();
+    if (manifestFiles.isEmpty) {
+      throw StateError('Invalid backup: missing manifest');
+    }
+    final manifest = BackupFormat.decodeJsonFile(
+      _archiveFileBytes(manifestFiles.first),
+    );
+    if (manifest['type'] != 'vault') {
+      throw StateError(
+        'Invalid backup: wrong type (expected vault, got ${manifest['type']})',
+      );
+    }
+    final isV3 = BackupFormat.isManifestV3(manifest);
+    final manifestFileMap = isV3
+        ? BackupFormat.manifestFileMap(manifest)
+        : <String, Map<String, dynamic>>{};
 
-  if (!hasIndex || !hasConfig || !hasData) {
-    throw StateError('Invalid backup: missing required vault files');
-  }
+    final hasIndex = archive.files.any((f) => f.name == 'saber_index.db');
+    final hasConfig = archive.files.any(
+      (f) => f.name == 'saber_index.db.config',
+    );
+    final hasData = archive.files.any((f) => f.name.startsWith('data/'));
 
-  for (final file in archive.files) {
-    final outPath = p.join(tempDirPath, file.name);
-    if (file.isFile) {
-      final outFile = File(outPath);
-      outFile.parent.createSync(recursive: true);
-      outFile.writeAsBytesSync(file.content as List<int>);
-    } else {
-      Directory(outPath).createSync(recursive: true);
+    if (!hasIndex || !hasConfig || !hasData) {
+      throw StateError('Invalid backup: missing required vault files');
+    }
+
+    if (isV3) {
+      BackupFormat.validateUniquePaths(manifestFileMap.keys);
+      final dirs = (manifest['directories'] as List?) ?? const [];
+      for (final dir in dirs) {
+        Directory(
+          BackupFormat.safeJoin(tempDirPath, dir.toString()),
+        ).createSync(recursive: true);
+      }
+    }
+
+    for (final file in archive.files) {
+      final normalizedPath = BackupFormat.normalizeArchivePath(file.name);
+      if (normalizedPath == BackupFormat.manifestPath) continue;
+      final outPath = BackupFormat.safeJoin(tempDirPath, normalizedPath);
+      if (file.isFile) {
+        final fileBytes = _archiveFileBytes(file);
+        final manifestEntry = manifestFileMap[normalizedPath];
+        if (isV3) {
+          if (manifestEntry == null) {
+            throw StateError('Invalid backup: unexpected file $normalizedPath');
+          }
+          BackupFormat.verifyFileBytes(
+            normalizedPath,
+            fileBytes,
+            manifestEntry,
+          );
+        }
+        final outFile = File(outPath);
+        outFile.parent.createSync(recursive: true);
+        outFile.writeAsBytesSync(fileBytes);
+      } else {
+        Directory(outPath).createSync(recursive: true);
+      }
+    }
+    input.closeSync();
+    return true;
+  } finally {
+    if (ownsZip) {
+      try {
+        final f = File(tmpZip);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
     }
   }
-  return true;
 }
 
 String _deriveKeyHexFromArgs(Map<String, dynamic> args) {
@@ -201,12 +243,6 @@ void isolateSecureDeletePaths(List<String> paths) {
   }
 }
 
-class _WritePayload {
-  final String path;
-  final TransferableTypedData data;
-  _WritePayload(this.path, this.data);
-}
-
 class _ReadChunkPayload {
   final String storagePath;
   final String ivBase64;
@@ -243,19 +279,6 @@ class _DecryptChunkToFilePayload {
   );
 }
 
-class _MergeChunkFilesPayload {
-  final List<String> chunkPaths;
-  final String finalTempPath;
-  _MergeChunkFilesPayload(this.chunkPaths, this.finalTempPath);
-}
-
-class _BulkWritePayload {
-  final List<_WritePayload> items;
-  final Uint8List keyBytes;
-  final String storageRootPath;
-  _BulkWritePayload(this.items, this.keyBytes, this.storageRootPath);
-}
-
 class _EncryptFileFromPathPayload {
   final String sourcePath;
   final String storageRootPath;
@@ -274,14 +297,26 @@ class _WriteResult {
   final String storageId;
   final String ivBase64;
   final int size;
-  _WriteResult(this.virtualPath, this.storageId, this.ivBase64, this.size);
+  final int cipherVer;
+  _WriteResult(
+    this.virtualPath,
+    this.storageId,
+    this.ivBase64,
+    this.size, {
+    this.cipherVer = kVaultCipherGcm,
+  });
 }
 
 class _VaultFileMeta {
   final String storageId;
   final String ivBase64;
+  final int cipherVer;
 
-  const _VaultFileMeta({required this.storageId, required this.ivBase64});
+  const _VaultFileMeta({
+    required this.storageId,
+    required this.ivBase64,
+    this.cipherVer = kVaultCipherCbc,
+  });
 }
 
 class VaultAdapter {
@@ -289,12 +324,53 @@ class VaultAdapter {
   static final VaultAdapter instance = VaultAdapter._();
 
   static final log = Logger('VaultAdapter');
+  static const MethodChannel _vaultCryptoChannel = MethodChannel(
+    'com.resendeghf.notes/vault_crypto',
+  );
+
+  /// SQLCipher `mlock`s every page when memory security is on. If
+  /// `RLIMIT_MEMLOCK` stays at the usual ~64 KiB Android cap, those calls
+  /// fail (errno 12) on every page and vault IO stalls. Keep it on only when
+  /// the process can actually lock a working set (~8 MiB) or is unlimited.
+  static const int _cipherMemorySecurityMinLockBytes = 8 * 1024 * 1024;
+
+  Future<void> _applyCipherMemorySecurity(Database db) async {
+    var enable = true;
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final budget = await _vaultCryptoChannel.invokeMethod<int>(
+          'raiseMemlock',
+        );
+        if (budget != null &&
+            budget >= 0 &&
+            budget < _cipherMemorySecurityMinLockBytes) {
+          enable = false;
+          log.warning(
+            'RLIMIT_MEMLOCK is ${budget}B after raise (need '
+            '$_cipherMemorySecurityMinLockBytes); PRAGMA cipher_memory_security '
+            'OFF so SQLCipher does not mlock-fail every page',
+          );
+        } else {
+          log.info(
+            'RLIMIT_MEMLOCK budget=$budget (-1=unlimited); '
+            'cipher_memory_security ON',
+          );
+        }
+      } catch (e) {
+        log.warning('raiseMemlock failed: $e');
+      }
+    }
+    await db.execute(
+      'PRAGMA cipher_memory_security = ${enable ? 'ON' : 'OFF'}',
+    );
+  }
+
   static const _defaultScryptN = 16384;
   static const _defaultScryptR = 8;
   static const _defaultScryptP = 1;
   static const _totalFileCountConfigKey = 'total_file_count';
   static const _countsVersionConfigKey = 'counts_version';
-  static const _countsVersionValue = '3';
+  static const _countsVersionValue = '4';
 
   enc.Encrypter? _fileEncrypter;
   Uint8List? _masterKeyBytes;
@@ -306,11 +382,78 @@ class VaultAdapter {
 
   final LinkedHashMap<String, Uint8List> _readCache = LinkedHashMap();
   int _readCacheBytes = 0;
-  static const _maxReadCacheEntries = 96;
-  static const _maxReadCacheBytes = 128 * 1024 * 1024;
+
+  /// In-memory decrypt cache (aarch64 Android–only product; tuned for phones).
+  /// Prefer keeping many note-sized `.sbn2` bodies warm for near-instant reopen.
+  static const int _maxReadCacheEntries = 48;
+
+  static const int _maxReadCacheBytes = 256 * 1024 * 1024;
+
+  /// Avoid keeping very large decrypted blobs in [\_readCache]; callers still get
+  /// plaintext via [_decryptedTempFileByVaultPath] reuse without duplicating 100MB+
+  /// in the Dart heap beside native/pdf buffers.
+  static const int _maxBytesVaultRamReadCache = 64 * 1024 * 1024;
+
+  /// [readFileToTempFile]: on Android arm64, native AES-CBC streaming decrypt is
+  /// tried first; otherwise parallel multi-shard decrypt up to this ciphertext size,
+  /// then sequential plaintext write. Above this, single-isolate streaming (rare).
+  static const int _parallelTempDecryptMaxBytes = 512 * 1024 * 1024;
+
+  /// Below this, a single [_isolateDecryptChunkToFile] avoids isolate spawn overhead.
+  static const int _parallelTempDecryptMinBytes = 2 * 1024 * 1024;
+
+  /// Hard cap on parallel decrypt isolates (oversubscription vs RAM / scheduler).
+  static const int _decryptParallelMaxWorkers = 16;
+
+  /// Target ciphertext per shard hint for very large blobs; with
+  /// [_decryptParallelMaxWorkers] this caps at 16 workers (~320 MiB+ ciphertext)
+  /// so disk latency can overlap AES when isolates outnumber cores.
+  static const int _decryptParallelOversubscribeMinBytes = 96 * 1024 * 1024;
+
+  static const int _decryptBytesPerWorkerHint = 20 * 1024 * 1024;
+
+  /// Parallel AES shards for large vault blobs on aarch64 Android.
+  static int _decryptWorkerCountForLength(int ciphertextLength) {
+    final cores = max(1, Platform.numberOfProcessors);
+    if (ciphertextLength <= 256 * 1024) return 1;
+    if (ciphertextLength < 1024 * 1024) {
+      return min(2, cores);
+    }
+    if (ciphertextLength >= _decryptParallelOversubscribeMinBytes) {
+      final want = max(
+        cores,
+        (ciphertextLength / _decryptBytesPerWorkerHint).ceil(),
+      );
+      return min(_decryptParallelMaxWorkers, want);
+    }
+    if (ciphertextLength >= 48 * 1024 * 1024) {
+      return min(cores, 8);
+    }
+    if (ciphertextLength >= 32 * 1024 * 1024 || cores <= 6) {
+      return min(cores, 5);
+    }
+    return min(cores, 4);
+  }
 
   final LinkedHashMap<String, _VaultFileMeta> _metaCache = LinkedHashMap();
   static const _maxMetaCacheEntries = 4096;
+
+  /// Concurrent [readFileToTempFile] calls for the same vault path share one
+  /// decrypt+write (e.g. editor prefetch while the note body is still loading).
+  final Map<String, Future<String?>> _readFileToTempFileInflight = {};
+
+  /// Plaintext temp path from the last successful [readFileToTempFile] for this
+  /// vault path. Subsequent opens reuse it until the ciphertext is updated or
+  /// the vault locks (avoids a second full AES pass once [inflight] completed).
+  final Map<String, String> _decryptedTempFileByVaultPath = {};
+
+  /// Concurrent [readFile] calls for the same path share one decrypt (e.g. note
+  /// body read overlapping with `.sbn2.0` warm-up).
+  final Map<String, Future<Uint8List?>> _readFileInflight = {};
+
+  /// Depth of note-open critical sections — pauses idle CBC→GCM migration so
+  /// decrypt workers stay available for the open path.
+  int _openQuiesceDepth = 0;
 
   final Map<String, int> _folderCountCache = {};
 
@@ -323,7 +466,66 @@ class VaultAdapter {
   static bool get isUnlocked => instance._isUnlocked;
   static final unlockState = ValueNotifier(false);
   static ValueListenable<bool> get unlockListenable => unlockState;
-  static bool preventLock = false;
+  static int _preventLockDepth = 0;
+  static bool get preventLock => _preventLockDepth > 0;
+  static set preventLock(bool value) {
+    if (value) {
+      _preventLockDepth++;
+    } else {
+      _preventLockDepth = max(0, _preventLockDepth - 1);
+    }
+  }
+
+  /// Bound from [App] so lock redirects can navigate without circular imports.
+  static GoRouter? _router;
+  static void bindRouter(GoRouter router) => _router = router;
+
+  /// Locks the vault (if unlocked) and navigates to the vault login screen.
+  static Future<void> lockAndGoToLogin() async {
+    if (!stows.localEncryptionEnabled.value) return;
+
+    try {
+      if (isUnlocked) {
+        // [lock] clears unlock state synchronously before its first await.
+        final lockFuture = instance.lock();
+        ensureLoginRouteIfLocked();
+        await lockFuture;
+      } else {
+        unlockState.value = false;
+        unlockState.notifyListeners();
+        ensureLoginRouteIfLocked();
+      }
+    } catch (e, st) {
+      log.warning('lockAndGoToLogin: lock failed: $e', e, st);
+      ensureLoginRouteIfLocked();
+    }
+  }
+
+  /// If encryption is on and the vault is locked, force the login route
+  /// (unless already on login / settings). Also refreshes GoRouter redirects.
+  static void ensureLoginRouteIfLocked() {
+    if (!stows.localEncryptionEnabled.value) return;
+    if (isUnlocked) return;
+
+    final router = _router;
+    if (router == null) return;
+
+    final loc = router.state.matchedLocation;
+    if (loc == RoutePaths.login) {
+      router.refresh();
+      return;
+    }
+    final onSettings =
+        loc.startsWith(RoutePaths.prefixOfHome) &&
+        (loc == '${RoutePaths.prefixOfHome}/settings' ||
+            loc.endsWith('/settings'));
+    if (onSettings) {
+      router.refresh();
+      return;
+    }
+    router.go(RoutePaths.login);
+    router.refresh();
+  }
 
   String get vaultPath {
     if (_vaultPath != null) return _vaultPath!;
@@ -402,7 +604,7 @@ class VaultAdapter {
 
       // Init Security Pragmas. secure_delete: user pref (ON = overwrite index pages with zeros; file blobs wiped in isolate via isolateSecureDeletePaths).
       try {
-        await _db!.execute('PRAGMA cipher_memory_security = ON');
+        await _applyCipherMemorySecurity(_db!);
         final secureDelete = stows.vaultSecureDelete.value;
         await _db!.execute(
           'PRAGMA secure_delete = ${secureDelete ? 'ON' : 'OFF'}',
@@ -414,6 +616,8 @@ class VaultAdapter {
       _isUnlocked = true;
       unlockState.value = true;
       log.info('Vault unlocked successfully. FBA Ready.');
+      _attachSecurePdfPolicyListeners();
+      _scheduleIdleGcmMigration();
       return true;
     } catch (e) {
       log.severe('Failed to unlock vault: $e');
@@ -514,7 +718,6 @@ class VaultAdapter {
     String keyBase64;
 
     if (result.isEmpty) {
-
       log.warning('No file_master_key found. Generating new one.');
       keyBase64 = enc.Key.fromSecureRandom(32).base64;
       await _db!.insert('config', {
@@ -535,13 +738,20 @@ class VaultAdapter {
     final cached = _readCache.remove(normPath);
     if (cached == null) return null;
 
+    // LRU touch — return the same buffer (callers must not mutate).
+    // Copying on every hit defeated warm-open latency.
     _readCache[normPath] = cached;
-    return Uint8List.fromList(cached);
+    return cached;
   }
 
   void _putCachedRead(String normPath, Uint8List data) {
-
-    if (data.length > (_maxReadCacheBytes ~/ 2)) return;
+    if (data.length > _maxReadCacheBytes) return;
+    // Temp mode: skip caching huge blobs (reopen uses plaintext temp reuse).
+    // RAM-only: keep large decrypts warm — plaintext must never hit disk.
+    if (data.length > _maxBytesVaultRamReadCache &&
+        vaultPathAllowsDiskBackedDecrypt(normPath)) {
+      return;
+    }
 
     final existing = _readCache.remove(normPath);
     if (existing != null) {
@@ -565,6 +775,25 @@ class VaultAdapter {
   void _invalidateCachedRead(String normPath) {
     final removed = _readCache.remove(normPath);
     if (removed != null) _readCacheBytes -= removed.length;
+    _invalidateDecryptedTempFile(normPath);
+  }
+
+  void _invalidateDecryptedTempFile(String normPath) {
+    final path = _decryptedTempFileByVaultPath.remove(normPath);
+    if (path == null) return;
+    try {
+      final f = File(path);
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  void _invalidateDecryptedTempFilesByPrefix(String prefix) {
+    final keys = _decryptedTempFileByVaultPath.keys
+        .where((k) => k.startsWith(prefix))
+        .toList();
+    for (final k in keys) {
+      _invalidateDecryptedTempFile(k);
+    }
   }
 
   void _invalidateCachedReadsByPrefix(String prefix) {
@@ -572,7 +801,77 @@ class VaultAdapter {
         .where((k) => k.startsWith(prefix))
         .toList();
     for (final key in toRemove) {
-      _invalidateCachedRead(key);
+      final removed = _readCache.remove(key);
+      if (removed != null) _readCacheBytes -= removed.length;
+    }
+    _invalidateDecryptedTempFilesByPrefix(prefix);
+  }
+
+  void _clearAllDecryptedTempFiles() {
+    for (final path in _decryptedTempFileByVaultPath.values) {
+      try {
+        final f = File(path);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+    }
+    _decryptedTempFileByVaultPath.clear();
+  }
+
+  /// Wipe any plaintext decrypt temps (e.g. user switched Secure PDF to RAM-only).
+  void purgePlaintextDecryptTemps() => _clearAllDecryptedTempFiles();
+
+  /// True when [path] is a vault-managed plaintext decrypt temp that must not be
+  /// deleted by asset-cache close (reuse on reopen under Temp mode).
+  bool isTrackedPlaintextDecryptTemp(String path) {
+    if (path.isEmpty) return false;
+    for (final tracked in _decryptedTempFileByVaultPath.values) {
+      if (tracked == path) return true;
+    }
+    return false;
+  }
+
+  /// Drop plaintext temp for [path] when that path is (now) RAM-only.
+  void purgePlaintextDecryptTempIfRamOnly(String path) {
+    final norm = _normalizePath(path);
+    if (vaultPathAllowsDiskBackedDecrypt(norm)) return;
+    _invalidateDecryptedTempFile(norm);
+  }
+
+  bool _securePdfPolicyListenersAttached = false;
+
+  void _attachSecurePdfPolicyListeners() {
+    if (_securePdfPolicyListenersAttached) return;
+    stows.vaultPdfLoadMode.addListener(_onSecurePdfLoadModeChanged);
+    stows.vaultPdfLoadOverrides.addListener(_onSecurePdfLoadOverridesChanged);
+    _securePdfPolicyListenersAttached = true;
+    // Apply current policy immediately (temps from a prior session / mode).
+    _onSecurePdfLoadModeChanged();
+    _onSecurePdfLoadOverridesChanged();
+  }
+
+  void _detachSecurePdfPolicyListeners() {
+    if (!_securePdfPolicyListenersAttached) return;
+    stows.vaultPdfLoadMode.removeListener(_onSecurePdfLoadModeChanged);
+    stows.vaultPdfLoadOverrides.removeListener(
+      _onSecurePdfLoadOverridesChanged,
+    );
+    _securePdfPolicyListenersAttached = false;
+  }
+
+  void _onSecurePdfLoadModeChanged() {
+    if (!_isUnlocked) return;
+    // Drop temps only for paths that are RAM-only under the effective policy
+    // (global + per-note overrides). Temp-override notes keep their files.
+    _onSecurePdfLoadOverridesChanged();
+  }
+
+  void _onSecurePdfLoadOverridesChanged() {
+    if (!_isUnlocked) return;
+    final keys = _decryptedTempFileByVaultPath.keys.toList(growable: false);
+    for (final k in keys) {
+      if (!vaultPathAllowsDiskBackedDecrypt(k)) {
+        _invalidateDecryptedTempFile(k);
+      }
     }
   }
 
@@ -580,14 +879,40 @@ class VaultAdapter {
     _invalidateCachedRead(_normalizePath(path));
   }
 
+  /// Pause idle vault re-encrypt work while a note is opening.
+  void beginOpenQuiesce() {
+    _openQuiesceDepth++;
+    _gcmMigrationTimer?.cancel();
+    _gcmMigrationTimer = null;
+  }
+
+  void endOpenQuiesce() {
+    _openQuiesceDepth = max(0, _openQuiesceDepth - 1);
+    if (_openQuiesceDepth == 0 &&
+        _isUnlocked &&
+        _physicalBackupQuiesceDepth == 0) {
+      _scheduleIdleGcmMigration();
+    }
+  }
+
+  bool get _shouldDeferIdleMigration =>
+      _openQuiesceDepth > 0 ||
+      _physicalBackupQuiesceDepth > 0 ||
+      _readFileInflight.isNotEmpty ||
+      _readFileToTempFileInflight.isNotEmpty;
+
   void _clearReadCache() {
     for (final bytes in _readCache.values) {
-      for (var i = 0; i < bytes.length; i++) {
-        bytes[i] = 0;
+      try {
+        bytes.fillRange(0, bytes.length, 0);
+      } catch (_) {
+        // Unmodifiable views (e.g. isolate/native buffers) cannot be wiped
+        // in place; dropping the reference is enough.
       }
     }
     _readCache.clear();
     _readCacheBytes = 0;
+    _clearAllDecryptedTempFiles();
   }
 
   _VaultFileMeta? _getCachedMeta(String normPath) {
@@ -649,9 +974,49 @@ class VaultAdapter {
     }
   }
 
+  /// Zlib applies only to encrypted **note bodies** ([.sbn2]), not assets like
+  /// [Foo.sbn2.0] ([FileManager.assetFileRegex]).
+  bool _vaultAesPlaintextNeedsZlibNoteBody(String normPath) {
+    if (!normPath.endsWith('.sbn2')) return false;
+    return !FileManager.assetFileRegex.hasMatch(p.basename(normPath));
+  }
+
+  Uint8List _vaultApplyZlibIfNoteBody(Uint8List aesPlaintext, String normPath) {
+    if (!_vaultAesPlaintextNeedsZlibNoteBody(normPath)) return aesPlaintext;
+    try {
+      return Uint8List.fromList(const ZLibDecoder().decodeBytes(aesPlaintext));
+    } catch (_) {
+      return aesPlaintext;
+    }
+  }
+
+  static const int _largeVaultPlaintextTempPersistBytes = 12 * 1024 * 1024;
+
+  /// Persists decrypted AES plaintext for fast reopen. **Only** when the caller
+  /// already authorized disk-backed decrypt (temp_file mode / override).
+  Future<void> _persistVaultAesPlainTempForReuse(
+    String normPath,
+    Uint8List aesPlaintext, {
+    required bool allowDiskBackedDecrypt,
+  }) async {
+    if (!allowDiskBackedDecrypt) return;
+    if (_decryptedTempFileByVaultPath.containsKey(normPath)) return;
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final path = p.join(tempDir.path, 'vault_aes_${const Uuid().v4()}.tmp');
+      await File(
+        path,
+      ).writeAsBytes(Uint8List.fromList(aesPlaintext), flush: true);
+      _decryptedTempFileByVaultPath[normPath] = path;
+    } catch (e) {
+      log.fine('Vault AES-plain temp persist skipped: $e');
+    }
+  }
+
   Future<Uint8List?> readFile(
     String filePath, {
     void Function(double)? onProgress,
+    bool? allowDiskBackedDecrypt,
   }) async {
     if (!_isUnlocked ||
         _db == null ||
@@ -661,126 +1026,375 @@ class VaultAdapter {
     }
 
     final sw = Stopwatch()..start();
-    try {
-      final normPath = _normalizePath(filePath);
+    final normPath = _normalizePath(filePath);
+    final allowDisk =
+        allowDiskBackedDecrypt ?? vaultPathAllowsDiskBackedDecrypt(normPath);
 
-      final cached = _getCachedRead(normPath);
-      if (cached != null) {
-        _logPerf('readFile', sw, extra: '(cache hit, ${cached.length} bytes)');
-        return cached;
-      }
+    final cached = _getCachedRead(normPath);
+    if (cached != null) {
+      _logPerf('readFile', sw, extra: '(cache hit, ${cached.length} bytes)');
+      return cached;
+    }
 
-      final cachedMeta = _getCachedMeta(normPath);
-      String storageId;
-      String ivBase64;
-      if (cachedMeta != null) {
-        storageId = cachedMeta.storageId;
-        ivBase64 = cachedMeta.ivBase64;
-      } else {
-        final pending = _findPendingUpdate(normPath);
-        if (pending != null) {
-          storageId = pending['storage_id'] as String;
-          ivBase64 = pending['iv'] as String;
-          _putCachedMeta(
-            normPath,
-            _VaultFileMeta(storageId: storageId, ivBase64: ivBase64),
-          );
-        } else {
-          final result = await _db!.query(
-            'files',
-            columns: ['storage_id', 'iv'],
-            where: 'path = ?',
-            whereArgs: [normPath],
-            limit: 1,
-          );
-          if (result.isEmpty) return null;
-
-          final row = result.first;
-          storageId = row['storage_id'] as String;
-          ivBase64 = row['iv'] as String;
-          _putCachedMeta(
-            normPath,
-            _VaultFileMeta(storageId: storageId, ivBase64: ivBase64),
-          );
-        }
-      }
-
-      final physicalFile = _getPhysicalFile(storageId);
-      if (!physicalFile.existsSync()) {
-        log.severe(
-          'Data corruption: File indexed but missing on disk: $storageId',
-        );
-        return null;
-      }
-
-      const int largeFileThreshold = 100 * 1024 * 1024;
-      final fileSize = physicalFile.lengthSync();
-      if (fileSize > largeFileThreshold) {
-        log.info(
-          'Read skipped (file too large for memory, use readFileToTempFile): $normPath',
-        );
-        return null;
-      }
-
-      final numWorkers = Platform.numberOfProcessors.clamp(1, 8);
-      int workerChunkSize = (fileSize / numWorkers).ceil();
-      workerChunkSize =
-          ((workerChunkSize + 15) ~/ 16) * 16;
-
-      final futures = <Future<TransferableTypedData>>[];
-      for (int i = 0; i < numWorkers; i++) {
-        final startOffset = i * workerChunkSize;
-        if (startOffset >= fileSize) break;
-        final endOffset = min(startOffset + workerChunkSize, fileSize);
-        final isLast = endOffset == fileSize;
-
-        futures.add(
-          compute(
-            _isolateReadChunk,
-            _ReadChunkPayload(
-              physicalFile.path,
-              ivBase64,
-              _masterKeyBytes!,
-              startOffset,
-              endOffset,
-              isLast,
-            ),
-          ),
-        );
-      }
-
-      final numChunks = futures.length;
-      var completed = 0;
-      final wrappedFutures = futures
-          .map(
-            (f) => f.then((data) {
-              completed++;
-              onProgress?.call(completed / numChunks);
-              return data;
-            }),
-          )
-          .toList();
-      final chunks = await Future.wait(wrappedFutures);
-      final builder = BytesBuilder(copy: false);
-      for (final chunk in chunks) {
-        builder.add(chunk.materialize().asUint8List());
-      }
-      Uint8List decrypted = builder.toBytes();
-
-      if (normPath.endsWith('.sbn2')) {
+    return _readFileInflight.putIfAbsent(normPath, () async {
+      try {
         try {
-          final decompressed = const ZLibDecoder().decodeBytes(decrypted);
-          decrypted = Uint8List.fromList(decompressed);
-        } catch (e) {
+          return await _readFileAfterCacheMiss(
+            normPath,
+            filePath,
+            sw,
+            onProgress: onProgress,
+            allowDiskBackedDecrypt: allowDisk,
+          );
+        } catch (e, s) {
+          log.severe('Read error: $filePath', e, s);
+          return null;
+        }
+      } finally {
+        _readFileInflight.remove(normPath);
+      }
+    });
+  }
 
+  Future<Uint8List?> _readFileAfterCacheMiss(
+    String normPath,
+    String filePath,
+    Stopwatch sw, {
+    void Function(double)? onProgress,
+    required bool allowDiskBackedDecrypt,
+  }) async {
+    final cachedAgain = _getCachedRead(normPath);
+    if (cachedAgain != null) {
+      _logPerf(
+        'readFile',
+        sw,
+        extra: '(cache hit, ${cachedAgain.length} bytes)',
+      );
+      return cachedAgain;
+    }
+
+    // SECURITY: never reuse plaintext temps when RAM-only is in effect.
+    if (allowDiskBackedDecrypt) {
+      final reusePlain = _decryptedTempFileByVaultPath[normPath];
+      if (reusePlain != null) {
+        try {
+          final f = File(reusePlain);
+          if (f.existsSync()) {
+            final raw = await f.readAsBytes();
+            final out = _vaultApplyZlibIfNoteBody(raw, normPath);
+            _putCachedRead(normPath, out);
+            _logPerf(
+              'readFile',
+              sw,
+              extra: '(AES-plain temp reuse, ${out.length} bytes)',
+            );
+            return out;
+          }
+        } catch (e) {
+          log.fine('Vault AES-plain temp reuse failed: $e');
+          _invalidateDecryptedTempFile(normPath);
         }
       }
+    } else {
+      // Drop any stale plaintext temp from a prior temp_file session.
+      _invalidateDecryptedTempFile(normPath);
+    }
 
+    final meta = await _resolveFileMeta(normPath);
+    if (meta == null) return null;
+    final storageId = meta.storageId;
+    final ivBase64 = meta.ivBase64;
+    final cipherVer = meta.cipherVer;
+
+    final physicalFile = _getPhysicalFile(storageId);
+    if (!physicalFile.existsSync()) {
+      log.severe(
+        'Data corruption: File indexed but missing on disk: $storageId',
+      );
+      return null;
+    }
+
+    final fileSize = physicalFile.lengthSync();
+    final applyZlib = _vaultAesPlaintextNeedsZlibNoteBody(normPath);
+
+    /// Ciphertext can exceed 100 MiB for large assets (e.g. PDFs). Optional
+    /// temp-backed decrypt ([allowDiskBackedDecrypt]) avoids OOM; RAM-only PDF
+    /// mode must not use that path (plaintext on disk).
+    const int largeFileInRamThreshold = 100 * 1024 * 1024;
+    if (fileSize > largeFileInRamThreshold && allowDiskBackedDecrypt) {
+      log.fine(
+        '[VaultAdapter.readFile] Large file ($fileSize B) → temp decrypt: $normPath',
+      );
+      final tempPath = await readFileToTempFile(
+        filePath,
+        onProgress: onProgress,
+      );
+      if (tempPath == null) return null;
+      try {
+        final f = File(tempPath);
+        Uint8List decrypted = await f.readAsBytes();
+        decrypted = _vaultApplyZlibIfNoteBody(decrypted, normPath);
+        _putCachedRead(normPath, decrypted);
+        _logPerf(
+          'readFile',
+          sw,
+          extra: '(${decrypted.length} B, large via temp)',
+        );
+        return decrypted;
+      } catch (e, st) {
+        log.severe('Large vault read (temp) failed: $filePath', e, st);
+        try {
+          await File(tempPath).delete();
+        } catch (_) {}
+        return null;
+      }
+    }
+
+    if (cipherVer == kVaultCipherGcm || cipherVer == kVaultCipherGcmChunked) {
+      final decrypted = await _decryptGcmToBytes(
+        physicalFile.path,
+        storageId,
+        ivBase64,
+        cipherVer,
+        applyZlib: applyZlib,
+      );
+      if (decrypted == null) return null;
       _putCachedRead(normPath, decrypted);
-      _logPerf('readFile', sw, extra: '(${decrypted.length} bytes)');
+      _logPerf('readFile', sw, extra: '(${decrypted.length} bytes, gcm)');
+      onProgress?.call(1);
       return decrypted;
-    } catch (e, s) {
-      log.severe('Read error: $filePath', e, s);
+    }
+
+    if (_vaultUseAndroidNativeAesFileIo()) {
+      try {
+        final aesPlain = await _vaultCryptoChannel
+            .invokeMethod<Uint8List>('decryptFileToBytesCbc', <String, dynamic>{
+              'cipherPath': physicalFile.path,
+              'key': _masterKeyBytes!,
+              'iv': base64Decode(ivBase64),
+            });
+        if (aesPlain != null) {
+          if (aesPlain.length >= _largeVaultPlaintextTempPersistBytes) {
+            await _persistVaultAesPlainTempForReuse(
+              normPath,
+              aesPlain,
+              allowDiskBackedDecrypt: allowDiskBackedDecrypt,
+            );
+          }
+          final decrypted = applyZlib
+              ? await vaultWorkerRun(vaultZlibDecodeBestEffort, aesPlain)
+              : aesPlain;
+          _putCachedRead(normPath, decrypted);
+          _logPerf(
+            'readFile',
+            sw,
+            extra: '(${decrypted.length} bytes, native-cbc)',
+          );
+          onProgress?.call(1);
+          return decrypted;
+        }
+      } catch (e, st) {
+        log.warning('Vault native CBC bytes decrypt failed', e, st);
+      }
+    }
+
+    final numWorkers = _decryptWorkerCountForLength(fileSize);
+    int workerChunkSize = (fileSize / numWorkers).ceil();
+    workerChunkSize = ((workerChunkSize + 15) ~/ 16) * 16;
+
+    final futures = <Future<TransferableTypedData>>[];
+    for (int i = 0; i < numWorkers; i++) {
+      final startOffset = i * workerChunkSize;
+      if (startOffset >= fileSize) break;
+      final endOffset = min(startOffset + workerChunkSize, fileSize);
+      final isLast = endOffset == fileSize;
+
+      futures.add(
+        vaultWorkerRun(
+          _isolateReadChunk,
+          _ReadChunkPayload(
+            physicalFile.path,
+            ivBase64,
+            _masterKeyBytes!,
+            startOffset,
+            endOffset,
+            isLast,
+          ),
+        ),
+      );
+    }
+
+    final numChunks = futures.length;
+    var completed = 0;
+    final wrappedFutures = futures
+        .map(
+          (f) => f.then((data) {
+            completed++;
+            onProgress?.call(completed / numChunks);
+            return data;
+          }),
+        )
+        .toList();
+    final chunks = await Future.wait(wrappedFutures);
+    final joined = await vaultWorkerRun(
+      vaultIsolateJoinAndMaybeZlib,
+      VaultJoinDecryptArgs(chunks: chunks, applyZlib: applyZlib),
+    );
+    final decrypted = joined.materialize().asUint8List();
+    if (!applyZlib &&
+        decrypted.length >= _largeVaultPlaintextTempPersistBytes) {
+      await _persistVaultAesPlainTempForReuse(
+        normPath,
+        decrypted,
+        allowDiskBackedDecrypt: allowDiskBackedDecrypt,
+      );
+    }
+
+    _putCachedRead(normPath, decrypted);
+    _logPerf('readFile', sw, extra: '(${decrypted.length} bytes)');
+    return decrypted;
+  }
+
+  Future<_VaultFileMeta?> _resolveFileMeta(String normPath) async {
+    final cachedMeta = _getCachedMeta(normPath);
+    if (cachedMeta != null) return cachedMeta;
+
+    final pending = _findPendingUpdate(normPath);
+    if (pending != null) {
+      final meta = _VaultFileMeta(
+        storageId: pending['storage_id'] as String,
+        ivBase64: pending['iv'] as String? ?? '',
+        cipherVer: _inferCipherVer(
+          storedVer: pending['cipher_ver'] as int?,
+          ivBase64: pending['iv'] as String? ?? '',
+        ),
+      );
+      _putCachedMeta(normPath, meta);
+      return meta;
+    }
+
+    final result = await _db!.query(
+      'files',
+      columns: ['storage_id', 'iv', 'cipher_ver'],
+      where: 'path = ?',
+      whereArgs: [normPath],
+      limit: 1,
+    );
+    if (result.isEmpty) return null;
+    final row = result.first;
+    final ivBase64 = row['iv'] as String? ?? '';
+    var cipherVer = _inferCipherVer(
+      storedVer: row['cipher_ver'] as int?,
+      ivBase64: ivBase64,
+    );
+    final storageId = row['storage_id'] as String;
+
+    // Legacy rows may lack cipher_ver; peek on-disk magic for chunked GCM.
+    if (cipherVer == kVaultCipherCbc) {
+      final physical = _getPhysicalFile(storageId);
+      if (physical.existsSync()) {
+        final peeked = await _peekCipherVer(physical.path);
+        if (peeked == kVaultCipherGcmChunked) {
+          cipherVer = kVaultCipherGcmChunked;
+        }
+      }
+    }
+
+    final meta = _VaultFileMeta(
+      storageId: storageId,
+      ivBase64: ivBase64,
+      cipherVer: cipherVer,
+    );
+    _putCachedMeta(normPath, meta);
+    return meta;
+  }
+
+  /// Infer cipher from DB column and IV length (12 → GCM, 16 → CBC, empty → chunked/CBC).
+  int _inferCipherVer({required int? storedVer, required String ivBase64}) {
+    if (storedVer == kVaultCipherGcm || storedVer == kVaultCipherGcmChunked) {
+      return storedVer!;
+    }
+    if (storedVer == kVaultCipherCbc || storedVer == null) {
+      if (ivBase64.isEmpty) return kVaultCipherCbc;
+      try {
+        final iv = base64Decode(ivBase64);
+        if (iv.length == kVaultGcmNonceBytes) return kVaultCipherGcm;
+        if (iv.length == 16) return kVaultCipherCbc;
+      } catch (_) {}
+    }
+    return storedVer ?? kVaultCipherCbc;
+  }
+
+  Future<int> _peekCipherVer(String cipherPath) async {
+    if (_vaultUseAndroidNativeAesFileIo()) {
+      try {
+        final ver = await _vaultCryptoChannel.invokeMethod<int>(
+          'peekCipherVer',
+          <String, dynamic>{'cipherPath': cipherPath},
+        );
+        return ver ?? 0;
+      } catch (_) {}
+    }
+    try {
+      final raf = File(cipherPath).openSync(mode: FileMode.read);
+      try {
+        final magic = raf.readSync(4);
+        if (magic.length == 4 &&
+            magic[0] == 0x53 &&
+            magic[1] == 0x42 &&
+            magic[2] == 0x56 &&
+            magic[3] == 0x32) {
+          final ver = raf.readByteSync();
+          if (ver == 2) return kVaultCipherGcmChunked;
+        }
+      } finally {
+        raf.closeSync();
+      }
+    } catch (_) {}
+    return 0;
+  }
+
+  Future<Uint8List?> _decryptGcmToBytes(
+    String cipherPath,
+    String storageId,
+    String nonceBase64,
+    int cipherVer, {
+    required bool applyZlib,
+  }) async {
+    if (_vaultUseAndroidNativeAesFileIo()) {
+      try {
+        final plain = await _vaultCryptoChannel.invokeMethod<Uint8List>(
+          'decryptFileToBytesGcmZlib',
+          <String, dynamic>{
+            'cipherPath': cipherPath,
+            'key': _masterKeyBytes!,
+            'nonce': nonceBase64.isEmpty ? null : base64Decode(nonceBase64),
+            'cipherVer': cipherVer,
+            'aadPrefix': Uint8List.fromList(utf8.encode(storageId)),
+            'inflateZlib': applyZlib,
+          },
+        );
+        return plain;
+      } catch (e, st) {
+        log.warning('Native GCM+zlib decrypt failed; trying Dart', e, st);
+      }
+    }
+
+    try {
+      final ttd = await vaultWorkerRun(
+        vaultIsolateDecryptGcm,
+        VaultDecryptGcmArgs(
+          storagePath: cipherPath,
+          keyBytes: _masterKeyBytes!,
+          nonceBase64: nonceBase64,
+          cipherVer: cipherVer,
+          storageId: storageId,
+          applyZlib: applyZlib,
+        ),
+      );
+      return ttd.materialize().asUint8List();
+    } catch (e, st) {
+      log.severe('GCM decrypt failed', e, st);
       return null;
     }
   }
@@ -791,39 +1405,54 @@ class VaultAdapter {
   }) async {
     if (!_isUnlocked || _db == null || _masterKeyBytes == null) return null;
 
-    try {
-      final normPath = _normalizePath(filePath);
-      final cachedMeta = _getCachedMeta(normPath);
-      String storageId;
-      String ivBase64;
-      if (cachedMeta != null) {
-        storageId = cachedMeta.storageId;
-        ivBase64 = cachedMeta.ivBase64;
-        final sz = await getFileSize(normPath);
-        if (sz == null || sz <= 0) return null;
-      } else {
-        final pending = _findPendingUpdate(normPath);
-        if (pending != null) {
-          storageId = pending['storage_id'] as String;
-          ivBase64 = pending['iv'] as String;
-          final sz = pending['size'] as int?;
-          if (sz == null || sz <= 0) return null;
-        } else {
-          final result = await _db!.query(
-            'files',
-            columns: ['storage_id', 'iv', 'size'],
-            where: 'path = ?',
-            whereArgs: [normPath],
-            limit: 1,
-          );
-          if (result.isEmpty) return null;
-          final row = result.first;
-          storageId = row['storage_id'] as String;
-          ivBase64 = row['iv'] as String;
-          final sz = row['size'] as int?;
-          if (sz == null || sz <= 0) return null;
+    final normPath = _normalizePath(filePath);
+
+    // Defense in depth: never create/reuse plaintext temps under RAM-only.
+    // Callers should gate via FileManager; this blocks direct VaultAdapter use.
+    if (!vaultPathAllowsDiskBackedDecrypt(normPath)) {
+      _invalidateDecryptedTempFile(normPath);
+      return null;
+    }
+
+    final reused = _decryptedTempFileByVaultPath[normPath];
+    if (reused != null) {
+      try {
+        if (File(reused).existsSync()) {
+          onProgress?.call(1);
+          return reused;
         }
-      }
+      } catch (_) {}
+      _decryptedTempFileByVaultPath.remove(normPath);
+    }
+
+    return _readFileToTempFileInflight.putIfAbsent(normPath, () {
+      final done = _readFileToTempFileBody(
+        normPath,
+        filePath,
+        onProgress: onProgress,
+      );
+      unawaited(
+        done.whenComplete(() {
+          _readFileToTempFileInflight.remove(normPath);
+        }),
+      );
+      return done;
+    });
+  }
+
+  Future<String?> _readFileToTempFileBody(
+    String normPath,
+    String filePath, {
+    void Function(double)? onProgress,
+  }) async {
+    try {
+      final meta = await _resolveFileMeta(normPath);
+      if (meta == null) return null;
+      final storageId = meta.storageId;
+      final ivBase64 = meta.ivBase64;
+      final cipherVer = meta.cipherVer;
+      final sz = await getFileSize(normPath);
+      if (sz == null || sz <= 0) return null;
 
       final physicalFile = _getPhysicalFile(storageId);
       if (!physicalFile.existsSync()) return null;
@@ -835,54 +1464,183 @@ class VaultAdapter {
       );
 
       final fileSize = physicalFile.lengthSync();
-      final numWorkers = Platform.numberOfProcessors.clamp(2, 8);
-      int workerChunkSize = (fileSize / numWorkers).ceil();
-      workerChunkSize = ((workerChunkSize + 15) ~/ 16) * 16;
+      onProgress?.call(0);
 
-      final futures = <Future<String>>[];
-      for (int i = 0; i < numWorkers; i++) {
-        final startOffset = i * workerChunkSize;
-        if (startOffset >= fileSize) break;
-        final endOffset = min(startOffset + workerChunkSize, fileSize);
-        final isLast = endOffset == fileSize;
-
-        final chunkTempPath = p.join(
-          tempDir.path,
-          'vault_chunk_${const Uuid().v4()}.tmp',
+      if (cipherVer == kVaultCipherGcm || cipherVer == kVaultCipherGcmChunked) {
+        final perfGcm = PerfTiming.start(
+          'vault.readFileToTempFile.gcm',
+          fields: {'cipherBytes': fileSize, 'cipherVer': cipherVer},
         );
-        futures.add(
-          compute(
-            _isolateDecryptChunkToFile,
-            _DecryptChunkToFilePayload(
-              physicalFile.path,
-              ivBase64,
-              _masterKeyBytes!,
-              chunkTempPath,
-              startOffset,
-              endOffset,
-              isLast,
-            ),
-          ),
-        );
+        try {
+          if (_vaultUseAndroidNativeAesFileIo()) {
+            if (cipherVer == kVaultCipherGcmChunked) {
+              await _vaultCryptoChannel.invokeMethod<void>(
+                'decryptFileGcmChunked',
+                <String, dynamic>{
+                  'cipherPath': physicalFile.path,
+                  'destPath': finalTempPath,
+                  'key': _masterKeyBytes!,
+                  'aadPrefix': Uint8List.fromList(utf8.encode(storageId)),
+                },
+              );
+            } else {
+              await _vaultCryptoChannel
+                  .invokeMethod<void>('decryptFileGcm', <String, dynamic>{
+                    'cipherPath': physicalFile.path,
+                    'destPath': finalTempPath,
+                    'key': _masterKeyBytes!,
+                    'nonce': base64Decode(ivBase64),
+                  });
+            }
+            onProgress?.call(1);
+            _decryptedTempFileByVaultPath[normPath] = finalTempPath;
+            return finalTempPath;
+          }
+          final plain = await _decryptGcmToBytes(
+            physicalFile.path,
+            storageId,
+            ivBase64,
+            cipherVer,
+            applyZlib: false,
+          );
+          if (plain == null) return null;
+          await File(finalTempPath).writeAsBytes(plain, flush: true);
+          onProgress?.call(1);
+          _decryptedTempFileByVaultPath[normPath] = finalTempPath;
+          return finalTempPath;
+        } catch (e, st) {
+          log.warning('GCM temp decrypt failed', e, st);
+          try {
+            File(finalTempPath).deleteSync();
+          } catch (_) {}
+          return null;
+        } finally {
+          perfGcm?.end();
+        }
       }
 
-      final numChunks = futures.length;
-      var completed = 0;
-      final wrappedFutures = futures
-          .map(
-            (f) => f.then((path) {
-              completed++;
-              onProgress?.call(completed / numChunks);
-              return path;
-            }),
-          )
-          .toList();
-      final chunkPaths = await Future.wait(wrappedFutures);
+      if (_vaultUseAndroidNativeAesFileIo()) {
+        final perfNative = PerfTiming.start(
+          'vault.readFileToTempFile.native',
+          fields: {'cipherBytes': fileSize},
+        );
+        try {
+          final ok = await _tryVaultAndroidNativeDecryptFileToPath(
+            physicalFile.path,
+            finalTempPath,
+            ivBase64,
+          );
+          if (ok) {
+            onProgress?.call(1);
+            _decryptedTempFileByVaultPath[normPath] = finalTempPath;
+            return finalTempPath;
+          }
+        } finally {
+          perfNative?.end();
+        }
+      }
+      try {
+        final useParallel =
+            fileSize >= _parallelTempDecryptMinBytes &&
+            fileSize <= _parallelTempDecryptMaxBytes;
 
-      return await compute(
-        _isolateMergeChunkFiles,
-        _MergeChunkFilesPayload(chunkPaths, finalTempPath),
-      );
+        if (!useParallel) {
+          /// Tiny files (<2 MiB) or ciphertext larger than [_parallelTempDecryptMaxBytes]:
+          /// one isolate streams decrypt to the temp path.
+          final perf = PerfTiming.start(
+            'vault.readFileToTempFile.stream',
+            fields: {'cipherBytes': fileSize},
+          );
+          try {
+            await vaultWorkerRun(
+              _isolateDecryptChunkToFile,
+              _DecryptChunkToFilePayload(
+                physicalFile.path,
+                ivBase64,
+                _masterKeyBytes!,
+                finalTempPath,
+                0,
+                fileSize,
+                true,
+              ),
+            );
+          } finally {
+            perf?.end();
+          }
+        } else {
+          /// Parallel shard decrypt (full wave), then sequential write. Matches
+          /// large textbook PDFs that would otherwise spend ~10s+ on streaming AES.
+          final perf = PerfTiming.start(
+            'vault.readFileToTempFile.parallel',
+            fields: {'cipherBytes': fileSize},
+          );
+          try {
+            final numWorkers = _decryptWorkerCountForLength(fileSize);
+            var workerChunkSize = (fileSize / numWorkers).ceil();
+            workerChunkSize = ((workerChunkSize + 15) ~/ 16) * 16;
+
+            final ranges = <({int start, int end, bool isLast})>[];
+            for (var i = 0; i < numWorkers; i++) {
+              final startOffset = i * workerChunkSize;
+              if (startOffset >= fileSize) break;
+              final endOffset = min(startOffset + workerChunkSize, fileSize);
+              ranges.add((
+                start: startOffset,
+                end: endOffset,
+                isLast: endOffset == fileSize,
+              ));
+            }
+
+            if (ranges.isEmpty) {
+              log.warning('readFileToTempFile: empty shard list');
+              return null;
+            }
+            perf?.checkpoint('shards', fields: {'count': ranges.length});
+
+            final futures = <Future<TransferableTypedData>>[];
+            for (final range in ranges) {
+              futures.add(
+                vaultWorkerRun(
+                  _isolateReadChunk,
+                  _ReadChunkPayload(
+                    physicalFile.path,
+                    ivBase64,
+                    _masterKeyBytes!,
+                    range.start,
+                    range.end,
+                    range.isLast,
+                  ),
+                ),
+              );
+            }
+            final chunks = await Future.wait(futures);
+
+            final waf = File(finalTempPath).openSync(mode: FileMode.write);
+            try {
+              for (var i = 0; i < chunks.length; i++) {
+                final bytes = chunks[i].materialize().asUint8List();
+                if (bytes.isNotEmpty) {
+                  waf.writeFromSync(bytes);
+                }
+                onProgress?.call(0.05 + ((i + 1) / chunks.length) * 0.95);
+              }
+            } finally {
+              waf.closeSync();
+            }
+          } finally {
+            perf?.end();
+          }
+        }
+      } catch (e, s) {
+        log.severe('readFileToTempFile decrypt failed: $filePath', e, s);
+        try {
+          await File(finalTempPath).delete();
+        } catch (_) {}
+        return null;
+      }
+      onProgress?.call(1);
+      _decryptedTempFileByVaultPath[normPath] = finalTempPath;
+      return finalTempPath;
     } catch (e, s) {
       log.severe('readFileToTempFile error: $filePath', e, s);
       return null;
@@ -894,12 +1652,116 @@ class VaultAdapter {
     Uint8List data, {
     DateTime? lastModified,
     bool awaitDbCommit = false,
+    bool compressZlib = false,
   }) async {
     try {
-      await writeFilesBulk({filePath: data}, awaitDbCommit: awaitDbCommit);
+      await writeFilesBulk(
+        {filePath: data},
+        awaitDbCommit: awaitDbCommit,
+        compressZlibPaths: compressZlib ? {filePath} : const {},
+      );
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  Future<bool> _tryVaultAndroidNativeDecryptFileToPath(
+    String cipherPath,
+    String destPath,
+    String ivBase64,
+  ) async {
+    if (_masterKeyBytes == null) return false;
+    Uint8List ivBytes;
+    try {
+      ivBytes = base64Decode(ivBase64);
+    } catch (_) {
+      return false;
+    }
+    if (ivBytes.length != 16) return false;
+
+    try {
+      await _vaultCryptoChannel
+          .invokeMethod<void>('decryptFileCbc', <String, dynamic>{
+            'cipherPath': cipherPath,
+            'destPath': destPath,
+            'key': _masterKeyBytes!,
+            'iv': ivBytes,
+          });
+      return true;
+    } on PlatformException catch (e, s) {
+      log.warning('Android native vault decrypt failed: ${e.message}', e, s);
+      try {
+        final f = File(destPath);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      return false;
+    } catch (e, s) {
+      log.warning('Android native vault decrypt failed', e, s);
+      try {
+        final f = File(destPath);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      return false;
+    }
+  }
+
+  Future<_WriteResult?> _tryVaultAndroidNativeEncryptFileFromPathGcm(
+    String sourcePath,
+    String normPath,
+  ) async {
+    final source = File(sourcePath);
+    if (!source.existsSync()) {
+      throw FileSystemException('Source file not found', sourcePath);
+    }
+    final storageId = const Uuid().v4();
+    final dataDir = Directory(p.join(_storageRoot!.path, 'data'));
+    if (!dataDir.existsSync()) dataDir.createSync(recursive: true);
+    final prefix = storageId.substring(0, 2);
+    final fileDir = Directory(p.join(dataDir.path, prefix));
+    if (!fileDir.existsSync()) fileDir.createSync();
+    final outPath = p.join(fileDir.path, '$storageId.enc');
+    final compressZlib = _vaultAesPlaintextNeedsZlibNoteBody(normPath);
+
+    try {
+      final raw = await _vaultCryptoChannel
+          .invokeMethod<Map>('encryptFileToGcmZlib', <String, dynamic>{
+            'sourcePath': sourcePath,
+            'destPath': outPath,
+            'key': _masterKeyBytes!,
+            'compressZlib': compressZlib,
+            'aadPrefix': Uint8List.fromList(utf8.encode(storageId)),
+          });
+      if (raw == null) return null;
+      final cipherVer = (raw['cipherVer'] as int?) ?? kVaultCipherGcm;
+      final plainSize = (raw['plainSize'] as int?) ?? source.lengthSync();
+      final nonce = raw['nonce'];
+      final nonceBytes = nonce is Uint8List
+          ? nonce
+          : (nonce is List ? Uint8List.fromList(nonce.cast<int>()) : null);
+      return _WriteResult(
+        normPath,
+        storageId,
+        (nonceBytes != null && nonceBytes.isNotEmpty)
+            ? base64Encode(nonceBytes)
+            : '',
+        plainSize,
+        cipherVer: cipherVer,
+      );
+    } on PlatformException catch (e, s) {
+      log.warning('Android native GCM encrypt failed: ${e.message}', e, s);
+      try {
+        final f = File(outPath);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      return null;
+    } catch (e, s) {
+      log.warning('Android native GCM encrypt failed', e, s);
+      try {
+        final f = File(outPath);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      return null;
     }
   }
 
@@ -910,32 +1772,69 @@ class VaultAdapter {
   }) async {
     if (!_isUnlocked || _db == null || _masterKeyBytes == null) return;
     final normPath = _normalizePath(virtualPath);
+    final leaf = normPath.split('/').last;
+    
     if (normPath.contains('saber_vault') ||
-        normPath.split('/').last.startsWith('.saber_')) {
+        (leaf.startsWith('.saber_') && leaf != '.saber_links.json')) {
       return;
     }
     final sw = Stopwatch()..start();
-    _WriteResult result;
-    try {
-      result = await compute(
-        _isolateEncryptFileFromPath,
-        _EncryptFileFromPathPayload(
-          sourcePath,
-          _storageRoot!.path,
-          _masterKeyBytes!,
-          normPath,
-        ),
+    late final _WriteResult result;
+    late final String perfLabel;
+    if (_vaultUseAndroidNativeAesFileIo()) {
+      final nativeResult = await _tryVaultAndroidNativeEncryptFileFromPathGcm(
+        sourcePath,
+        normPath,
       );
-    } catch (e, s) {
-      log.severe('writeFileFromPath isolate error', e, s);
-      rethrow;
+      if (nativeResult != null) {
+        result = nativeResult;
+        perfLabel = 'writeFileFromPath.nativeGcm';
+      } else {
+        try {
+          result = await vaultWorkerRun(
+            _isolateEncryptFileFromPathGcm,
+            _EncryptFileFromPathPayload(
+              sourcePath,
+              _storageRoot!.path,
+              _masterKeyBytes!,
+              normPath,
+            ),
+          );
+        } catch (e, s) {
+          log.severe('writeFileFromPath isolate error', e, s);
+          rethrow;
+        }
+        perfLabel = 'writeFileFromPath.isolateGcm';
+      }
+    } else {
+      try {
+        result = await vaultWorkerRun(
+          _isolateEncryptFileFromPathGcm,
+          _EncryptFileFromPathPayload(
+            sourcePath,
+            _storageRoot!.path,
+            _masterKeyBytes!,
+            normPath,
+          ),
+        );
+      } catch (e, s) {
+        log.severe('writeFileFromPath isolate error', e, s);
+        rethrow;
+      }
+      perfLabel = 'writeFileFromPath.isolateGcm';
     }
-    _logPerf('writeFileFromPath.isolate', sw, extra: '(size=${result.size})');
+    _logPerf(perfLabel, sw, extra: '(size=${result.size})');
+
+    _invalidateDecryptedTempFile(result.virtualPath);
 
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     _putCachedMeta(
       result.virtualPath,
-      _VaultFileMeta(storageId: result.storageId, ivBase64: result.ivBase64),
+      _VaultFileMeta(
+        storageId: result.storageId,
+        ivBase64: result.ivBase64,
+        cipherVer: result.cipherVer,
+      ),
     );
     _pendingDbUpdates.add({
       'path': result.virtualPath,
@@ -943,6 +1842,7 @@ class VaultAdapter {
       'iv': result.ivBase64,
       'last_modified': timestamp,
       'size': result.size,
+      'cipher_ver': result.cipherVer,
     });
     _pendingPathsToCheck.add(result.virtualPath);
 
@@ -959,45 +1859,58 @@ class VaultAdapter {
   Future<void> writeFilesBulk(
     Map<String, Uint8List> filesData, {
     bool awaitDbCommit = false,
+    Set<String> compressZlibPaths = const {},
   }) async {
     if (!_isUnlocked || _db == null || _masterKeyBytes == null) return;
     if (filesData.isEmpty) return;
 
     final safeFiles = <String, Uint8List>{};
+    final compressNorm = <String>{};
     for (final entry in filesData.entries) {
       final normPath = _normalizePath(entry.key);
+      final leaf = normPath.split('/').last;
+      
+      // Ignore internal vault databases, but allow link configurations (.saber_links.json)
       if (normPath.contains('saber_vault') ||
-          normPath.split('/').last.startsWith('.saber_')) {
+          (leaf.startsWith('.saber_') && leaf != '.saber_links.json')) {
         continue;
       }
       safeFiles[normPath] = entry.value;
+      if (compressZlibPaths.contains(entry.key) ||
+          compressZlibPaths.contains(normPath) ||
+          _vaultAesPlaintextNeedsZlibNoteBody(normPath)) {
+        // Only auto-compress note bodies when caller did not already zlib.
+        if (!vaultLooksLikeZlib(entry.value)) {
+          compressNorm.add(normPath);
+        }
+      }
     }
     if (safeFiles.isEmpty) return;
 
     final swTotal = Stopwatch()..start();
+    PerfTiming.beginVaultAutosaveWindow();
 
-    final payloadItems = safeFiles.entries.map((e) {
-      return _WritePayload(e.key, TransferableTypedData.fromList([e.value]));
-    }).toList();
-
-    final swIsolate = Stopwatch()..start();
     List<_WriteResult> results;
+    final swEncrypt = Stopwatch()..start();
     try {
-      results = await compute(
-        _isolateEncryptAndWrite,
-        _BulkWritePayload(payloadItems, _masterKeyBytes!, _storageRoot!.path),
-      );
+      results = await _encryptAndWriteBulk(safeFiles, compressNorm);
     } catch (e, s) {
-      log.severe('Bulk write isolate error', e, s);
+      log.severe('Bulk write encrypt error', e, s);
+      PerfTiming.endVaultAutosaveWindow();
       rethrow;
     }
     _logPerf(
-      'writeFilesBulk.isolateEncryptWrite',
-      swIsolate,
-      extra: '(files=${results.length})',
+      'writeFilesBulk.encryptWrite',
+      swEncrypt,
+      extra:
+          '(files=${results.length}, native=${_vaultUseAndroidNativeAesFileIo()})',
     );
 
     final timestamp = DateTime.now().millisecondsSinceEpoch;
+
+    for (final norm in safeFiles.keys) {
+      _invalidateDecryptedTempFile(norm);
+    }
 
     for (final entry in filesData.entries) {
       _putCachedRead(_normalizePath(entry.key), entry.value);
@@ -1005,7 +1918,11 @@ class VaultAdapter {
     for (final res in results) {
       _putCachedMeta(
         res.virtualPath,
-        _VaultFileMeta(storageId: res.storageId, ivBase64: res.ivBase64),
+        _VaultFileMeta(
+          storageId: res.storageId,
+          ivBase64: res.ivBase64,
+          cipherVer: res.cipherVer,
+        ),
       );
       _pendingDbUpdates.add({
         'path': res.virtualPath,
@@ -1013,6 +1930,7 @@ class VaultAdapter {
         'iv': res.ivBase64,
         'last_modified': timestamp,
         'size': res.size,
+        'cipher_ver': res.cipherVer,
       });
       _pendingPathsToCheck.add(res.virtualPath);
     }
@@ -1035,6 +1953,131 @@ class VaultAdapter {
         extra: '(files=${results.length}, queued)',
       );
     }
+    PerfTiming.endVaultAutosaveWindow();
+  }
+
+  Future<List<_WriteResult>> _encryptAndWriteBulk(
+    Map<String, Uint8List> safeFiles,
+    Set<String> compressNorm,
+  ) async {
+    if (_vaultUseAndroidNativeAesFileIo()) {
+      try {
+        return await _nativeEncryptAndWriteBulk(safeFiles, compressNorm);
+      } catch (e, st) {
+        log.warning('Native bulk GCM failed; Dart worker fallback', e, st);
+      }
+    }
+    final items = safeFiles.entries
+        .map(
+          (e) => VaultBulkWriteItem(
+            e.key,
+            TransferableTypedData.fromList([e.value]),
+            compressZlib: compressNorm.contains(e.key),
+          ),
+        )
+        .toList();
+    final bulkResults = await vaultWorkerRun(
+      vaultIsolateEncryptAndWrite,
+      VaultBulkWriteArgs(
+        items: items,
+        keyBytes: _masterKeyBytes!,
+        storageRootPath: _storageRoot!.path,
+        cipherVer: kVaultCipherGcm,
+      ),
+    );
+    return bulkResults
+        .map(
+          (r) => _WriteResult(
+            r.virtualPath,
+            r.storageId,
+            r.ivBase64,
+            r.size,
+            cipherVer: r.cipherVer,
+          ),
+        )
+        .toList();
+  }
+
+  Future<List<_WriteResult>> _nativeEncryptAndWriteBulk(
+    Map<String, Uint8List> safeFiles,
+    Set<String> compressNorm,
+  ) async {
+    final results = <_WriteResult>[];
+    // Large payloads: avoid MethodChannel byte copies — write temp on a worker,
+    // then one native zlib+GCM path encrypt.
+    const pathBridgeMinBytes = 512 * 1024;
+    for (final entry in safeFiles.entries) {
+      final plain = entry.value;
+      final doZlib = compressNorm.contains(entry.key);
+      final storageId = const Uuid().v4();
+      final dataDir = Directory(p.join(_storageRoot!.path, 'data'));
+      if (!dataDir.existsSync()) dataDir.createSync(recursive: true);
+      final prefix = storageId.substring(0, 2);
+      final fileDir = Directory(p.join(dataDir.path, prefix));
+      if (!fileDir.existsSync()) fileDir.createSync();
+      final outPath = p.join(fileDir.path, '$storageId.enc');
+      final aadPrefix = Uint8List.fromList(utf8.encode(storageId));
+
+      late final Map resultMap;
+      if (plain.length >= pathBridgeMinBytes) {
+        final tempDir = await getTemporaryDirectory();
+        final tempPlain = p.join(tempDir.path, 'vault_plain_$storageId.tmp');
+        await vaultWorkerRun(_isolateWriteTempBytes, <String, dynamic>{
+          'path': tempPlain,
+          'bytes': plain,
+        });
+        try {
+          final raw = await _vaultCryptoChannel
+              .invokeMethod<Map>('encryptFileToGcmZlib', <String, dynamic>{
+                'sourcePath': tempPlain,
+                'destPath': outPath,
+                'key': _masterKeyBytes!,
+                'compressZlib': doZlib,
+                'aadPrefix': aadPrefix,
+              });
+          if (raw == null) {
+            throw StateError('Native encryptFileToGcmZlib returned null');
+          }
+          resultMap = raw;
+        } finally {
+          try {
+            File(tempPlain).deleteSync();
+          } catch (_) {}
+        }
+      } else {
+        final raw = await _vaultCryptoChannel
+            .invokeMethod<Map>('encryptBytesToFileGcmZlib', <String, dynamic>{
+              'destPath': outPath,
+              'plaintext': plain,
+              'key': _masterKeyBytes!,
+              'compressZlib': doZlib,
+            });
+        if (raw == null) {
+          throw StateError('Native encryptBytesToFileGcmZlib returned null');
+        }
+        resultMap = raw;
+      }
+
+      final cipherVer = (resultMap['cipherVer'] as int?) ?? kVaultCipherGcm;
+      final plainSize = (resultMap['plainSize'] as int?) ?? plain.length;
+      final nonce = resultMap['nonce'];
+      final nonceBytes = nonce is Uint8List
+          ? nonce
+          : (nonce is List ? Uint8List.fromList(nonce.cast<int>()) : null);
+      final ivBase64 = (nonceBytes != null && nonceBytes.isNotEmpty)
+          ? base64Encode(nonceBytes)
+          : '';
+      results.add(
+        _WriteResult(
+          entry.key,
+          storageId,
+          ivBase64,
+          plainSize,
+          cipherVer: cipherVer,
+        ),
+      );
+    }
+    return results;
   }
 
   Future<void> _flushPendingDbUpdates() async {
@@ -1048,15 +2091,14 @@ class VaultAdapter {
 
     final cleanupIds = <String>[];
     final sw = Stopwatch()..start();
-    const int batchSize =
-        15;
+    const int batchSize = 15;
 
     try {
       for (var i = 0; i < updates.length; i += batchSize) {
         if (i > 0) {
-          await Future.delayed(
-            const Duration(milliseconds: 16),
-          );
+          // Yield to the frame pipeline between batches so inking stays smooth.
+          await SchedulerBinding.instance.scheduleTask(() {}, Priority.idle);
+          await Future<void>.delayed(Duration.zero);
         }
 
         final end = min(i + batchSize, updates.length);
@@ -1091,7 +2133,7 @@ class VaultAdapter {
           if (existingFiles.containsKey(path)) {
             cleanupIds.add(existingFiles[path]!['storage_id'] as String);
 
-            if (FileManager.isCountableFile(path)) {
+            if (FileManager.isFolderSizeTrackedFile(path)) {
               final oldSize = existingFiles[path]!['size'] as int? ?? 0;
               final sizeDelta = newSize - oldSize;
               if (sizeDelta != 0) {
@@ -1102,13 +2144,20 @@ class VaultAdapter {
                 }
               }
             }
-          } else if (FileManager.isCountableFile(path)) {
-            totalCountDelta += 1;
+          } else {
+            final tracksCount = FileManager.isCountableFile(path);
+            final tracksSize = FileManager.isFolderSizeTrackedFile(path);
+            if (tracksCount) totalCountDelta += 1;
+            if (!tracksCount && !tracksSize) continue;
             for (final folderPath in _getAncestorFolders(path)) {
               final key = _normalizeFolderPath(folderPath);
-              folderCountDeltas[key] = (folderCountDeltas[key] ?? 0) + 1;
-              folderSizeDeltas[key] = (folderSizeDeltas[key] ?? 0) + newSize;
-              if (_folderCountCache.containsKey(key)) {
+              if (tracksCount) {
+                folderCountDeltas[key] = (folderCountDeltas[key] ?? 0) + 1;
+              }
+              if (tracksSize) {
+                folderSizeDeltas[key] = (folderSizeDeltas[key] ?? 0) + newSize;
+              }
+              if (tracksCount && _folderCountCache.containsKey(key)) {
                 _folderCountCache[key] = (_folderCountCache[key] ?? 0) + 1;
               }
             }
@@ -1202,138 +2251,36 @@ class VaultAdapter {
     }
   }
 
-  static _WriteResult _isolateEncryptFileFromPath(
+  static _WriteResult _isolateEncryptFileFromPathGcm(
     _EncryptFileFromPathPayload args,
   ) {
-    const int chunkSize =
-        1024 * 1024;
-    const int blockSize = 16;
-    const uuid = Uuid();
-    final storageId = uuid.v4();
-    final ivBytes = Uint8List(blockSize);
-    final random = Random.secure();
-    for (var i = 0; i < blockSize; i++) ivBytes[i] = random.nextInt(256);
-    final initialIvBase64 = base64Encode(ivBytes);
-
-    final dataDir = Directory(p.join(args.storageRootPath, 'data'));
-    if (!dataDir.existsSync()) dataDir.createSync(recursive: true);
-    final prefix = storageId.substring(0, 2);
-    final fileDir = Directory(p.join(dataDir.path, prefix));
-    if (!fileDir.existsSync()) fileDir.createSync();
-    final outPath = p.join(fileDir.path, '$storageId.enc');
     final source = File(args.sourcePath);
     if (!source.existsSync()) {
       throw FileSystemException('Source file not found', args.sourcePath);
     }
-    final length = source.lengthSync();
-    final raf = source.openSync(mode: FileMode.read);
-    final waf = File(outPath).openSync(mode: FileMode.write);
-
-    Uint8List cbcIv = Uint8List.fromList(ivBytes);
-    int totalWritten = 0;
-    try {
-      int offset = 0;
-      while (offset < length) {
-        final toRead = (offset + chunkSize <= length)
-            ? chunkSize
-            : (length - offset);
-        if (toRead <= 0) break;
-        final chunk = raf.readSync(toRead);
-        if (chunk.isEmpty) break;
-        Uint8List plain = Uint8List.fromList(chunk);
-        final isLastChunk = (offset + chunk.length >= length);
-        if (!isLastChunk) {
-          if (plain.length % blockSize != 0) {
-            throw StateError(
-              'Chunked encrypt: non-final chunk must be multiple of $blockSize',
-            );
-          }
-          _processCbcBlocks(true, args.keyBytes, cbcIv, plain, waf, cbcIv);
-        } else {
-
-          final padLen = blockSize - (plain.length % blockSize);
-          if (padLen != blockSize) {
-            final padded = Uint8List(plain.length + padLen);
-            padded.setRange(0, plain.length, plain);
-            for (var i = 0; i < padLen; i++) {
-              padded[plain.length + i] = padLen;
-            }
-            plain = padded;
-          } else {
-            final padded = Uint8List(plain.length + blockSize);
-            padded.setRange(0, plain.length, plain);
-            for (var i = 0; i < blockSize; i++) {
-              padded[plain.length + i] = blockSize;
-            }
-            plain = padded;
-          }
-          _processCbcBlocks(true, args.keyBytes, cbcIv, plain, waf, cbcIv);
-        }
-        totalWritten += chunk.length;
-        offset += chunk.length;
-      }
-    } finally {
-      raf.closeSync();
-      waf.closeSync();
-    }
-    return _WriteResult(
-      args.virtualPath,
-      storageId,
-      initialIvBase64,
-      totalWritten,
+    final plain = source.readAsBytesSync();
+    final items = [
+      VaultBulkWriteItem(
+        args.virtualPath,
+        TransferableTypedData.fromList([plain]),
+      ),
+    ];
+    final results = vaultIsolateEncryptAndWrite(
+      VaultBulkWriteArgs(
+        items: items,
+        keyBytes: args.keyBytes,
+        storageRootPath: args.storageRootPath,
+        cipherVer: kVaultCipherGcm,
+      ),
     );
-  }
-
-  static void _processCbcBlocks(
-    bool encrypt,
-    Uint8List keyBytes,
-    Uint8List iv,
-    Uint8List plain,
-    RandomAccessFile waf,
-    Uint8List nextIv,
-  ) {
-    final cipher = pc.CBCBlockCipher(pc.AESEngine())
-      ..init(encrypt, pc.ParametersWithIV(pc.KeyParameter(keyBytes), iv));
-    const blockSize = 16;
-
-    final outBuffer = Uint8List(plain.length);
-    for (var off = 0; off < plain.length; off += blockSize) {
-      cipher.processBlock(plain, off, outBuffer, off);
-    }
-    waf.writeFromSync(outBuffer);
-
-    if (plain.length >= blockSize) {
-      if (encrypt) {
-        nextIv.setAll(0, outBuffer.sublist(outBuffer.length - blockSize));
-      } else {
-        nextIv.setAll(0, plain.sublist(plain.length - blockSize));
-      }
-    }
-  }
-
-  static List<_WriteResult> _isolateEncryptAndWrite(_BulkWritePayload args) {
-    final key = enc.Key(args.keyBytes);
-    final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
-    const uuid = Uuid();
-    final results = <_WriteResult>[];
-    final dataDir = Directory(p.join(args.storageRootPath, 'data'));
-    if (!dataDir.existsSync()) dataDir.createSync(recursive: true);
-
-    for (final item in args.items) {
-      final material = item.data.materialize();
-
-      final data = Uint8List.view(material, 0, material.lengthInBytes);
-      final iv = enc.IV.fromSecureRandom(16);
-      final encrypted = encrypter.encryptBytes(data, iv: iv);
-      final storageId = uuid.v4();
-      final prefix = storageId.substring(0, 2);
-      final fileDir = Directory(p.join(dataDir.path, prefix));
-      if (!fileDir.existsSync()) fileDir.createSync();
-      final file = File(p.join(fileDir.path, '$storageId.enc'));
-      file.writeAsBytesSync(encrypted.bytes, flush: false);
-      results.add(_WriteResult(item.path, storageId, iv.base64, data.length));
-    }
-    return results;
+    final r = results.first;
+    return _WriteResult(
+      r.virtualPath,
+      r.storageId,
+      r.ivBase64,
+      r.size,
+      cipherVer: r.cipherVer,
+    );
   }
 
   void _cleanupOldFilesBackground(List<String> storageIds) {
@@ -1399,7 +2346,7 @@ class VaultAdapter {
     final out = File(args.chunkOutputPath);
     final waf = out.openSync(mode: FileMode.write);
 
-    const chunkSize = 4 * 1024 * 1024;
+    const chunkSize = 16 * 1024 * 1024;
     int remaining = args.endOffset - args.startOffset;
     final buf = Uint8List(chunkSize);
     final plainBuf = Uint8List(chunkSize);
@@ -1430,25 +2377,6 @@ class VaultAdapter {
     return args.chunkOutputPath;
   }
 
-  static String _isolateMergeChunkFiles(_MergeChunkFilesPayload args) {
-    const bufSize = 4 * 1024 * 1024;
-    final buf = Uint8List(bufSize);
-    final out = File(args.finalTempPath);
-    final waf = out.openSync(mode: FileMode.write);
-    for (final cp in args.chunkPaths) {
-      final cf = File(cp);
-      final raf = cf.openSync(mode: FileMode.read);
-      int bytesRead;
-      while ((bytesRead = raf.readIntoSync(buf)) > 0) {
-        waf.writeFromSync(buf, 0, bytesRead);
-      }
-      raf.closeSync();
-      cf.deleteSync();
-    }
-    waf.closeSync();
-    return args.finalTempPath;
-  }
-
   Future<int> readEncryptedChunk(
     String filePath,
     int offset,
@@ -1459,28 +2387,13 @@ class VaultAdapter {
     try {
       final normPath = _normalizePath(filePath);
       var meta = _getCachedMeta(normPath);
-      if (meta == null) {
-        final pending = _findPendingUpdate(normPath);
-        if (pending != null) {
-          meta = _VaultFileMeta(
-            storageId: pending['storage_id'] as String,
-            ivBase64: pending['iv'] as String,
-          );
-        } else {
-          final res = await _db!.query(
-            'files',
-            columns: ['storage_id', 'iv'],
-            where: 'path = ?',
-            whereArgs: [normPath],
-            limit: 1,
-          );
-          if (res.isEmpty) return 0;
-          meta = _VaultFileMeta(
-            storageId: res.first['storage_id'] as String,
-            ivBase64: res.first['iv'] as String,
-          );
-        }
-        _putCachedMeta(normPath, meta);
+      meta ??= await _resolveFileMeta(normPath);
+      if (meta == null) return 0;
+
+      // GCM blobs are not CBC-seekable; callers should use readFileToTempFile.
+      if (meta.cipherVer == kVaultCipherGcm ||
+          meta.cipherVer == kVaultCipherGcmChunked) {
+        return 0;
       }
 
       final physicalFile = _getPhysicalFile(meta.storageId);
@@ -1497,7 +2410,7 @@ class VaultAdapter {
         readSize = physicalLength - blockOffset;
       }
 
-      final transferable = await compute(
+      final transferable = await vaultWorkerRun(
         _isolateReadChunk,
         _ReadChunkPayload(
           physicalFile.path,
@@ -1532,7 +2445,6 @@ class VaultAdapter {
       String? storageId;
 
       await _db!.transaction((txn) async {
-
         final result = await txn.query(
           'files',
           columns: ['storage_id', 'size'],
@@ -1546,8 +2458,17 @@ class VaultAdapter {
 
         await txn.delete('files', where: 'path = ?', whereArgs: [normPath]);
 
-        if (FileManager.isCountableFile(normPath)) {
-          await _updateRecursiveCounts(txn, normPath, -1, -size);
+        final tracksCount = FileManager.isCountableFile(normPath);
+        final tracksSize = FileManager.isFolderSizeTrackedFile(normPath);
+        if (tracksCount || tracksSize) {
+          await _updateRecursiveCounts(
+            txn,
+            normPath,
+            tracksCount ? -1 : 0,
+            tracksSize ? -size : 0,
+          );
+        }
+        if (tracksCount) {
           await _incrementTotalFileCount(txn, -1);
         }
       });
@@ -1571,7 +2492,6 @@ class VaultAdapter {
   }
 
   File _getPhysicalFile(String uuid) {
-
     final prefix = uuid.substring(0, 2);
     return File(p.join(_storageRoot!.path, 'data', prefix, '$uuid.enc'));
   }
@@ -1587,14 +2507,14 @@ class VaultAdapter {
   }
 
   Future<void> _createTables(Database db) async {
-
     await db.execute('''
       CREATE TABLE IF NOT EXISTS files (
         path TEXT PRIMARY KEY,
         storage_id TEXT NOT NULL,
         iv TEXT NOT NULL,
         last_modified INTEGER NOT NULL,
-        size INTEGER DEFAULT 0
+        size INTEGER DEFAULT 0,
+        cipher_ver INTEGER DEFAULT 0
       )
     ''');
 
@@ -1625,15 +2545,120 @@ class VaultAdapter {
     );
   }
 
+  Timer? _gcmMigrationTimer;
+  bool _gcmMigrationRunning = false;
+  int _physicalBackupQuiesceDepth = 0;
+
+  /// True while a physical vault snapshot (incremental backup) is in progress.
+  bool get isPhysicalBackupQuiesced => _physicalBackupQuiesceDepth > 0;
+
+  /// Flush pending index writes and pause idle CBC→GCM migration so a physical
+  /// on-disk snapshot stays consistent without fully locking the vault.
+  Future<void> beginPhysicalBackupQuiesce() async {
+    _physicalBackupQuiesceDepth++;
+    _gcmMigrationTimer?.cancel();
+    _gcmMigrationTimer = null;
+    if (_isUnlocked) {
+      try {
+        await _flushPendingDbUpdates();
+      } catch (e, st) {
+        log.warning('Flush before physical backup failed: $e', e, st);
+      }
+      try {
+        await _db?.rawQuery('PRAGMA wal_checkpoint(FULL)');
+      } catch (e, st) {
+        log.fine('wal_checkpoint during backup quiesce: $e', e, st);
+      }
+    }
+  }
+
+  void endPhysicalBackupQuiesce() {
+    _physicalBackupQuiesceDepth = max(0, _physicalBackupQuiesceDepth - 1);
+    if (_physicalBackupQuiesceDepth == 0 && _isUnlocked) {
+      _scheduleIdleGcmMigration();
+    }
+  }
+
+  /// Idle-priority lazy migrate of legacy CBC blobs to GCM after unlock.
+  void _scheduleIdleGcmMigration() {
+    if (_shouldDeferIdleMigration) return;
+    _gcmMigrationTimer?.cancel();
+    _gcmMigrationTimer = Timer(const Duration(seconds: 8), () {
+      unawaited(_idleMigrateCbcBlobsToGcm());
+    });
+  }
+
+  Future<void> _idleMigrateCbcBlobsToGcm() async {
+    if (!_isUnlocked ||
+        _db == null ||
+        _gcmMigrationRunning ||
+        _shouldDeferIdleMigration) {
+      return;
+    }
+    _gcmMigrationRunning = true;
+    try {
+      final rows = await _db!.query(
+        'files',
+        columns: ['path', 'size'],
+        where: '(cipher_ver IS NULL OR cipher_ver = 0) AND size <= ?',
+        whereArgs: [8 * 1024 * 1024],
+        limit: 8,
+      );
+      for (final row in rows) {
+        if (!_isUnlocked || _shouldDeferIdleMigration) break;
+        final path = row['path'] as String?;
+        if (path == null) continue;
+        await SchedulerBinding.instance.scheduleTask(() {}, Priority.idle);
+        await Future<void>.delayed(Duration.zero);
+        if (_shouldDeferIdleMigration) break;
+        final bytes = await readFile(path);
+        if (bytes == null) continue;
+        await writeFile(
+          path,
+          bytes,
+          compressZlib: _vaultAesPlaintextNeedsZlibNoteBody(path),
+        );
+        log.fine('Migrated vault blob to GCM: $path');
+      }
+      if (_isUnlocked && !_shouldDeferIdleMigration && rows.length >= 8) {
+        _scheduleIdleGcmMigration();
+      }
+    } catch (e, st) {
+      log.warning('Idle GCM migration failed', e, st);
+    } finally {
+      _gcmMigrationRunning = false;
+    }
+  }
+
   Future<void> lock() async {
-    await _close();
+    _gcmMigrationTimer?.cancel();
+    _gcmMigrationTimer = null;
+    _detachSecurePdfPolicyListeners();
+
+    // Mark locked immediately so GoRouter can redirect to login before
+    // (potentially slow) DB flush / cleanup finishes.
+    final wasUnlocked = _isUnlocked;
+    _isUnlocked = false;
+    if (unlockState.value || wasUnlocked) {
+      unlockState.value = false;
+    }
+
+    try {
+      await _close(alreadyMarkedLocked: true);
+    } catch (e, st) {
+      log.warning('Vault lock cleanup failed: $e', e, st);
+    }
     HomeDataCache.instance.invalidate();
     ThumbnailCache.instance.clear();
     log.info('Vault locked');
   }
 
-  Future<void> _close() async {
-    await _flushPendingDbUpdates();
+  Future<void> _close({bool alreadyMarkedLocked = false}) async {
+    try {
+      await _flushPendingDbUpdates();
+    } catch (e, st) {
+      log.warning('Flush before vault close failed: $e', e, st);
+    }
     _dbCommitTimer?.cancel();
     try {
       await _db?.close();
@@ -1643,8 +2668,13 @@ class VaultAdapter {
     _clearReadCache();
     _clearMetaCache();
     _invalidateAllFolderCounts();
-    _isUnlocked = false;
-    unlockState.value = false;
+    if (!alreadyMarkedLocked) {
+      _isUnlocked = false;
+      unlockState.value = false;
+    } else {
+      _isUnlocked = false;
+      if (unlockState.value) unlockState.value = false;
+    }
   }
 
   String _normalizePath(String path) => FileManager.toRelativePath(path);
@@ -1727,6 +2757,17 @@ class VaultAdapter {
     }
 
     await _ensureTotalFileCountRow(_db!);
+
+    try {
+      await _db!.rawQuery('SELECT cipher_ver FROM files LIMIT 0');
+    } catch (_) {
+      log.info('Migrating files table to include cipher_ver...');
+      try {
+        await _db!.execute(
+          'ALTER TABLE files ADD COLUMN cipher_ver INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
+    }
   }
 
   Future<void> _rebuildAllFolderCounts(DatabaseExecutor executor) async {
@@ -1752,8 +2793,11 @@ class VaultAdapter {
       int size = 0;
       for (final fRow in fileRes) {
         final path = fRow['path'] as String?;
-        if (path != null && FileManager.isCountableFile(path)) {
+        if (path == null) continue;
+        if (FileManager.isCountableFile(path)) {
           count++;
+        }
+        if (FileManager.isFolderSizeTrackedFile(path)) {
           size += (fRow['size'] as int? ?? 0);
         }
       }
@@ -1807,7 +2851,6 @@ class VaultAdapter {
     int countDelta,
     int sizeDelta,
   ) async {
-
     for (final folderPath in _getAncestorFolders(path)) {
       await _ensureFolderRow(txn, folderPath);
       await txn.rawUpdate(
@@ -2029,6 +3072,28 @@ class VaultAdapter {
     return res.map((r) => r['path'] as String).toList();
   }
 
+  Future<Map<String, Map<String, int>>> getAllFileMetadata() async {
+    if (!_isUnlocked || _db == null) return {};
+    final res = await _db!.query(
+      'files',
+      columns: ['path', 'last_modified', 'size'],
+    );
+    final metadata = <String, Map<String, int>>{};
+    for (final row in res) {
+      metadata[row['path'] as String] = {
+        'm': row['last_modified'] as int,
+        's': row['size'] as int? ?? 0,
+      };
+    }
+    for (final pending in _pendingDbUpdates) {
+      metadata[pending['path'] as String] = {
+        'm': pending['last_modified'] as int,
+        's': pending['size'] as int? ?? 0,
+      };
+    }
+    return metadata;
+  }
+
   Future<List<String>> getFilesByPrefix(
     String prefix, {
     bool ensureTrailingSlash = false,
@@ -2042,6 +3107,24 @@ class VaultAdapter {
       columns: ['path'],
       where: 'path LIKE ?',
       whereArgs: ['$normalized%'],
+    );
+    return res.map((r) => r['path'] as String).toList();
+  }
+
+  /// Immediate children only (not nested), excluding thumbnail/asset sidecars.
+  /// Used by the file tree so vault unlock does not materialize the whole tree.
+  Future<List<String>> getDirectChildFiles(String folderPath) async {
+    if (!_isUnlocked || _db == null) return [];
+    final normalized = _normalizeFolderPath(folderPath);
+    final res = await _db!.rawQuery(
+      '''
+      SELECT path FROM files
+      WHERE path LIKE ? || '%'
+        AND instr(substr(path, length(?) + 1), '/') = 0
+        AND path NOT LIKE '%.sbn2.%'
+        AND path NOT LIKE '%.sbn.%'
+      ''',
+      [normalized, normalized],
     );
     return res.map((r) => r['path'] as String).toList();
   }
@@ -2061,6 +3144,49 @@ class VaultAdapter {
       whereArgs: ['$normalized%'],
     );
     return res.map((r) => r['path'] as String).toList();
+  }
+
+  /// Immediate child folders only (one segment under [folderPath]).
+  /// Merges explicit `folders` rows with DISTINCT first-segment hints from
+  /// nested files so trees stay complete even if a folder row is missing.
+  Future<List<String>> getDirectChildFolders(String folderPath) async {
+    if (!_isUnlocked || _db == null) return [];
+    final normalized = _normalizeFolderPath(folderPath);
+    final explicit = await _db!.rawQuery(
+      '''
+      SELECT path FROM folders
+      WHERE path LIKE ? || '%'
+        AND path != ?
+        AND path LIKE '%/'
+        AND instr(
+          rtrim(substr(path, length(?) + 1), '/'),
+          '/'
+        ) = 0
+      ''',
+      [normalized, normalized, normalized],
+    );
+    final implied = await _db!.rawQuery(
+      '''
+      SELECT DISTINCT substr(
+        path,
+        1,
+        length(?) + instr(substr(path, length(?) + 1), '/')
+      ) AS path
+      FROM files
+      WHERE path LIKE ? || '%/%'
+        AND instr(substr(path, length(?) + 1), '/') > 0
+      ''',
+      [normalized, normalized, normalized, normalized],
+    );
+    final seen = <String>{};
+    final out = <String>[];
+    for (final row in [...explicit, ...implied]) {
+      final path = row['path'] as String?;
+      if (path == null || path.isEmpty || !path.endsWith('/')) continue;
+      if (VaultAdapter.hasConsecutiveDuplicateSegment(path)) continue;
+      if (seen.add(path)) out.add(path);
+    }
+    return out;
   }
 
   Future<List<String>> getAssetPathsForBase(String basePath) async {
@@ -2101,8 +3227,11 @@ class VaultAdapter {
   Future<bool> migrateFromDisk(List<String> paths) async {
     int fail = 0;
     for (final p in paths) {
+      final leaf = p.split('/').last;
+      
+      // Ignore internal vault databases, but allow link configurations (.saber_links.json)
       if (p.contains('saber_vault') ||
-          p.split('/').last.startsWith('.saber_')) {
+          (leaf.startsWith('.saber_') && leaf != '.saber_links.json')) {
         continue;
       }
       try {
@@ -2124,19 +3253,23 @@ class VaultAdapter {
 
   Future<bool> migrateToDisk(List<String> paths) async {
     int fail = 0;
-    for (final p in paths) {
+    for (final path in paths) {
       try {
-
-        final data = await readFile(p);
+        final data = await readFile(path);
         if (data == null) continue;
 
-        final f = FileManager.getFile(p);
-        if (!f.parent.existsSync()) f.parent.createSync(recursive: true);
-        await f.writeAsBytes(data);
+        // Ensure we treat the path as relative to documentsDirectory
+        final normalizedPath = path.startsWith('/') ? path.substring(1) : path;
+        final file = File(
+          p.join(FileManager.documentsDirectory, normalizedPath),
+        );
 
-        await deleteFile(p);
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(data);
+
+        await deleteFile(path);
       } catch (e) {
-        log.warning('Migration failed for $p: $e');
+        log.warning('Migration failed for $path: $e');
         fail++;
       }
     }
@@ -2152,7 +3285,6 @@ class VaultAdapter {
 
       int rowsUpdated = 0;
       await _db!.transaction((txn) async {
-
         final sizeRes = await txn.query(
           'files',
           columns: ['size'],
@@ -2174,26 +3306,40 @@ class VaultAdapter {
 
         final fromCountable = FileManager.isCountableFile(normFrom);
         final toCountable = FileManager.isCountableFile(normTo);
+        final fromTracksSize = FileManager.isFolderSizeTrackedFile(normFrom);
+        final toTracksSize = FileManager.isFolderSizeTrackedFile(normTo);
 
         final ancestorCountDeltas = <String, int>{};
         final ancestorSizeDeltas = <String, int>{};
 
-        if (fromCountable) {
+        if (fromCountable || fromTracksSize) {
           for (final dir in _getAncestorFolders(normFrom)) {
-            ancestorCountDeltas[dir] = (ancestorCountDeltas[dir] ?? 0) - 1;
-            ancestorSizeDeltas[dir] = (ancestorSizeDeltas[dir] ?? 0) - size;
+            if (fromCountable) {
+              ancestorCountDeltas[dir] = (ancestorCountDeltas[dir] ?? 0) - 1;
+            }
+            if (fromTracksSize) {
+              ancestorSizeDeltas[dir] = (ancestorSizeDeltas[dir] ?? 0) - size;
+            }
           }
         }
-        if (toCountable) {
+        if (toCountable || toTracksSize) {
           for (final dir in _getAncestorFolders(normTo)) {
-            ancestorCountDeltas[dir] = (ancestorCountDeltas[dir] ?? 0) + 1;
-            ancestorSizeDeltas[dir] = (ancestorSizeDeltas[dir] ?? 0) + size;
+            if (toCountable) {
+              ancestorCountDeltas[dir] = (ancestorCountDeltas[dir] ?? 0) + 1;
+            }
+            if (toTracksSize) {
+              ancestorSizeDeltas[dir] = (ancestorSizeDeltas[dir] ?? 0) + size;
+            }
           }
         }
 
-        for (final dir in ancestorCountDeltas.keys) {
-          final cDelta = ancestorCountDeltas[dir]!;
-          final sDelta = ancestorSizeDeltas[dir]!;
+        final changedAncestors = {
+          ...ancestorCountDeltas.keys,
+          ...ancestorSizeDeltas.keys,
+        };
+        for (final dir in changedAncestors) {
+          final cDelta = ancestorCountDeltas[dir] ?? 0;
+          final sDelta = ancestorSizeDeltas[dir] ?? 0;
           if (cDelta != 0 || sDelta != 0) {
             await _ensureFolderRow(txn, dir);
             await txn.rawUpdate(
@@ -2214,6 +3360,12 @@ class VaultAdapter {
         log.warning('Vault moveFile: source not found in index: $normFrom');
         return false;
       }
+
+      final movedTemp = _decryptedTempFileByVaultPath.remove(normFrom);
+      if (movedTemp != null) {
+        _decryptedTempFileByVaultPath[normTo] = movedTemp;
+      }
+
       final movedCached = _getCachedRead(normFrom);
       if (movedCached != null) {
         _putCachedRead(normTo, movedCached);
@@ -2242,7 +3394,6 @@ class VaultAdapter {
       if (!dest.endsWith('/')) dest += '/';
 
       await _db!.transaction((txn) async {
-
         final res = await txn.query(
           'folders',
           columns: ['file_count', 'total_size'],
@@ -2312,7 +3463,6 @@ class VaultAdapter {
     try {
       final filesToDelete = <String>[];
       await _db!.transaction((txn) async {
-
         final res = await txn.query(
           'folders',
           columns: ['file_count', 'total_size'],
@@ -2345,7 +3495,6 @@ class VaultAdapter {
         }
 
         for (final r in files) {
-
           filesToDelete.add(r['storage_id'] as String);
         }
         await txn.delete(
@@ -2378,7 +3527,6 @@ class VaultAdapter {
     int? kdfIter,
     int? pageSize,
   }) async {
-
     log.warning('Merge Backup not yet implemented for FBA architecture');
     return 0;
   }
@@ -2395,10 +3543,15 @@ class VaultAdapter {
         ? 'Present'
         : 'Missing';
 
+    final native = _vaultUseAndroidNativeAesFileIo();
     return {
       'Status': 'Unlocked',
       'Architecture': 'Hybrid FBA (Index + Encrypted Blobs)',
-      'Cipher': 'AES-256-CBC',
+      'Cipher': 'AES-256-GCM (default)',
+      'Blob Format': 'v2 GCM; legacy CBC readable; idle migrate',
+      'Crypto Path': native
+          ? 'Native Kotlin (Conscrypt/AES-GCM + zlib)'
+          : 'Dart worker (PointyCastle GCM)',
       'KDF': 'Scrypt (N=$scryptN, r=$scryptR, p=$scryptP)',
       'Salt Status': saltStatus,
       'Index Page Size': pageSize,
@@ -2572,8 +3725,11 @@ class VaultAdapter {
 
   Future<File> createBackupArchive(
     String destinationPath,
-    String password,
-  ) async {
+    String password, {
+    void Function(double progress, String message, {int totalNotes})?
+    onProgress,
+  }) async {
+    final noteCountBeforeLock = _isUnlocked ? await getTotalFileCount() : 0;
     if (_isUnlocked) {
       await lock();
     }
@@ -2603,16 +3759,35 @@ class VaultAdapter {
     }
     final prefsJson = utf8.encode(jsonEncode(prefsMap));
     final docsDir = await FileManager.getDocumentsDirectory();
+    final noteCount = noteCountBeforeLock;
 
-    await compute(_isolateVaultBackupTask, {
-      'vaultPath': _vaultPath!,
-      'configPath': configFile.path,
-      'dataDirPath': dataDir.path,
-      'destPath': destinationPath,
-      'password': password,
-      'prefsJson': prefsJson,
-      'docsDir': docsDir,
-    });
+    if (onProgress != null) {
+      await runMonolithBackupInIsolate(
+        spawnArgs: {
+          'vaultPath': _vaultPath!,
+          'configPath': configFile.path,
+          'dataDirPath': dataDir.path,
+          'destPath': destinationPath,
+          'password': password,
+          'prefsJson': prefsJson,
+          'docsDir': docsDir,
+          'noteCount': noteCount,
+        },
+        onProgress: (p, m, notes) => onProgress(p, m, totalNotes: notes),
+        isolateMain: monolithVaultBackupIsolateMain,
+      );
+    } else {
+      await compute(_isolateVaultBackupTask, {
+        'vaultPath': _vaultPath!,
+        'configPath': configFile.path,
+        'dataDirPath': dataDir.path,
+        'destPath': destinationPath,
+        'password': password,
+        'prefsJson': prefsJson,
+        'docsDir': docsDir,
+        'noteCount': noteCount,
+      });
+    }
 
     return File(destinationPath);
   }
@@ -2624,7 +3799,6 @@ class VaultAdapter {
       'saber_vault_restore_',
     );
     try {
-
       await compute(_isolateVaultRestoreTask, {
         'archivePath': archivePath,
         'password': password,
@@ -2638,36 +3812,20 @@ class VaultAdapter {
         throw StateError('Invalid backup: missing scrypt salt');
       }
 
-      final docDir = await FileManager.getDocumentsDirectory();
-
       final prefsFile = File(p.join(tempDir.path, '_preferences.json'));
       if (prefsFile.existsSync()) {
-        const excludePrefs = {'customDataDir'};
         final prefsJson =
             jsonDecode(await prefsFile.readAsString()) as Map<String, dynamic>;
-        final sharedPrefs = await SharedPreferences.getInstance();
-        await sharedPrefs.clear();
-        for (final entry in prefsJson.entries) {
-          if (excludePrefs.contains(entry.key)) continue;
-          final value = entry.value;
-          if (value == null) continue;
-          if (value is int) {
-            await sharedPrefs.setInt(entry.key, value);
-          } else if (value is double) {
-            await sharedPrefs.setDouble(entry.key, value);
-          } else if (value is bool) {
-            await sharedPrefs.setBool(entry.key, value);
-          } else if (value is String) {
-            await sharedPrefs.setString(entry.key, value);
-          } else if (value is List) {
-            await sharedPrefs.setStringList(
-              entry.key,
-              value.map((e) => e.toString()).toList(),
-            );
-          }
-        }
+        await BackupFormat.restoreSharedPreferences(
+          prefsJson,
+          exclude: _unrestorableDevicePathPrefs(prefsJson),
+        );
         await prefsFile.delete();
       }
+
+      final docDir = await FileManager.getDocumentsDirectory();
+      FileManager.documentsDirectory = docDir;
+      BackgroundOperationLock.configure(docDir);
 
       final tempEntities = tempDir.listSync(recursive: false);
       for (final e in tempEntities) {
@@ -2681,16 +3839,49 @@ class VaultAdapter {
       final destinationRoot = p.join(docDir, 'saber_vault');
       _setupPaths(destinationRoot);
       final destinationDir = Directory(destinationRoot);
-      if (destinationDir.existsSync()) {
-        await destinationDir.delete(recursive: true);
+      final oldDir = Directory(
+        '$destinationRoot.restore_old_${DateTime.now().microsecondsSinceEpoch}',
+      );
+      var movedOld = false;
+      try {
+        if (destinationDir.existsSync()) {
+          await destinationDir.rename(oldDir.path);
+          movedOld = true;
+        }
+        await destinationDir.create(recursive: true);
+        await _moveDirectoryContents(tempDir, destinationDir);
+        if (movedOld && oldDir.existsSync()) {
+          await oldDir.delete(recursive: true);
+        }
+      } catch (_) {
+        if (destinationDir.existsSync()) {
+          await destinationDir.delete(recursive: true);
+        }
+        if (movedOld && oldDir.existsSync()) {
+          await oldDir.rename(destinationDir.path);
+        }
+        rethrow;
       }
-      await destinationDir.create(recursive: true);
-      await _moveDirectoryContents(tempDir, destinationDir);
     } finally {
       if (tempDir.existsSync()) {
         await tempDir.delete(recursive: true);
       }
     }
+  }
+
+  Set<String> _unrestorableDevicePathPrefs(Map<String, dynamic> prefs) {
+    const devicePathPrefs = {
+      'customDataDir',
+      '/backupFilePath',
+      '/backupDirectoryPath',
+      '/defaultExportPath',
+    };
+    return {
+      for (final key in devicePathPrefs)
+        if (prefs[key] is String &&
+            !BackupFormat.canRestoreDevicePath(prefs[key] as String))
+          key,
+    };
   }
 
   Future<String> _deriveKeyHexAsync(
@@ -2708,7 +3899,7 @@ class VaultAdapter {
       'p': p,
     };
 
-    return compute(_deriveKeyHexFromArgs, args);
+    return vaultWorkerRun(_deriveKeyHexFromArgs, args);
   }
 
   Future<void> _moveDirectoryContents(

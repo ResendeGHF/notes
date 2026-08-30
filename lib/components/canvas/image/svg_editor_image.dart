@@ -143,12 +143,18 @@ class SvgEditorImage extends EditorImage {
     writer.writeInt(ImageBinaryKeys.assetId, assetIdToSave != -1 ? assetIdToSave : -1);
 
     if (assetIdToSave != -1) {
-      writer.writeInt(ImageBinaryKeys.previewHash, assetCacheAll.getAssetPreviewHash(assetId));
-      writer.writeInt(ImageBinaryKeys.fileSize, assetCacheAll.getAssetFileSize(assetId));
-      
+      writer.writeUint32(
+        ImageBinaryKeys.previewHash,
+        assetCacheAll.getAssetPreviewHash(assetId),
+      );
+      writer.writeUint32(
+        ImageBinaryKeys.fileSize,
+        assetCacheAll.getAssetFileSize(assetId),
+      );
+
       final fullHash = assetCacheAll.getAssetHash(assetId);
       if (fullHash != null) {
-        writer.writeInt(ImageBinaryKeys.fullHash, fullHash);
+        writer.writeUint32(ImageBinaryKeys.fullHash, fullHash);
       }
       
       final fileInfo = assetCacheAll.getAssetFileInfo(assetId);
@@ -182,13 +188,13 @@ class SvgEditorImage extends EditorImage {
         assetId = reader.readIntNoKey();
       } else if (peekKey == ImageBinaryKeys.previewHash) {
         reader.readKey();
-        previewHash = reader.readIntNoKey();
+        previewHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileSize) {
         reader.readKey();
-        fileSize = reader.readIntNoKey();
+        fileSize = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fullHash) {
         reader.readKey();
-        fullHash = reader.readIntNoKey();
+        fullHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileInfo) {
         reader.readKey();
         fileInfo = reader.readStringNoKey();

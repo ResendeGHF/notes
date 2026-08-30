@@ -59,7 +59,14 @@ class _HomePageState extends State<HomePage> {
       index: index,
       sizing: StackFit.expand,
       children: [
-        _TransitionPage(active: index == 0, child: const RecentPage()),
+        // RepaintBoundaries keep inactive tabs from repainting when the rail
+        // snaps its inset (IndexedStack still keeps their state alive).
+        RepaintBoundary(
+          child: _TransitionPage(
+            active: index == 0,
+            child: RecentPage(isActive: index == 0),
+          ),
+        ),
         _TransitionPage(
           active: index == 1,
           child: KeyedSubtree(
@@ -75,7 +82,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-
     var index = HomePage.subpages.indexOf(widget.subpage);
     if (index == -1) index = 0;
 

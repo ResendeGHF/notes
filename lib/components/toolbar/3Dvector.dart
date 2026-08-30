@@ -5,6 +5,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:saber/components/toolbar/3Dplot.dart'
+    show AxisGizmoPainter3D, CoordSystem3D, MainAxesLabelsPainter3D;
 import 'package:saber/services/math_engine/math_engine.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
 
@@ -14,6 +16,8 @@ class VectorFieldDef {
   final double uMin, uMax, vMin, vMax;
   final double tMin, tMax;
   final int durationMs;
+  final double? xMin, xMax, yMin, yMax, zMin, zMax;
+  final CoordSystem3D coordSystem;
 
   VectorFieldDef({
     required this.exprX,
@@ -29,6 +33,13 @@ class VectorFieldDef {
     this.tMin = 0,
     this.tMax = 0,
     this.durationMs = 0,
+    this.xMin,
+    this.xMax,
+    this.yMin,
+    this.yMax,
+    this.zMin,
+    this.zMax,
+    this.coordSystem = CoordSystem3D.cartesian,
   });
 
   bool get hasAnimation => tMax > tMin && durationMs > 0;
@@ -40,6 +51,7 @@ class Vector3DWidget extends StatefulWidget {
   final double centerX, centerY, centerZ;
   final bool isDarkMode, showLabels;
   final bool autoRotate;
+  final CoordSystem3D gridCoordSystem;
 
   const Vector3DWidget({
     super.key,
@@ -53,6 +65,7 @@ class Vector3DWidget extends StatefulWidget {
     required this.isDarkMode,
     required this.showLabels,
     this.autoRotate = false,
+    this.gridCoordSystem = CoordSystem3D.cartesian,
   });
 
   @override
@@ -110,7 +123,8 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
     if (widget.fields != oldWidget.fields ||
         widget.zoom != oldWidget.zoom ||
         widget.centerX != oldWidget.centerX ||
-        widget.centerY != oldWidget.centerY) {
+        widget.centerY != oldWidget.centerY ||
+        widget.centerZ != oldWidget.centerZ) {
       _needsRecalc = true;
     }
   }
@@ -124,8 +138,23 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
         .replaceAll('π', 'pi');
   }
 
+  double _visibleHalfRange() {
+    final range = 15.0 / widget.zoom.clamp(0.001, 1000000.0);
+    return range.clamp(0.01, 100000.0);
+  }
+
+  int _surfaceSteps() {
+    final rangeScale = math.sqrt(_visibleHalfRange() / 15.0).clamp(0.75, 1.9);
+    return (42 * rangeScale).round().clamp(30, 76);
+  }
+
+  int _vectorSteps() {
+    final rangeScale = math.sqrt(_visibleHalfRange() / 15.0).clamp(0.75, 1.6);
+    return (12 * rangeScale).round().clamp(10, 22);
+  }
+
   void _calculateData() {
-    _renderItems.clear();
+    _renderItems = [];
 
     for (var def in widget.fields) {
       try {
@@ -158,14 +187,23 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
           }
         }
 
-        final double viewRange = 12.0;
-        final double uStart = widget.centerX - viewRange;
-        final double uEnd = widget.centerX + viewRange;
-        final double vStart = widget.centerY - viewRange;
-        final double vEnd = widget.centerY + viewRange;
+        final isCart = def.coordSystem == CoordSystem3D.cartesian;
+        final isCyl = def.coordSystem == CoordSystem3D.cylindrical;
+        final isSph = def.coordSystem == CoordSystem3D.spherical;
 
-        int surfSteps = 30;
-        int vecSteps = 12;
+        final viewRange = _visibleHalfRange();
+        final double uStart =
+            def.xMin ?? (isCart ? widget.centerX - viewRange : 0.0);
+        final double uEnd =
+            def.xMax ?? (isCart ? widget.centerX + viewRange : 2 * math.pi);
+        final double vStart =
+            def.yMin ??
+            (isCart ? widget.centerY - viewRange : (isSph ? 0.0 : -math.pi));
+        final double vEnd =
+            def.yMax ?? (isCart ? widget.centerY + viewRange : math.pi);
+
+        final surfSteps = _surfaceSteps();
+        final vecSteps = _vectorSteps();
 
         double uStep = (uEnd - uStart) / surfSteps;
         double vStep = (vEnd - vStart) / surfSteps;
@@ -181,11 +219,24 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
             double v = vStart + j * vStep;
             vars['u'] = Complex(u);
             vars['v'] = Complex(v);
-            final x = evalReal(exX);
-            final y = evalReal(exY);
-            final z = evalReal(exZ);
-            if (x != null && y != null && z != null)
-              sGrid[i][j] = vmath.Vector3(x, y, z);
+            final xRaw = evalReal(exX);
+            final yRaw = evalReal(exY);
+            final zRaw = evalReal(exZ);
+            if (xRaw != null && yRaw != null && zRaw != null) {
+              double finalX = xRaw, finalY = yRaw, finalZ = zRaw;
+              if (isCyl) {
+                finalX = xRaw * math.cos(yRaw);
+                finalY = xRaw * math.sin(yRaw);
+                finalZ = zRaw;
+              } else if (isSph) {
+                finalX = xRaw * math.sin(zRaw) * math.cos(yRaw);
+                finalY = xRaw * math.sin(zRaw) * math.sin(yRaw);
+                finalZ = xRaw * math.cos(zRaw);
+              }
+              if (def.zMin != null && finalZ < def.zMin!) continue;
+              if (def.zMax != null && finalZ > def.zMax!) continue;
+              sGrid[i][j] = vmath.Vector3(finalX, finalY, finalZ);
+            }
           }
         }
 
@@ -220,14 +271,28 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
             double v = vStart + j * vStep;
             vars['u'] = Complex(u);
             vars['v'] = Complex(v);
-            final x = evalReal(exX);
-            final y = evalReal(exY);
-            final z = evalReal(exZ);
+            final xRaw = evalReal(exX);
+            final yRaw = evalReal(exY);
+            final zRaw = evalReal(exZ);
 
-            if (x != null && y != null && z != null) {
-              vars['x'] = Complex(x);
-              vars['y'] = Complex(y);
-              vars['z'] = Complex(z);
+            if (xRaw != null && yRaw != null && zRaw != null) {
+              double finalX = xRaw, finalY = yRaw, finalZ = zRaw;
+              if (isCyl) {
+                finalX = xRaw * math.cos(yRaw);
+                finalY = xRaw * math.sin(yRaw);
+                finalZ = zRaw;
+              } else if (isSph) {
+                finalX = xRaw * math.sin(zRaw) * math.cos(yRaw);
+                finalY = xRaw * math.sin(zRaw) * math.sin(yRaw);
+                finalZ = xRaw * math.cos(zRaw);
+              }
+
+              if (def.zMin != null && finalZ < def.zMin!) continue;
+              if (def.zMax != null && finalZ > def.zMax!) continue;
+
+              vars['x'] = Complex(finalX);
+              vars['y'] = Complex(finalY);
+              vars['z'] = Complex(finalZ);
               final p = evalReal(exP);
               final q = evalReal(exQ);
               final r = evalReal(exR);
@@ -236,7 +301,9 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
                 final vec = vmath.Vector3(p, q, r);
                 double mag = vec.length;
                 if (mag > maxMag) maxMag = mag;
-                tempVecs.add(_RawVector(vmath.Vector3(x, y, z), vec, mag));
+                tempVecs.add(
+                  _RawVector(vmath.Vector3(finalX, finalY, finalZ), vec, mag),
+                );
               }
             }
           }
@@ -254,7 +321,7 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
           );
         }
       } catch (e) {
-        debugPrint("Vector error: $e");
+        debugPrint('Vector error: $e');
       }
     }
     _needsRecalc = false;
@@ -271,23 +338,84 @@ class _Vector3DWidgetState extends State<Vector3DWidget>
     return LayoutBuilder(
       builder: (ctx, box) {
         if (_needsRecalc) _calculateData();
+        final halfRange = _visibleHalfRange();
+        final yaw = widget.yaw + _autoRotationOffset;
         return Listener(
           onPointerDown: (_) => _isInteracting = true,
           onPointerUp: (_) => _isInteracting = false,
           onPointerCancel: (_) => _isInteracting = false,
-          child: CustomPaint(
-            size: Size(box.maxWidth, box.maxHeight),
-            painter: _VectorPainter(
-              _renderItems,
-              widget.yaw + _autoRotationOffset,
-              widget.pitch,
-              widget.zoom,
-              widget.centerX,
-              widget.centerY,
-              widget.centerZ,
-              widget.isDarkMode,
-              widget.showLabels,
-            ),
+          child: Stack(
+            children: [
+              if (widget.showLabels)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: MainAxesLabelsPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                        zoom: widget.zoom,
+                        centerX: widget.centerX,
+                        centerY: widget.centerY,
+                        centerZ: widget.centerZ,
+                        halfRange: halfRange,
+                        gridCoordSystem: widget.gridCoordSystem,
+                        showGrid: true,
+                        showAxesAndLabels: false,
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _VectorPainter(
+                    _renderItems,
+                    yaw,
+                    widget.pitch,
+                    widget.zoom,
+                    widget.centerX,
+                    widget.centerY,
+                    widget.centerZ,
+                    widget.isDarkMode,
+                  ),
+                ),
+              ),
+              if (widget.showLabels)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: MainAxesLabelsPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                        zoom: widget.zoom,
+                        centerX: widget.centerX,
+                        centerY: widget.centerY,
+                        centerZ: widget.centerZ,
+                        halfRange: halfRange,
+                        gridCoordSystem: widget.gridCoordSystem,
+                        showGrid: false,
+                        showAxesAndLabels: true,
+                      ),
+                    ),
+                  ),
+                ),
+              if (widget.showLabels)
+                Positioned(
+                  left: 12,
+                  bottom: 12,
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      size: const Size(92, 92),
+                      painter: AxisGizmoPainter3D(
+                        yawDeg: yaw,
+                        pitchDeg: widget.pitch,
+                        isDarkMode: widget.isDarkMode,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         );
       },
@@ -321,7 +449,7 @@ class _RenderItem {
 class _VectorPainter extends CustomPainter {
   final List<_RenderItem> items;
   final double yaw, pitch, zoom, cx, cy, cz;
-  final bool isDark, showLabels;
+  final bool isDark;
 
   _VectorPainter(
     this.items,
@@ -332,7 +460,6 @@ class _VectorPainter extends CustomPainter {
     this.cy,
     this.cz,
     this.isDark,
-    this.showLabels,
   );
 
   @override
@@ -387,10 +514,6 @@ class _VectorPainter extends CustomPainter {
 
     drawList.sort((a, b) => (a['d'] as double).compareTo(b['d'] as double));
 
-    if (showLabels) {
-      _drawGridAndLabels(canvas, size, rot, s, w, h);
-    }
-
     Paint p = Paint();
     for (var d in drawList) {
       if (d['t'] == 0) {
@@ -428,156 +551,13 @@ class _VectorPainter extends CustomPainter {
     }
   }
 
-  void _drawGridAndLabels(
-    Canvas canvas,
-    Size size,
-    vmath.Matrix3 rot,
-    double scale,
-    double cx,
-    double cy,
-  ) {
-    final axisPaint = Paint()
-      ..color = (isDark ? Colors.white : Colors.black).withValues(alpha: 0.3)
-      ..strokeWidth = 1.0;
-    final textPainter = TextPainter(textDirection: TextDirection.ltr);
-
-    Offset project(double x, double y, double z) {
-      final relX = x - this.cx;
-      final relY = y - this.cy;
-      final relZ = z - this.cz;
-      final rx = rot[0] * relX + rot[3] * relY + rot[6] * relZ;
-      final ry = rot[1] * relX + rot[4] * relY + rot[7] * relZ;
-      return Offset(cx + rx * scale, cy - ry * scale);
-    }
-
-    final double step = MathGrid.calculateStepSize(80.0, scale);
-
-    final double L = 10000.0;
-    canvas.drawLine(
-      project(-L, 0, 0),
-      project(L, 0, 0),
-      axisPaint..color = Colors.red.withOpacity(0.4),
-    );
-    canvas.drawLine(
-      project(0, -L, 0),
-      project(0, L, 0),
-      axisPaint..color = Colors.green.withOpacity(0.4),
-    );
-    canvas.drawLine(
-      project(0, 0, -L),
-      project(0, 0, L),
-      axisPaint..color = Colors.blue.withOpacity(0.4),
-    );
-
-    final int ticks = 6;
-    TextStyle style = TextStyle(
-      color: isDark ? Colors.white70 : Colors.black87,
-      fontSize: 10,
-      backgroundColor: isDark ? const Color(0xFF1E1E1E) : Colors.white,
-    );
-
-    final lx = math.sqrt(rot[0] * rot[0] + rot[1] * rot[1]);
-    final ly = math.sqrt(rot[3] * rot[3] + rot[4] * rot[4]);
-    final lz = math.sqrt(rot[6] * rot[6] + rot[7] * rot[7]);
-    final ax = lx > 1e-6 ? Offset(rot[0] / lx, -rot[1] / lx) : Offset.zero;
-    final ay = ly > 1e-6 ? Offset(rot[3] / ly, -rot[4] / ly) : Offset.zero;
-    final az = lz > 1e-6 ? Offset(rot[6] / lz, -rot[7] / lz) : Offset.zero;
-    const labelOffset = 8.0;
-
-    void drawTicks(String axis) {
-      final unit = axis == 'x' ? ax : (axis == 'y' ? ay : az);
-
-      double centerVal = axis == 'x'
-          ? this.cx
-          : (axis == 'y' ? this.cy : this.cz);
-      double start = (centerVal / step).floor() * step;
-
-      for (int i = -ticks; i <= ticks; i++) {
-        double val = start + (i * step);
-        if (val.abs() < 1e-5) continue;
-
-        double wx = 0, wy = 0, wz = 0;
-        if (axis == 'x') {
-          wx = val;
-        } else if (axis == 'y') {
-          wy = val;
-        } else {
-          wz = val;
-        }
-
-        Offset p = project(wx, wy, wz);
-        if (p.dx < -50 ||
-            p.dx > size.width + 50 ||
-            p.dy < -50 ||
-            p.dy > size.height + 50)
-          continue;
-        canvas.drawCircle(
-          p,
-          2,
-          axisPaint..color = (isDark ? Colors.white : Colors.black),
-        );
-        textPainter.text = TextSpan(
-          text: MathFormatter.formatAxisLabel(val, precision: 2),
-          style: style,
-        );
-        textPainter.layout();
-        textPainter.paint(
-          canvas,
-          p + Offset(unit.dx * labelOffset, unit.dy * labelOffset),
-        );
-      }
-    }
-
-    drawTicks('x');
-    drawTicks('y');
-    drawTicks('z');
-    _drawGizmo(canvas, size, rot);
-  }
-
-  void _drawGizmo(Canvas canvas, Size size, vmath.Matrix3 rot) {
-    final paint = Paint()..strokeWidth = 2.0;
-    final origin = Offset(35, size.height - 35);
-    final len = 20.0;
-    const labelOffset = 10.0;
-    Offset proj(double x, double y, double z) {
-      final rx = rot[0] * x + rot[3] * y + rot[6] * z;
-      final ry = rot[1] * x + rot[4] * y + rot[7] * z;
-      return origin + Offset(rx, -ry);
-    }
-
-    canvas.drawLine(origin, proj(len, 0, 0), paint..color = Colors.red);
-    canvas.drawLine(origin, proj(0, len, 0), paint..color = Colors.green);
-    canvas.drawLine(origin, proj(0, 0, len), paint..color = Colors.blue);
-
-    final lx = math.sqrt(rot[0] * rot[0] + rot[1] * rot[1]);
-    final ly = math.sqrt(rot[3] * rot[3] + rot[4] * rot[4]);
-    final lz = math.sqrt(rot[6] * rot[6] + rot[7] * rot[7]);
-    final ux = lx > 1e-6 ? Offset(rot[0] / lx, -rot[1] / lx) : Offset.zero;
-    final uy = ly > 1e-6 ? Offset(rot[3] / ly, -rot[4] / ly) : Offset.zero;
-    final uz = lz > 1e-6 ? Offset(rot[6] / lz, -rot[7] / lz) : Offset.zero;
-    final tp = TextPainter(textDirection: TextDirection.ltr);
-    void lbl(String s, Offset axisTip, Offset unit, Color c) {
-      final p = axisTip + Offset(unit.dx * labelOffset, unit.dy * labelOffset);
-      tp.text = TextSpan(
-        text: s,
-        style: TextStyle(color: c, fontWeight: FontWeight.bold, fontSize: 9),
-      );
-      tp.layout();
-      tp.paint(canvas, p);
-    }
-
-    lbl("X", proj(len, 0, 0), ux, Colors.red);
-    lbl("Y", proj(0, len, 0), uy, Colors.green);
-    lbl("Z", proj(0, 0, len), uz, Colors.blue);
-  }
-
   @override
   bool shouldRepaint(covariant _VectorPainter old) =>
+      old.items != items ||
       old.yaw != yaw ||
       old.pitch != pitch ||
       old.zoom != zoom ||
       old.cx != cx ||
       old.cy != cy ||
-      old.cz != cz ||
-      old.showLabels != showLabels;
+      old.cz != cz;
 }

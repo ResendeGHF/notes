@@ -3,8 +3,8 @@
 
 import 'dart:typed_data';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/services/function_plotter.dart';
 
 enum PlotMode {
@@ -242,39 +242,33 @@ class _FunctionPlotterDialogState extends State<FunctionPlotterDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Dialog(
       backgroundColor: Colors.transparent,
       elevation: 0,
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          width: 500,
-          padding: const EdgeInsets.all(32),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface.withOpacity(0.65),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.grey.withOpacity(0.3), width: 1.5),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.2),
-                blurRadius: 40,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: SingleChildScrollView(
-            child: Column(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: RuggedDialogShell(
+        maxWidth: 520,
+        child: SingleChildScrollView(
+          child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Plot Function',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  'Plot function',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w600,
+                    letterSpacing: -0.4,
                   ),
-                  textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 6),
+                Text(
+                  '2D, 3D, polar, and vector plots rendered to the canvas.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 20),
                 DropdownButtonFormField<PlotMode>(
                   value: _mode,
                   decoration: InputDecoration(
@@ -378,27 +372,24 @@ class _FunctionPlotterDialogState extends State<FunctionPlotterDialog> {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
+                    FilledButton(
+                      style: FilledButton.styleFrom(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 24,
                           vertical: 16,
                         ),
-                        backgroundColor: Colors.grey.shade800,
-                        foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        elevation: 0,
                       ),
                       onPressed: _isPlotting ? null : _plotFunction,
                       child: _isPlotting
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 20,
                               height: 20,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: Colors.white,
+                                color: Theme.of(context).colorScheme.onPrimary,
                               ),
                             )
                           : const Text('Plot'),
@@ -409,7 +400,6 @@ class _FunctionPlotterDialogState extends State<FunctionPlotterDialog> {
             ),
           ),
         ),
-      ),
     );
   }
 

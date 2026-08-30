@@ -4,15 +4,68 @@
 
 import 'dart:async';
 
+import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
 import 'package:saber/components/files/file_tree_skeleton.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
+import 'package:saber/data/file_tree_cache.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+/// Max grapheme clusters shown in the navbar file tree; longer names are cut
+/// with "…". Font size stays fixed (no FittedBox scale-down).
+const _kFileTreeNameMaxChars = 64;
+
+String _elideFileTreeName(String name) {
+  final ch = name.characters;
+  if (ch.length <= _kFileTreeNameMaxChars) return name;
+  return '${ch.take(_kFileTreeNameMaxChars)}…';
+}
+
+DirectoryChildren? _filterChildren(
+  DirectoryChildren? raw, {
+  required Map<String, String> linkedDirs,
+  required Map<String, String> linkedFiles,
+}) {
+  if (raw == null) return null;
+  final directories = raw.directories.where((d) => !d.startsWith('.')).toList()
+    ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  final files = raw.files.where((f) => !f.startsWith('.')).toList()
+    ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  final sortedDirs = Map.fromEntries(
+    linkedDirs.entries.toList()
+      ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase())),
+  );
+  final sortedFiles = Map.fromEntries(
+    linkedFiles.entries.toList()
+      ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase())),
+  );
+  return DirectoryChildren(
+    directories,
+    files,
+    linkedDirectories: sortedDirs,
+    linkedFiles: sortedFiles,
+  );
+}
+
+void _splitLinks(
+  Map<String, String> links, {
+  required Map<String, String> linkedDirs,
+  required Map<String, String> linkedFiles,
+}) {
+  for (final entry in links.entries) {
+    if (entry.value.endsWith('.sbn') ||
+        entry.value.endsWith('.sbn2') ||
+        entry.value.endsWith('.pdf')) {
+      linkedFiles[entry.key] = entry.value;
+    } else {
+      linkedDirs[entry.key] = entry.value;
+    }
+  }
+}
 
 class FileTree extends StatefulWidget {
   const FileTree({super.key});
@@ -31,13 +84,32 @@ class _FileTreeState extends State<FileTree> {
   @override
   void initState() {
     super.initState();
-    _loadRoot();
+    // Instant paint from cache (warmed by HomeDataCache.preload / prior visit).
+    final cached = FileTreeCache.instance.peekChildren('/');
+    final cachedLinks = FileTreeCache.instance.peekLinks('/') ?? const {};
+    if (cached != null) {
+      final linkedDirs = <String, String>{};
+      final linkedFiles = <String, String>{};
+      _splitLinks(
+        cachedLinks,
+        linkedDirs: linkedDirs,
+        linkedFiles: linkedFiles,
+      );
+      _rootChildren = _filterChildren(
+        cached,
+        linkedDirs: linkedDirs,
+        linkedFiles: linkedFiles,
+      );
+      _isLoading = false;
+    }
+    _loadRoot(backgroundRefresh: cached != null);
 
     _fileSystemSubscription = FileManager.fileWriteStream.stream.listen((
       event,
     ) {
-      final eventPath = event.filePath;
+      FileTreeCache.instance.invalidateForFileEvent(event.filePath);
 
+      final eventPath = event.filePath;
       String normalizedPath = eventPath.replaceAll('\\', '/');
       if (!normalizedPath.startsWith('/')) normalizedPath = '/$normalizedPath';
       if (normalizedPath.endsWith('/') && normalizedPath.length > 1) {
@@ -68,83 +140,54 @@ class _FileTreeState extends State<FileTree> {
   void _scheduleRootReload() {
     if (_debounceTimer?.isActive ?? false) _debounceTimer!.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-      if (mounted) _loadRoot();
+      if (mounted) _loadRoot(backgroundRefresh: true);
     });
   }
 
-  Future<void> _loadRoot() async {
-
-    if (_isLoading && _rootChildren != null) {
+  Future<void> _loadRoot({bool backgroundRefresh = false}) async {
+    if (_isLoading && _rootChildren != null && !backgroundRefresh) {
       _isReloadPending = true;
       return;
     }
 
-    if (mounted && !_isLoading) {
-      setState(() {
-        _isLoading = true;
-      });
+    // Only flash the skeleton when we have nothing to show yet.
+    if (mounted && _rootChildren == null && !_isLoading) {
+      setState(() => _isLoading = true);
     }
 
     try {
-      final rawChildren = await FileManager.getChildrenOfDirectory('/');
-      if (mounted) {
-        DirectoryChildren? filteredChildren;
-        if (rawChildren != null) {
+      final results = await Future.wait([
+        backgroundRefresh
+            ? FileTreeCache.instance.refreshChildren('/')
+            : FileTreeCache.instance.getChildren('/'),
+        backgroundRefresh
+            ? FileTreeCache.instance.refreshLinks('/')
+            : FileTreeCache.instance.getLinks('/'),
+      ]);
+      if (!mounted) return;
 
-          final directories = rawChildren.directories
-              .where((d) => !d.startsWith('.'))
-              .toList();
+      final rawChildren = results[0] as DirectoryChildren?;
+      final links = results[1] as Map<String, String>;
+      final linkedDirs = <String, String>{};
+      final linkedFiles = <String, String>{};
+      _splitLinks(links, linkedDirs: linkedDirs, linkedFiles: linkedFiles);
 
-          directories.sort(
-            (a, b) => a.toLowerCase().compareTo(b.toLowerCase()),
-          );
+      final filteredChildren = _filterChildren(
+        rawChildren,
+        linkedDirs: linkedDirs,
+        linkedFiles: linkedFiles,
+      );
 
-          Map<String, String> linkedDirs = {};
-          Map<String, String> linkedFiles = {};
-          try {
-            final links = await FolderLinkManager.getLinks('/');
-            for (final entry in links.entries) {
-              if (entry.value.endsWith('.sbn') ||
-                  entry.value.endsWith('.sbn2') ||
-                  entry.value.endsWith('.pdf')) {
-                linkedFiles[entry.key] = entry.value;
-              } else {
-                linkedDirs[entry.key] = entry.value;
-              }
-            }
-          } catch (_) {}
+      setState(() {
+        _rootChildren = filteredChildren;
+        _isLoading = false;
+      });
 
-          linkedDirs = Map.fromEntries(
-            linkedDirs.entries.toList()..sort(
-              (a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()),
-            ),
-          );
-          linkedFiles = Map.fromEntries(
-            linkedFiles.entries.toList()..sort(
-              (a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()),
-            ),
-          );
-
-          filteredChildren = DirectoryChildren(
-            directories,
-            rawChildren.files.where((f) => !f.startsWith('.')).toList()
-              ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase())),
-            linkedDirectories: linkedDirs,
-            linkedFiles: linkedFiles,
-          );
-        }
-
-        setState(() {
-          _rootChildren = filteredChildren;
-          _isLoading = false;
-        });
-
-        if (_isReloadPending) {
-          _isReloadPending = false;
-          _loadRoot();
-        }
+      if (_isReloadPending) {
+        _isReloadPending = false;
+        _loadRoot(backgroundRefresh: true);
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         setState(() => _isLoading = false);
       }
@@ -154,101 +197,68 @@ class _FileTreeState extends State<FileTree> {
   @override
   Widget build(BuildContext context) {
     return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 350),
+      duration: const Duration(milliseconds: 180),
       switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      transitionBuilder: (child, animation) => FadeTransition(
-        opacity: animation,
-        child: SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(0, 0.03),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          )),
-          child: child,
-        ),
-      ),
+      switchOutCurve: Curves.easeOutCubic,
+      transitionBuilder: (child, animation) =>
+          FadeTransition(opacity: animation, child: child),
       child: _buildChild(context),
     );
   }
 
   Widget _buildChild(BuildContext context) {
     if (_isLoading && _rootChildren == null) {
-      return KeyedSubtree(
-        key: const ValueKey('file_tree_skeleton'),
-        child: const FileTreeSkeleton(rowCount: 7),
+      return const KeyedSubtree(
+        key: ValueKey('file_tree_loading'),
+        child: FileTreeLoadingPanel(),
       );
     }
 
     if (_rootChildren == null || _rootChildren!.isEmpty) {
       return KeyedSubtree(
         key: const ValueKey('file_tree_empty'),
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Text(
-            'No files',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.outline,
-              fontSize: 12,
-            ),
-          ),
-        ),
+        child: _FileTreeEmptyState(onRefresh: () => _loadRoot()),
       );
     }
 
-    var index = 0;
     final content = SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           for (final folder in _rootChildren!.directories)
-            _FileTreeItemEntrance(
-              index: index++,
-              child: _FileTreeFolder(
-                key: ValueKey('/$folder'),
-                path: '/$folder',
-                name: folder,
-                level: 0,
-              ),
+            _FileTreeFolder(
+              key: ValueKey('/$folder'),
+              path: '/$folder',
+              name: folder,
+              level: 0,
             ),
           for (final linkedFolder in _rootChildren!.linkedDirectories.entries)
-            _FileTreeItemEntrance(
-              index: index++,
-              child: _FileTreeFolder(
-                key: ValueKey('link_${linkedFolder.key}'),
-                path: linkedFolder.value,
-                name: linkedFolder.key,
-                level: 0,
-                isLink: true,
-                parentPath: '/',
-                onLinkDeleted: _scheduleRootReload,
-              ),
+            _FileTreeFolder(
+              key: ValueKey('link_${linkedFolder.key}'),
+              path: linkedFolder.value,
+              name: linkedFolder.key,
+              level: 0,
+              isLink: true,
+              parentPath: '/',
+              onLinkDeleted: _scheduleRootReload,
             ),
           for (final file in _rootChildren!.files)
-            _FileTreeItemEntrance(
-              index: index++,
-              child: _FileTreeFile(
-                key: ValueKey('/$file'),
-                path: '/$file',
-                name: file,
-                level: 0,
-              ),
+            _FileTreeFile(
+              key: ValueKey('/$file'),
+              path: '/$file',
+              name: file,
+              level: 0,
             ),
           for (final linkedFile in _rootChildren!.linkedFiles.entries)
-            _FileTreeItemEntrance(
-              index: index++,
-              child: _FileTreeFile(
-                key: ValueKey('link_${linkedFile.key}'),
-                path: linkedFile.value,
-                name: linkedFile.key,
-                level: 0,
-                isLink: true,
-                parentPath: '/',
-                onLinkDeleted: _scheduleRootReload,
-              ),
+            _FileTreeFile(
+              key: ValueKey('link_${linkedFile.key}'),
+              path: linkedFile.value,
+              name: linkedFile.key,
+              level: 0,
+              isLink: true,
+              parentPath: '/',
+              onLinkDeleted: _scheduleRootReload,
             ),
         ],
       ),
@@ -261,56 +271,58 @@ class _FileTreeState extends State<FileTree> {
   }
 }
 
-class _FileTreeItemEntrance extends StatefulWidget {
-  const _FileTreeItemEntrance({
-    required this.index,
-    required this.child,
-  });
+class _FileTreeEmptyState extends StatelessWidget {
+  const _FileTreeEmptyState({required this.onRefresh});
 
-  final int index;
-  final Widget child;
-
-  @override
-  State<_FileTreeItemEntrance> createState() => _FileTreeItemEntranceState();
-}
-
-class _FileTreeItemEntranceState extends State<_FileTreeItemEntrance>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _animation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 280),
-      vsync: this,
-    );
-    _animation = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOutCubic,
-    );
-    Future.delayed(Duration(milliseconds: widget.index * 25), () {
-      if (mounted) _controller.forward();
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _animation,
-      child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 0.02),
-          end: Offset.zero,
-        ).animate(_animation),
-        child: widget.child,
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: .20),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: scheme.outlineVariant.withValues(alpha: .18),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                CupertinoIcons.folder,
+                size: 28,
+                color: scheme.onSurfaceVariant,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'No files yet',
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Create or import a note to see it here.',
+                textAlign: TextAlign.center,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 10),
+              TextButton.icon(
+                onPressed: onRefresh,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -350,8 +362,6 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
   late Animation<double> _iconTurns;
   late Animation<double> _heightFactor;
 
-  String get _prefKey => 'tree_expanded_${widget.path}';
-
   Timer? _debounceTimer;
 
   @override
@@ -370,7 +380,31 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
       curve: Curves.easeInOut,
     );
 
-    _loadPersistedState();
+    final cachedExpanded = FileTreeCache.instance.peekExpanded(widget.path);
+    if (cachedExpanded == true) {
+      _isExpanded = true;
+      _controller.value = 1.0;
+      final cached = FileTreeCache.instance.peekChildren(widget.path);
+      final cachedLinks =
+          FileTreeCache.instance.peekLinks(widget.path) ?? const {};
+      if (cached != null) {
+        final linkedDirs = <String, String>{};
+        final linkedFiles = <String, String>{};
+        _splitLinks(
+          cachedLinks,
+          linkedDirs: linkedDirs,
+          linkedFiles: linkedFiles,
+        );
+        _children = _filterChildren(
+          cached,
+          linkedDirs: linkedDirs,
+          linkedFiles: linkedFiles,
+        );
+      }
+      _loadChildren(backgroundRefresh: _children != null);
+    } else {
+      _loadPersistedState();
+    }
 
     _folderSubscription = FileManager.fileWriteStream.stream.listen((event) {
       if (!mounted) return;
@@ -413,110 +447,71 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
     if (_debounceTimer?.isActive ?? false) _debounceTimer!.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 300), () {
       if (mounted) {
-        _loadChildren();
+        _loadChildren(backgroundRefresh: true);
       }
     });
   }
 
   Future<void> _loadPersistedState() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      if (mounted) {
-        final wasExpanded = prefs.getBool(_prefKey) ?? false;
-        setState(() {
-          _isExpanded = wasExpanded;
-        });
-
-        if (wasExpanded) {
-          _controller.value = 1.0;
-          _loadChildren();
-        }
-      }
-    } catch (e) {
-
-    }
+      await FileTreeCache.instance.loadExpandedPrefs();
+      if (!mounted) return;
+      final wasExpanded =
+          FileTreeCache.instance.peekExpanded(widget.path) ?? false;
+      if (!wasExpanded) return;
+      setState(() {
+        _isExpanded = true;
+      });
+      _controller.value = 1.0;
+      _loadChildren();
+    } catch (_) {}
   }
 
   Future<void> _savePersistedState() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_prefKey, _isExpanded);
-    } catch (e) {
-
-    }
+    await FileTreeCache.instance.setExpanded(widget.path, _isExpanded);
   }
 
-  Future<void> _loadChildren() async {
-    if (_isLoading) {
+  Future<void> _loadChildren({bool backgroundRefresh = false}) async {
+    if (_isLoading && !backgroundRefresh) {
       _isReloadPending = true;
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-      });
+    if (mounted && _children == null) {
+      setState(() => _isLoading = true);
     }
 
     try {
-      final rawChildren = await FileManager.getChildrenOfDirectory(widget.path);
-
+      final results = await Future.wait([
+        backgroundRefresh
+            ? FileTreeCache.instance.refreshChildren(widget.path)
+            : FileTreeCache.instance.getChildren(widget.path),
+        backgroundRefresh
+            ? FileTreeCache.instance.refreshLinks(widget.path)
+            : FileTreeCache.instance.getLinks(widget.path),
+      ]);
       if (!mounted) return;
 
-      DirectoryChildren? filteredChildren;
-      if (rawChildren != null) {
-
-        var directories = rawChildren.directories
-            .where((d) => !d.startsWith('.'))
-            .toList();
-
-        directories.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-
-        Map<String, String> linkedDirs = {};
-        Map<String, String> linkedFiles = {};
-        try {
-          final links = await FolderLinkManager.getLinks(widget.path);
-          for (final entry in links.entries) {
-            if (entry.value.endsWith('.sbn') ||
-                entry.value.endsWith('.sbn2') ||
-                entry.value.endsWith('.pdf')) {
-              linkedFiles[entry.key] = entry.value;
-            } else {
-              linkedDirs[entry.key] = entry.value;
-            }
-          }
-        } catch (_) {}
-
-        linkedDirs = Map.fromEntries(
-          linkedDirs.entries.toList()..sort(
-            (a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()),
-          ),
-        );
-        linkedFiles = Map.fromEntries(
-          linkedFiles.entries.toList()..sort(
-            (a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()),
-          ),
-        );
-
-        filteredChildren = DirectoryChildren(
-          directories,
-          rawChildren.files.where((f) => !f.startsWith('.')).toList()
-            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase())),
-          linkedDirectories: linkedDirs,
-          linkedFiles: linkedFiles,
-        );
-      }
+      final rawChildren = results[0] as DirectoryChildren?;
+      final links = results[1] as Map<String, String>;
+      final linkedDirs = <String, String>{};
+      final linkedFiles = <String, String>{};
+      _splitLinks(links, linkedDirs: linkedDirs, linkedFiles: linkedFiles);
 
       setState(() {
-        _children = filteredChildren;
+        _children = _filterChildren(
+          rawChildren,
+          linkedDirs: linkedDirs,
+          linkedFiles: linkedFiles,
+        );
         _isLoading = false;
       });
 
       if (_isReloadPending) {
         _isReloadPending = false;
-        _loadChildren();
+        _loadChildren(backgroundRefresh: true);
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         setState(() => _isLoading = false);
       }
@@ -539,7 +534,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
       _isExpanded = !_isExpanded;
       if (_isExpanded) {
         _controller.forward();
-        _loadChildren();
+        _loadChildren(backgroundRefresh: _children != null);
       } else {
         _controller.reverse();
       }
@@ -583,7 +578,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                 RotationTransition(
                   turns: _iconTurns,
                   child: Icon(
-                    CupertinoIcons.chevron_right,
+                    FluentIcons.chevron_right_16_regular,
                     size: 14,
                     color: colorScheme.onSurfaceVariant,
                   ),
@@ -602,24 +597,31 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                       children: [
                         Icon(
                           _isExpanded
-                              ? CupertinoIcons.folder_open
-                              : CupertinoIcons.folder_fill,
-                          size: 18,
+                              ? FluentIcons.folder_open_20_filled
+                              : FluentIcons.folder_20_filled,
+                          size: 20,
                           color: color,
                         ),
                         if (widget.isLink)
                           Positioned(
                             bottom: -2,
-                            left: -2,
+                            right: -4,
                             child: Container(
-                              padding: const EdgeInsets.all(1),
+                              padding: const EdgeInsets.all(2),
                               decoration: BoxDecoration(
                                 color: Theme.of(context).colorScheme.surface,
                                 shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.15),
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 1),
+                                  ),
+                                ],
                               ),
                               child: Icon(
-                                Icons.shortcut,
-                                size: 8,
+                                FluentIcons.link_16_filled,
+                                size: 10,
                                 color: color,
                               ),
                             ),
@@ -631,7 +633,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    widget.name,
+                    _elideFileTreeName(widget.name),
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: _isExpanded
@@ -641,7 +643,9 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                           ? colorScheme.primary
                           : colorScheme.onSurface,
                     ),
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                    softWrap: false,
                   ),
                 ),
               ],
@@ -654,10 +658,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
           child: Builder(
             builder: (context) {
               if (_isLoading && _children == null) {
-                return FileTreeFolderSkeleton(
-                  parentLevel: widget.level,
-                  rowCount: 4,
-                );
+                return FileTreeFolderLoadingRow(parentLevel: widget.level);
               }
 
               if (_children != null) {
@@ -735,11 +736,11 @@ class _FileTreeFile extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final indent = 12.0 + 22.0 + (level * 16.0);
 
-    IconData iconData = Icons.insert_drive_file_outlined;
+    IconData iconData = FluentIcons.document_20_regular;
     if (name.endsWith('.pdf')) {
-      iconData = Icons.picture_as_pdf;
+      iconData = FluentIcons.document_pdf_20_regular;
     } else if (name.endsWith('.sbn') || name.endsWith('.sbn2')) {
-      iconData = Icons.edit_note;
+      iconData = FluentIcons.document_edit_20_regular;
     }
 
     String displayName = name;
@@ -781,20 +782,27 @@ class _FileTreeFile extends StatelessWidget {
             Stack(
               clipBehavior: Clip.none,
               children: [
-                Icon(iconData, size: 18, color: colorScheme.onSurfaceVariant),
+                Icon(iconData, size: 20, color: colorScheme.onSurfaceVariant),
                 if (isLink)
                   Positioned(
                     bottom: -2,
-                    left: -2,
+                    right: -4,
                     child: Container(
-                      padding: const EdgeInsets.all(1),
+                      padding: const EdgeInsets.all(2),
                       decoration: BoxDecoration(
                         color: Theme.of(context).colorScheme.surface,
                         shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.15),
+                            blurRadius: 2,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
                       ),
                       child: Icon(
-                        Icons.shortcut,
-                        size: 8,
+                        FluentIcons.link_16_filled,
+                        size: 10,
                         color: colorScheme.onSurfaceVariant,
                       ),
                     ),
@@ -804,9 +812,11 @@ class _FileTreeFile extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                displayName,
+                _elideFileTreeName(displayName),
                 style: TextStyle(fontSize: 13, color: colorScheme.onSurface),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                softWrap: false,
               ),
             ),
           ],

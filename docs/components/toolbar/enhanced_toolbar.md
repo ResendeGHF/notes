@@ -34,7 +34,7 @@ Color picker for the toolbar: wheel only + editable hex field (no Primary/Accent
 - `package:flutter_quill/flutter_quill.dart`
 - `package:font_awesome_flutter/font_awesome_flutter.dart`
 - `package:material_symbols_icons/symbols.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/theming/adaptive_alert_dialog.dart`
 - `package:saber/components/toolbar/color_toolbar.dart`
 - `package:saber/components/toolbar/size_picker.dart`

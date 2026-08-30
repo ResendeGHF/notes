@@ -6,7 +6,6 @@ import 'dart:typed_data';
 import 'package:flutter/painting.dart';
 
 class BinaryWriter {
-
   static const double _scale = 1000.0;
 
   final BytesBuilder _buffer = BytesBuilder();
@@ -34,7 +33,6 @@ class BinaryWriter {
   }
 
   void writeScaledFloat(int key, double val) {
-
     int scaledVal = (val * _scale).round();
     _scratch4.setInt32(0, scaledVal, Endian.little);
     _buffer.addByte(key);
@@ -76,7 +74,6 @@ class BinaryWriter {
   }
 
   void writeScaledFloatNoKey(double val) {
-
     int scaledVal = (val * _scale).round();
     _scratch4.setInt32(0, scaledVal, Endian.little);
     _buffer.add(_scratch4.buffer.asUint8List());
@@ -89,6 +86,14 @@ class BinaryWriter {
 
   void writeIntNoKey(int val) {
     _scratch4.setInt32(0, val, Endian.little);
+    _buffer.add(_scratch4.buffer.asUint8List());
+  }
+
+  /// 32-bit unsigned fields (file sizes, FNV-style hashes). [readInt] uses
+  /// signed int32 and mis-reads values with bit 31 set as negative.
+  void writeUint32(int key, int val) {
+    _scratch4.setUint32(0, val, Endian.little);
+    _buffer.addByte(key);
     _buffer.add(_scratch4.buffer.asUint8List());
   }
 
@@ -112,10 +117,21 @@ class BinaryWriter {
 
 class BinaryReader {
   late ByteData _data;
+  ByteData get data => _data;
+  
   int _offset = 0;
 
   BinaryReader(Uint8List buffer) {
     _data = ByteData.sublistView(buffer);
+  }
+
+  int get offset => _offset;
+
+  set offset(int value) {
+    if (value < 0 || value > _data.lengthInBytes) {
+      throw RangeError.range(value, 0, _data.lengthInBytes, 'offset');
+    }
+    _offset = value;
   }
 
   bool get isEOF => _offset >= _data.lengthInBytes;
@@ -172,6 +188,14 @@ class BinaryReader {
   }
 
   int readIntNoKey() => readInt();
+
+  /// Interpret next 4 bytes as unsigned little-endian (0 .. 4294967295).
+  int readUint32() {
+    final val = _data.getUint32(_offset, Endian.little);
+    _offset += 4;
+    return val;
+  }
+
   double readFloatNoKey() => readFloat();
   double readDoubleNoKey() {
     final val = _data.getFloat64(_offset, Endian.little);
@@ -182,7 +206,7 @@ class BinaryReader {
   bool readBoolNoKey() => readBool();
   String readStringNoKey() => readString();
 
-  Color readColor() => Color(readInt());
+  Color readColor() => Color(readUint32());
 }
 
 abstract class SBNBinaryKeys {
@@ -214,6 +238,7 @@ abstract class SBNBinaryKeys {
   static const int notePageOrientation = 18;
 
   static const int noteToolSettings = 19;
+  static const int floatingCalculatorMetadata = 27;
 
   static const int isInfinite = 20;
 
@@ -225,6 +250,9 @@ abstract class SBNBinaryKeys {
   static const int totalTimeSpentEditing = 112;
   static const int totalTimeSpent = 113;
   static const int location = 114;
+
+  /// Stable note identity independent of display path / filename.
+  static const int noteId = 115;
 }
 
 abstract class PageBinaryKeys {
@@ -242,10 +270,8 @@ abstract class PageBinaryKeys {
   static const int lineThickness = 12;
   static const int localFlags = 13;
   static const int pageId = 14;
-  static const int layers =
-      15;
-  static const int activeLayer =
-      16;
+  static const int layers = 15;
+  static const int activeLayer = 16;
   static const int marginLeft = 17;
   static const int marginRight = 18;
   static const int marginTop = 19;
@@ -315,6 +341,18 @@ abstract class StrokeBinaryKeys {
   static const int endCap = 110;
   static const int simulatePressure = 111;
   static const int isComplete = 112;
+  static const int pressureSensitivity = 113;
+  static const int velocityThinning = 114;
+  static const int minSizeRatio = 115;
+  static const int maxSizeRatio = 116;
+
+  /// Packed `"x,y;x,y;..."` absolute control points for [ShapeStroke].
+  static const int shapeControlPoints = 120;
+
+  /// JSON string of [StrokePaint] for textured/gradient fills.
+  static const int strokePaint = 121;
+
   static const int endOptions = 130;
   static const int flatEdge = 42;
+  static const int neon = 43;
 }

@@ -155,7 +155,7 @@ Sets or clears the per-note override for "invert background images in dark mode"
 - `package:flutter/foundation.dart`
 - `package:flutter/material.dart`
 - `package:logging/logging.dart`
-- `package:perfect_freehand/perfect_freehand.dart`
+- `package:saber/data/stroke_geometry/stroke_geometry.dart`
 - `package:saber/components/navbar/responsive_navbar.dart`
 - `package:saber/data/editor/canvas_background_pattern.dart`
 - `package:saber/data/flavor_config.dart`

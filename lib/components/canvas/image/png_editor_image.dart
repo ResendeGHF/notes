@@ -21,9 +21,7 @@ class PngEditorImage extends EditorImage {
   @override
   set isThumbnail(bool isThumbnail) {
     super.isThumbnail = isThumbnail;
-    if (isThumbnail && thumbnailBytes != null) {
-
-    }
+    if (isThumbnail && thumbnailBytes != null) {}
   }
 
   PngEditorImage({
@@ -109,7 +107,6 @@ class PngEditorImage extends EditorImage {
     }
 
     final image = PngEditorImage(
-
       id: json['id'] ?? -1,
       assetCacheAll: assetCacheAll,
       assetId: assetIndex,
@@ -152,19 +149,13 @@ class PngEditorImage extends EditorImage {
   @override
   Map<String, dynamic> toJson() => super.toJson()
     ..addAll({
-      'a': assetCacheAll.getAssetIdOnSave(
-        assetId,
-      ),
+      'a': assetCacheAll.getAssetIdOnSave(assetId),
       'aph': assetCacheAll.getAssetPreviewHash(assetId),
-      'afs': assetCacheAll.getAssetFileSize(
-        assetId,
-      ),
+      'afs': assetCacheAll.getAssetFileSize(assetId),
       if (assetCacheAll.getAssetFileInfo(assetId) != '')
         'ainf': assetCacheAll.getAssetFileInfo(assetId),
       if (assetCacheAll.getAssetHash(assetId) != null)
-        'ah': assetCacheAll.getAssetHash(
-          assetId,
-        ),
+        'ah': assetCacheAll.getAssetHash(assetId),
     });
 
   @override
@@ -179,18 +170,18 @@ class PngEditorImage extends EditorImage {
     }
     writer.writeInt(ImageBinaryKeys.assetId, assetIdToSave);
 
-    writer.writeInt(
+    writer.writeUint32(
       ImageBinaryKeys.previewHash,
       assetCacheAll.getAssetPreviewHash(assetId),
     );
-    writer.writeInt(
+    writer.writeUint32(
       ImageBinaryKeys.fileSize,
       assetCacheAll.getAssetFileSize(assetId),
     );
 
     final fullHash = assetCacheAll.getAssetHash(assetId);
     if (fullHash != null) {
-      writer.writeInt(ImageBinaryKeys.fullHash, fullHash);
+      writer.writeUint32(ImageBinaryKeys.fullHash, fullHash);
     }
 
     final fileInfo = assetCacheAll.getAssetFileInfo(assetId);
@@ -220,18 +211,17 @@ class PngEditorImage extends EditorImage {
         reader.readKey();
         assetId = reader.readIntNoKey();
       } else if (peekKey == 104) {
-
         reader.readKey();
         reader.readDoubleNoKey();
       } else if (peekKey == ImageBinaryKeys.previewHash) {
         reader.readKey();
-        previewHash = reader.readIntNoKey();
+        previewHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileSize) {
         reader.readKey();
-        fileSize = reader.readIntNoKey();
+        fileSize = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fullHash) {
         reader.readKey();
-        fullHash = reader.readIntNoKey();
+        fullHash = reader.readUint32();
       } else if (peekKey == ImageBinaryKeys.fileInfo) {
         reader.readKey();
         fileInfo = reader.readStringNoKey();
@@ -241,7 +231,6 @@ class PngEditorImage extends EditorImage {
     }
 
     if (assetId == null || assetId < 0) {
-
       return PngEditorImage(
         id: imageInfo['id'],
         assetCacheAll: assetCacheAll,
@@ -315,7 +304,6 @@ class PngEditorImage extends EditorImage {
     assert(Isolate.current.debugName == 'main');
 
     if (srcRect.shortestSide == 0 || dstRect.shortestSide == 0) {
-
       final Uint8List bytes;
       if (imageProvider is MemoryImage) {
         bytes = (imageProvider as MemoryImage).bytes;
@@ -348,7 +336,6 @@ class PngEditorImage extends EditorImage {
           height: reducedSize.height.toInt(),
         );
         if (resizedByteData != null) {
-
           final tempImageFile = assetCacheAll.createRuntimeFile(
             '.png',
             resizedByteData.buffer.asUint8List(),
@@ -414,6 +401,18 @@ class PngEditorImage extends EditorImage {
       valueListenable: imageProviderNotifier,
       builder: (context, provider, _) {
         if (provider == null) {
+          final thumb = thumbnailBytes;
+          if (thumb != null && thumb.isNotEmpty) {
+            return InvertWidget(
+              invert: invert,
+              child: Image(
+                image: MemoryImage(thumb),
+                fit: boxFit,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
+              ),
+            );
+          }
           return const SizedBox.shrink();
         }
 
