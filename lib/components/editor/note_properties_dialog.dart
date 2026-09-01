@@ -59,20 +59,26 @@ Future<void> showNotePropertiesDialog(
   showDialog(
     context: context,
     builder: (ctx) => Dialog(
-      backgroundColor: Colors.transparent,
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
       elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(28),
+      ),
       insetPadding: const EdgeInsets.all(24),
-      child: RuggedDialogShell(
-        maxWidth: 520,
-        child: _NotePropertiesDialogContent(
-          coreInfo: coreInfo,
-          creation: creation,
-          modified: modified,
-          accessed: accessed,
-          timeSpentStr: timeSpentStr,
-          timeSpentEditingStr: timeSpentEditingStr,
-          locationStr: locationStr,
-          isDark: isDark,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: _NotePropertiesDialogContent(
+            coreInfo: coreInfo,
+            creation: creation,
+            modified: modified,
+            accessed: accessed,
+            timeSpentStr: timeSpentStr,
+            timeSpentEditingStr: timeSpentEditingStr,
+            locationStr: locationStr,
+            isDark: isDark,
+          ),
         ),
       ),
     ),

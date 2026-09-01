@@ -105,6 +105,7 @@ class _ResponsiveNavbarState extends State<ResponsiveNavbar> {
           ),
           PositionedDirectional(
             bottom: 0,
+            start: 0,
             end: 0,
             child: HorizontalNavbar(
               destinations: HomeRoutes.navigationDestinations,

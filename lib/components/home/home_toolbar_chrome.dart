@@ -30,29 +30,14 @@ BoxDecoration editorSidePanelShellDecoration(
   BuildContext context, {
   required bool isMobile,
 }) {
-  final theme = Theme.of(context);
-  final cs = theme.colorScheme;
-  final isDark = theme.brightness == Brightness.dark;
+  final cs = Theme.of(context).colorScheme;
   return BoxDecoration(
-    color: homeAppBarBackgroundColor(context),
+    color: cs.surface,
     borderRadius: isMobile
         ? BorderRadius.zero
         : const BorderRadius.horizontal(
             left: Radius.circular(kSaberContainerRadius),
           ),
-    border: Border.all(
-      color: cs.outlineVariant.withValues(alpha: isMobile ? 0.14 : 0.2),
-      width: 1,
-    ),
-    boxShadow: isMobile
-        ? null
-        : [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: isDark ? 0.28 : 0.08),
-              blurRadius: 18,
-              offset: const Offset(-4, 0),
-            ),
-          ],
   );
 }
 
@@ -120,23 +105,10 @@ BoxDecoration homeRuggedPanelDecoration(
   BuildContext context, {
   double borderAlpha = 0.18,
 }) {
-  final theme = Theme.of(context);
-  final cs = theme.colorScheme;
-  final isDark = theme.brightness == Brightness.dark;
+  final cs = Theme.of(context).colorScheme;
   return BoxDecoration(
-    color: homeAppBarBackgroundColor(context),
+    color: cs.surfaceContainerLow,
     borderRadius: BorderRadius.circular(kSaberContainerRadius),
-    border: Border.all(
-      color: cs.outlineVariant.withValues(alpha: borderAlpha),
-      width: 1,
-    ),
-    boxShadow: [
-      BoxShadow(
-        color: Colors.black.withValues(alpha: isDark ? 0.22 : 0.06),
-        blurRadius: 10,
-        offset: const Offset(0, 2),
-      ),
-    ],
   );
 }
 
@@ -223,9 +195,14 @@ class HomeGlassIconStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GlassyContainer(
+    final cs = Theme.of(context).colorScheme;
+    return Container(
       height: height,
-      borderRadius: BorderRadius.circular(16),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(100), // M3 Stadium shape
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Center(
         child: Row(
           mainAxisSize: MainAxisSize.min,

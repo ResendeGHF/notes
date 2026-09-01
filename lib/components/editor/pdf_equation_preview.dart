@@ -68,12 +68,7 @@ class PdfEquationPreview extends StatelessWidget {
           child: GestureDetector(
             onTap: onDismiss,
             behavior: HitTestBehavior.opaque,
-            child: ClipRect(
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                child: Container(color: Colors.black.withValues(alpha: 0.4)),
-              ),
-            ),
+            child: Container(color: Colors.black.withValues(alpha: 0.5)),
           ),
         ),
         Center(
@@ -84,19 +79,8 @@ class PdfEquationPreview extends StatelessWidget {
               minHeight: 100,
             ),
             decoration: BoxDecoration(
-              color: colorScheme.surface.withValues(alpha: 0.8),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.1),
-                width: 1,
-              ),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black45,
-                  blurRadius: 20,
-                  spreadRadius: 2,
-                ),
-              ],
+              color: colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(28),
             ),
             clipBehavior: Clip.hardEdge,
             child: Column(

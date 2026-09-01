@@ -13,6 +13,8 @@ analyzer:
   exclude:
     - submodules/**
     - lib/i18n/strings.g.dart
+    - build/**
+    - android/**
 
 linter:
   # The lint rules applied to this project can be customized in the

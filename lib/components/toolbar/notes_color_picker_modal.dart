@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -11,7 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 
-/// Shows a Samsung Notes–style color picker as a floating modal **without**
+/// Shows a Material 3 color picker as a floating modal **without**
 /// dimming the canvas. Anchors near [context]'s render box when possible.
 Future<Color?> showNotesColorPicker(
   BuildContext context, {
@@ -29,9 +30,11 @@ Future<Color?> showNotesColorPicker(
       pageBuilder: (ctx, animation, secondaryAnimation) {
         return FadeTransition(
           opacity: animation,
-          child: _NotesColorPickerHost(
-            initialColor: initialColor,
-            anchorRect: null,
+          child: Center(
+            child: _NotesColorPickerHost(
+              initialColor: initialColor,
+              anchorRect: null,
+            ),
           ),
         );
       },
@@ -334,11 +337,10 @@ class _NotesColorPickerModalState extends State<NotesColorPickerModal> {
     _hexController.text = _hexOf(_color);
   }
 
-  /// Column 0–1 = grayscale; remaining columns = hues (Samsung-style grid).
+  /// Column 0–1 = grayscale; remaining columns = hues.
   Color _swatchAt(int row, int col) {
     final t = _swatchRows <= 1 ? 0.0 : row / (_swatchRows - 1);
     if (col <= 1) {
-      // Two gray columns with a slight offset so they aren't identical.
       final bias = col == 0 ? 0.0 : 0.04;
       final v = (1.0 - t - bias).clamp(0.0, 1.0);
       final c = (v * 255).round();
@@ -367,132 +369,266 @@ class _NotesColorPickerModalState extends State<NotesColorPickerModal> {
     return out.take(length).toList();
   }
 
+  Widget _buildTextField(
+    String label,
+    TextEditingController controller,
+    void Function(String) onChanged, {
+    int? maxLength,
+    TextInputType? keyboardType,
+    List<TextInputFormatter>? formatters,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return TextField(
+      controller: controller,
+      onChanged: onChanged,
+      maxLength: maxLength,
+      keyboardType: keyboardType,
+      inputFormatters: formatters,
+      style: TextStyle(
+        fontSize: 14,
+        color: colorScheme.onSurface,
+        fontFeatures: const [ui.FontFeature.tabularFigures()],
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant),
+        isDense: true,
+        counterText: '',
+        filled: true,
+        fillColor: colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final surface = isDark ? const Color(0xFF2C2C2E) : theme.colorScheme.surface;
-    final onSurface = isDark ? Colors.white : theme.colorScheme.onSurface;
-    final muted = isDark
-        ? Colors.white.withValues(alpha: 0.55)
-        : theme.colorScheme.onSurfaceVariant;
+    final colorScheme = theme.colorScheme;
 
     return Material(
-      color: surface,
-      elevation: 12,
-      shadowColor: Colors.black.withValues(alpha: 0.28),
-      borderRadius: BorderRadius.circular(20),
+      color: colorScheme.surfaceContainerHigh,
+      elevation: 6,
+      shadowColor: Colors.black.withValues(alpha: 0.3),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 340),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _TabBar(
-                    tab: _tab,
-                    onChanged: (t) => setState(() => _tab = t),
-                    isDark: isDark,
-                  ),
-                  const SizedBox(height: 14),
-                  if (_tab == _PickerTab.swatches)
-                    _SwatchGrid(
-                      cols: _swatchCols,
-                      rows: _swatchRows,
-                      colorAt: _swatchAt,
-                      selected: _color,
-                      onSelect: _setColor,
-                    )
-                  else
-                    _SpectrumPane(hsv: _hsv, onChanged: _setHsv),
-                  const SizedBox(height: 14),
-                  _ValueRow(
-                    color: _color,
-                    hexController: _hexController,
-                    rController: _rController,
-                    gController: _gController,
-                    bController: _bController,
-                    muted: muted,
-                    onSurface: onSurface,
-                    onHexChanged: _onHexChanged,
-                    onRgbChanged: _onRgbFieldChanged,
-                  ),
-                  const SizedBox(height: 12),
-                  Divider(
-                    height: 1,
-                    thickness: 1,
-                    color: muted.withValues(alpha: 0.25),
-                  ),
-                  const SizedBox(height: 12),
-                  _RecentRow(
-                    colors: _recentColors,
-                    selected: _color,
-                    muted: muted,
-                    onSelect: _setColor,
-                    onEyedropper: widget.onEyedropper ??
-                        () => setState(() => _tab = _PickerTab.spectrum),
-                  ),
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 1. Aba Segmentada
+              SegmentedButton<_PickerTab>(
+                segments: const [
+                  ButtonSegment(value: _PickerTab.swatches, label: Text('Swatches')),
+                  ButtonSegment(value: _PickerTab.spectrum, label: Text('Spectrum')),
                 ],
+                selected: {_tab},
+                onSelectionChanged: (s) => setState(() => _tab = s.first),
+                showSelectedIcon: false,
               ),
-            ),
-            Divider(
-              height: 1,
-              thickness: 1,
-              color: muted.withValues(alpha: 0.25),
-            ),
-            SizedBox(
-              height: 48,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextButton(
-                      onPressed: () {
-                        if (widget.onCancel != null) {
-                          widget.onCancel!();
-                        } else {
-                          Navigator.of(context).maybePop();
-                        }
-                      },
-                      child: Text(
-                        t.common.cancel,
-                        style: TextStyle(
-                          color: onSurface,
-                          fontWeight: FontWeight.w500,
+              const SizedBox(height: 24),
+
+              // 2. Área de Cores
+              SizedBox(
+                height: 270, // Define the static area height to prevent jumping
+                child: _tab == _PickerTab.swatches
+                    ? GridView.builder(
+                        padding: EdgeInsets.zero,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: _swatchCols,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
                         ),
-                      ),
-                    ),
-                  ),
+                        itemCount: _swatchCols * _swatchRows,
+                        itemBuilder: (context, index) {
+                          final row = index ~/ _swatchCols;
+                          final col = index % _swatchCols;
+                          final c = _swatchAt(row, col);
+                          final isSelected = _color.toARGB32() == c.toARGB32();
+                          final contrastColor = ThemeData.estimateBrightnessForColor(c) == Brightness.dark
+                              ? Colors.white
+                              : Colors.black;
+
+                          return Material(
+                            color: c,
+                            shape: CircleBorder(
+                              side: BorderSide(
+                                color: colorScheme.outline.withValues(alpha: 0.15),
+                                width: 1,
+                              ),
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: InkWell(
+                              onTap: () => _setColor(c),
+                              child: isSelected ? Icon(Icons.check, size: 16, color: contrastColor) : null,
+                            ),
+                          );
+                        },
+                      )
+                    : _SpectrumPane(hsv: _hsv, onChanged: _setHsv),
+              ),
+
+              const SizedBox(height: 24),
+
+              // 3. Área de HEX e RGB
+              Row(
+                children: [
                   Container(
-                    width: 1,
-                    height: double.infinity,
-                    color: muted.withValues(alpha: 0.25),
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: _color,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: colorScheme.outlineVariant),
+                    ),
                   ),
+                  const SizedBox(width: 16),
                   Expanded(
-                    child: TextButton(
-                      onPressed: () {
-                        if (widget.onDone != null) {
-                          widget.onDone!(_color);
-                        } else {
-                          Navigator.of(context).maybePop(_color);
-                        }
-                      },
-                      child: Text(
-                        t.common.done,
-                        style: TextStyle(
-                          color: onSurface,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                    flex: 4,
+                    child: _buildTextField(
+                      'Hex',
+                      _hexController,
+                      _onHexChanged,
+                      maxLength: 6,
+                      formatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9a-fA-F]'))],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 3,
+                    child: _buildTextField(
+                      'R',
+                      _rController,
+                      (_) => _onRgbFieldChanged(),
+                      maxLength: 3,
+                      keyboardType: TextInputType.number,
+                      formatters: [FilteringTextInputFormatter.digitsOnly],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 3,
+                    child: _buildTextField(
+                      'G',
+                      _gController,
+                      (_) => _onRgbFieldChanged(),
+                      maxLength: 3,
+                      keyboardType: TextInputType.number,
+                      formatters: [FilteringTextInputFormatter.digitsOnly],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 3,
+                    child: _buildTextField(
+                      'B',
+                      _bController,
+                      (_) => _onRgbFieldChanged(),
+                      maxLength: 3,
+                      keyboardType: TextInputType.number,
+                      formatters: [FilteringTextInputFormatter.digitsOnly],
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
+
+              const SizedBox(height: 16),
+              Divider(height: 1, color: colorScheme.outlineVariant.withValues(alpha: 0.4)),
+              const SizedBox(height: 16),
+
+              // 4. Área de Cores Recentes e Conta-gotas
+              Row(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: _recentColors.map((c) {
+                          final isSelected = _color.toARGB32() == c.toARGB32();
+                          final contrast = ThemeData.estimateBrightnessForColor(c) == Brightness.dark
+                              ? Colors.white
+                              : Colors.black;
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Material(
+                              color: c,
+                              shape: CircleBorder(
+                                side: BorderSide(
+                                  color: colorScheme.outline.withValues(alpha: 0.15),
+                                  width: 1,
+                                ),
+                              ),
+                              child: InkWell(
+                                onTap: () => _setColor(c),
+                                customBorder: const CircleBorder(),
+                                child: SizedBox(
+                                  width: 32,
+                                  height: 32,
+                                  child: isSelected ? Icon(Icons.check, size: 16, color: contrast) : null,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    height: 32,
+                    width: 1,
+                    color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    onPressed: widget.onEyedropper ?? () => setState(() => _tab = _PickerTab.spectrum),
+                    icon: const Icon(Icons.colorize_rounded),
+                    tooltip: 'Eyedropper',
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 16),
+
+              // 5. Botões de Ação
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () {
+                      if (widget.onCancel != null) {
+                        widget.onCancel!();
+                      } else {
+                        Navigator.of(context).maybePop();
+                      }
+                    },
+                    child: Text(t.common.cancel),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () {
+                      if (widget.onDone != null) {
+                        widget.onDone!(_color);
+                      } else {
+                        Navigator.of(context).maybePop(_color);
+                      }
+                    },
+                    child: Text(t.common.done),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -554,7 +690,6 @@ class _NotesColorPickerHostState extends State<_NotesColorPickerHost> {
   Future<void> _startEyedropper() async {
     if (_capturing || _eyedropping) return;
     final gen = ++_eyedropGen;
-    // Hide the panel first so the capture is of the canvas, not the modal.
     setState(() => _capturing = true);
     await SchedulerBinding.instance.endOfFrame;
     await Future<void>.delayed(Duration.zero);
@@ -591,8 +726,8 @@ class _NotesColorPickerHostState extends State<_NotesColorPickerHost> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
-    const panelWidth = 340.0;
-    const estimatedHeight = 520.0;
+    const panelWidth = 380.0;
+    const estimatedHeight = 560.0;
 
     double left;
     double top;
@@ -804,178 +939,6 @@ class _ScreenEyedropperState extends State<_ScreenEyedropper> {
   }
 }
 
-class _TabBar extends StatelessWidget {
-  const _TabBar({
-    required this.tab,
-    required this.onChanged,
-    required this.isDark,
-  });
-
-  final _PickerTab tab;
-  final ValueChanged<_PickerTab> onChanged;
-  final bool isDark;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1C1C1E) : const Color(0xFFE8E8ED),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _TabChip(
-              label: 'Swatches',
-              selected: tab == _PickerTab.swatches,
-              isDark: isDark,
-              onTap: () => onChanged(_PickerTab.swatches),
-            ),
-          ),
-          Expanded(
-            child: _TabChip(
-              label: 'Spectrum',
-              selected: tab == _PickerTab.spectrum,
-              isDark: isDark,
-              onTap: () => onChanged(_PickerTab.spectrum),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TabChip extends StatelessWidget {
-  const _TabChip({
-    required this.label,
-    required this.selected,
-    required this.isDark,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final bool isDark;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: selected
-          ? (isDark ? const Color(0xFF3A3A3C) : Colors.white)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-              color: selected
-                  ? (isDark ? Colors.white : Colors.black87)
-                  : (isDark
-                        ? Colors.white.withValues(alpha: 0.55)
-                        : Colors.black54),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SwatchGrid extends StatelessWidget {
-  const _SwatchGrid({
-    required this.cols,
-    required this.rows,
-    required this.colorAt,
-    required this.selected,
-    required this.onSelect,
-  });
-
-  final int cols;
-  final int rows;
-  final Color Function(int row, int col) colorAt;
-  final Color selected;
-  final ValueChanged<Color> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: cols / rows,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final cellW = constraints.maxWidth / cols;
-          final cellH = constraints.maxHeight / rows;
-          var bestRow = 0;
-          var bestCol = 0;
-          var bestDist = double.infinity;
-          for (var row = 0; row < rows; row++) {
-            for (var col = 0; col < cols; col++) {
-              final c = colorAt(row, col);
-              final d =
-                  (c.r - selected.r).abs() +
-                  (c.g - selected.g).abs() +
-                  (c.b - selected.b).abs();
-              if (d < bestDist) {
-                bestDist = d;
-                bestRow = row;
-                bestCol = col;
-              }
-            }
-          }
-          return Stack(
-            children: [
-              for (var row = 0; row < rows; row++)
-                for (var col = 0; col < cols; col++)
-                  Positioned(
-                    left: col * cellW,
-                    top: row * cellH,
-                    width: cellW,
-                    height: cellH,
-                    child: Material(
-                      color: colorAt(row, col),
-                      child: InkWell(
-                        onTap: () => onSelect(colorAt(row, col)),
-                      ),
-                    ),
-                  ),
-              if (bestDist <= 0.12)
-                Positioned(
-                  left: bestCol * cellW + 1,
-                  top: bestRow * cellH + 1,
-                  width: cellW - 2,
-                  height: cellH - 2,
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.white, width: 2.5),
-                        borderRadius: BorderRadius.circular(2),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.35),
-                            blurRadius: 2,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
 class _SpectrumPane extends StatelessWidget {
   const _SpectrumPane({required this.hsv, required this.onChanged});
 
@@ -986,8 +949,7 @@ class _SpectrumPane extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        AspectRatio(
-          aspectRatio: 1.15,
+        Expanded(
           child: _SvSquare(
             hue: hsv.hue,
             saturation: hsv.saturation,
@@ -996,9 +958,9 @@ class _SpectrumPane extends StatelessWidget {
                 onChanged(HSVColor.fromAHSV(1, hsv.hue, s, v)),
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         SizedBox(
-          height: 28,
+          height: 36,
           child: _HueBar(
             hue: hsv.hue,
             onChanged: (h) => onChanged(
@@ -1038,30 +1000,36 @@ class _SvSquare extends StatelessWidget {
         return GestureDetector(
           onPanDown: (d) => _update(d.localPosition, size),
           onPanUpdate: (d) => _update(d.localPosition, size),
-          child: CustomPaint(
-            painter: _SvSquarePainter(hue: hue),
-            child: Stack(
-              children: [
-                Positioned(
-                  left: saturation * size.width - 10,
-                  top: (1 - value) * size.height - 10,
-                  child: Container(
-                    width: 20,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2.5),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.35),
-                          blurRadius: 3,
-                        ),
-                      ],
-                    ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: CustomPaint(
+                    painter: _SvSquarePainter(hue: hue),
                   ),
                 ),
-              ],
-            ),
+              ),
+              Positioned(
+                left: saturation * size.width - 14,
+                top: (1 - value) * size.height - 14,
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: HSVColor.fromAHSV(1, hue, saturation, value).toColor(),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 3),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.3),
+                        blurRadius: 4,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -1119,15 +1087,16 @@ class _HueBar extends StatelessWidget {
             child: Align(
               alignment: Alignment((hue / 180) - 1, 0),
               child: Container(
-                width: 6,
+                width: 28,
                 height: 28,
                 decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(2),
+                  color: HSVColor.fromAHSV(1, hue, 1, 1).toColor(),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.35),
-                      blurRadius: 2,
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 4,
                     ),
                   ],
                 ),
@@ -1157,7 +1126,7 @@ class _HueBarPainter extends CustomPainter {
       );
     final r = RRect.fromRectAndRadius(
       Offset.zero & size,
-      const Radius.circular(6),
+      const Radius.circular(18),
     );
     canvas.drawRRect(r, paint);
   }
@@ -1166,235 +1135,60 @@ class _HueBarPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-class _ValueRow extends StatelessWidget {
-  const _ValueRow({
-    required this.color,
-    required this.hexController,
-    required this.rController,
-    required this.gController,
-    required this.bController,
-    required this.muted,
-    required this.onSurface,
-    required this.onHexChanged,
-    required this.onRgbChanged,
+class _PopoverLayoutDelegate extends SingleChildLayoutDelegate {
+  final Offset leaderGlobalPos;
+  final Size leaderSize;
+  final AxisDirection toolbarAlignment;
+  final EdgeInsets safeAreaPadding;
+  final Size screenSize;
+
+  static const double _margin = 12.0;
+  static const double _gap = 8.0;
+
+  _PopoverLayoutDelegate({
+    required this.leaderGlobalPos,
+    required this.leaderSize,
+    required this.toolbarAlignment,
+    required this.safeAreaPadding,
+    required this.screenSize,
   });
 
-  final Color color;
-  final TextEditingController hexController;
-  final TextEditingController rController;
-  final TextEditingController gController;
-  final TextEditingController bController;
-  final Color muted;
-  final Color onSurface;
-  final ValueChanged<String> onHexChanged;
-  final VoidCallback onRgbChanged;
-
   @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 44,
-          height: 36,
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: muted.withValues(alpha: 0.35)),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Row(
-            children: [
-              Expanded(
-                flex: 3,
-                child: _LabeledField(
-                  label: 'Hex',
-                  controller: hexController,
-                  muted: muted,
-                  onSurface: onSurface,
-                  maxLength: 6,
-                  onChanged: onHexChanged,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9a-fA-F]')),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _LabeledField(
-                  label: 'Red',
-                  controller: rController,
-                  muted: muted,
-                  onSurface: onSurface,
-                  maxLength: 3,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) => onRgbChanged(),
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _LabeledField(
-                  label: 'Green',
-                  controller: gController,
-                  muted: muted,
-                  onSurface: onSurface,
-                  maxLength: 3,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) => onRgbChanged(),
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _LabeledField(
-                  label: 'Blue',
-                  controller: bController,
-                  muted: muted,
-                  onSurface: onSurface,
-                  maxLength: 3,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) => onRgbChanged(),
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
+  Offset getPositionForChild(Size size, Size childSize) {
+    var x = 0.0;
+    var y = 0.0;
+
+    switch (toolbarAlignment) {
+      case AxisDirection.up:
+        x = leaderGlobalPos.dx + leaderSize.width / 2 - childSize.width / 2;
+        y = leaderGlobalPos.dy + leaderSize.height + _gap;
+      case AxisDirection.down:
+        x = leaderGlobalPos.dx + leaderSize.width / 2 - childSize.width / 2;
+        y = leaderGlobalPos.dy - childSize.height - _gap;
+      case AxisDirection.left:
+        x = leaderGlobalPos.dx + leaderSize.width + _gap;
+        y = leaderGlobalPos.dy + leaderSize.height / 2 - childSize.height / 2;
+      case AxisDirection.right:
+        x = leaderGlobalPos.dx - childSize.width - _gap;
+        y = leaderGlobalPos.dy + leaderSize.height / 2 - childSize.height / 2;
+    }
+
+    final leftLimit = safeAreaPadding.left + _margin;
+    final rightLimit = screenSize.width - safeAreaPadding.right - _margin;
+    final topLimit = safeAreaPadding.top + _margin;
+    final bottomLimit = screenSize.height - safeAreaPadding.bottom - _margin;
+
+    x = x.clamp(leftLimit, math.max(leftLimit, rightLimit - childSize.width));
+    y = y.clamp(topLimit, math.max(topLimit, bottomLimit - childSize.height));
+
+    return Offset(x, y);
   }
-}
-
-class _LabeledField extends StatelessWidget {
-  const _LabeledField({
-    required this.label,
-    required this.controller,
-    required this.muted,
-    required this.onSurface,
-    required this.onChanged,
-    this.maxLength,
-    this.keyboardType,
-    this.inputFormatters,
-  });
-
-  final String label;
-  final TextEditingController controller;
-  final Color muted;
-  final Color onSurface;
-  final ValueChanged<String> onChanged;
-  final int? maxLength;
-  final TextInputType? keyboardType;
-  final List<TextInputFormatter>? inputFormatters;
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: TextStyle(fontSize: 11, color: muted, height: 1),
-        ),
-        const SizedBox(height: 4),
-        TextField(
-          controller: controller,
-          keyboardType: keyboardType,
-          maxLength: maxLength,
-          inputFormatters: inputFormatters,
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-            color: onSurface,
-            fontFeatures: const [ui.FontFeature.tabularFigures()],
-          ),
-          decoration: const InputDecoration(
-            isDense: true,
-            counterText: '',
-            border: InputBorder.none,
-            contentPadding: EdgeInsets.zero,
-          ),
-          onChanged: onChanged,
-        ),
-      ],
-    );
-  }
-}
-
-class _RecentRow extends StatelessWidget {
-  const _RecentRow({
-    required this.colors,
-    required this.selected,
-    required this.muted,
-    required this.onSelect,
-    required this.onEyedropper,
-  });
-
-  final List<Color> colors;
-  final Color selected;
-  final Color muted;
-  final ValueChanged<Color> onSelect;
-  final VoidCallback onEyedropper;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        for (final c in colors) ...[
-          _RecentDot(
-            color: c,
-            selected: c.toARGB32() == selected.toARGB32(),
-            onTap: () => onSelect(c),
-          ),
-          const SizedBox(width: 10),
-        ],
-        const Spacer(),
-        Material(
-          color: muted.withValues(alpha: 0.12),
-          shape: const CircleBorder(),
-          child: InkWell(
-            customBorder: const CircleBorder(),
-            onTap: onEyedropper,
-            child: SizedBox(
-              width: 36,
-              height: 36,
-              child: Icon(Icons.colorize_rounded, size: 18, color: muted),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _RecentDot extends StatelessWidget {
-  const _RecentDot({
-    required this.color,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final Color color;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: color,
-      shape: CircleBorder(
-        side: BorderSide(
-          color: selected ? Colors.white : Colors.white24,
-          width: selected ? 2.5 : 1,
-        ),
-      ),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: const SizedBox(width: 28, height: 28),
-      ),
-    );
+  bool shouldRelayout(_PopoverLayoutDelegate oldDelegate) {
+    return leaderGlobalPos != oldDelegate.leaderGlobalPos ||
+        leaderSize != oldDelegate.leaderSize ||
+        toolbarAlignment != oldDelegate.toolbarAlignment ||
+        screenSize != oldDelegate.screenSize;
   }
 }

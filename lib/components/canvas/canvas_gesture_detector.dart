@@ -504,15 +504,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                 final center = cWidth * (1 - scale) / 2;
                 adjustmentX = center - translation.x;
               } else {
-                final naturalMargin = leftOffset * scale;
-                
-                double allowedMargin;
-                if (scale < 1.5) {
-                    final t = (scale - 1.0) / 0.5;
-                    allowedMargin = naturalMargin * (1 - t) + min(naturalMargin, 64.0) * t;
-                } else {
-                    allowedMargin = min(naturalMargin, 64.0);
-                }
+                final double allowedMargin = 0.0;
 
                 final maxX = allowedMargin - leftOffset * scale;
                 final minX = cWidth - allowedMargin - leftOffset * scale - scaledPageWidth;

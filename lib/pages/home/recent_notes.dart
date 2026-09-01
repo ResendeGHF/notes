@@ -257,57 +257,27 @@ class _RecentPageState extends State<RecentPage> {
       child: Scaffold(
         extendBody: true,
         appBar: AppBar(
-          toolbarHeight: kToolbarHeight,
-          scrolledUnderElevation: 2,
-          surfaceTintColor: Colors.transparent,
-          shadowColor: Colors.transparent,
-          backgroundColor: homeAppBarBackgroundColor(context),
+          backgroundColor: colorScheme.surface,
+          scrolledUnderElevation: 3,
           titleSpacing: 16,
           title: Row(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Ícone decorativo com fundo colorido
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: colorScheme.primary.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  Icons.history_rounded,
-                  size: 18,
-                  color: colorScheme.primary,
-                ),
-              ),
-              const SizedBox(width: 12),
-              // Título Principal
               Text(
                 t.home.titles.home,
                 style: theme.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: colorScheme.onSurface,
-                  letterSpacing: -0.5,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-              // Badge/Pílula de contagem de arquivos
               if (_loaded && totalFileCount > 0) ...[
                 const SizedBox(width: 12),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  child: Text(
-                    '$totalFileCount itens',
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                Badge(
+                  label: Text('$totalFileCount'),
+                  backgroundColor: colorScheme.secondaryContainer,
+                  textColor: colorScheme.onSecondaryContainer,
+                  largeSize: 24,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
                 ),
               ],
             ],
@@ -405,7 +375,7 @@ class _RecentPageState extends State<RecentPage> {
                             selectedFiles: selectedFiles,
                             animateMutations: false,
                             addAutomaticKeepAlives: true,
-                            showListMetadata: false,
+                            showListMetadata: listMode,
                           ),
                         ),
                       ],
@@ -541,38 +511,25 @@ class _RecentNotesToolbarStrip extends StatelessWidget {
     final colorScheme = theme.colorScheme;
     final actionStyle = homeToolbarCompactIconStyle(context);
 
-    return HomeGlassIconStrip(
+    return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         IconButton(
-          style: actionStyle,
           tooltip: t.home.tooltips.viewMode,
           onPressed: onToggleViewMode,
-          icon: Icon(
-            listMode ? Icons.grid_view_rounded : Icons.view_list_rounded,
-            size: 22,
-          ),
+          icon: Icon(listMode ? Icons.grid_view_rounded : Icons.view_list_rounded),
         ),
         if (showVaultLock) ...[
-          const HomeToolbarDivider(),
+          const SizedBox(width: 4),
           IconButton(
-            style: actionStyle.copyWith(
-              foregroundColor: WidgetStatePropertyAll(colorScheme.primary),
-            ),
+            color: colorScheme.primary,
             tooltip: 'Lock Vault',
             onPressed: onLockVault,
-            icon: const Icon(Icons.power_settings_new, size: 22),
+            icon: const Icon(Icons.power_settings_new),
           ),
         ],
-        const HomeToolbarDivider(),
-        IconTheme.merge(
-          data: IconThemeData(size: 22, color: colorScheme.onSurfaceVariant),
-          child: Theme(
-            data: theme.copyWith(
-              iconButtonTheme: IconButtonThemeData(style: actionStyle),
-            ),
-            child: sortButton,
-          ),
-        ),
+        const SizedBox(width: 4),
+        sortButton,
       ],
     );
   }

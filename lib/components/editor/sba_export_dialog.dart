@@ -6,45 +6,22 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:saber/i18n/strings.g.dart';
 
-Widget _buildGlassmorphicDialog({
+Widget _buildM3Dialog({
   required BuildContext context,
   required Widget child,
 }) {
-  final isDark = Theme.of(context).brightness == Brightness.dark;
   final colorScheme = Theme.of(context).colorScheme;
 
   return Dialog(
-    backgroundColor: Colors.transparent,
+    backgroundColor: colorScheme.surfaceContainerHigh,
     elevation: 0,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(28),
+    ),
     insetPadding: const EdgeInsets.all(24),
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(24),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          width: 420,
-          decoration: BoxDecoration(
-            color: isDark
-                ? const Color(0xFF1C1C1E).withValues(alpha: 0.85)
-                : colorScheme.surface.withValues(alpha: 0.85),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color: isDark
-                  ? Colors.white.withValues(alpha: 0.1)
-                  : colorScheme.outlineVariant.withValues(alpha: 0.4),
-              width: 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.25),
-                blurRadius: 32,
-                offset: const Offset(0, 16),
-              ),
-            ],
-          ),
-          child: child,
-        ),
-      ),
+    child: SizedBox(
+      width: 420,
+      child: child,
     ),
   );
 }
@@ -72,15 +49,15 @@ Future<SbaExportModeResult> showSbaExportModeDialog(
   final isDark = theme.brightness == Brightness.dark;
 
   step1Result = await showDialog<
-      ({bool? useEncryption, bool shareLinks, bool includeExportMetadata})>(
-    context: context,
-    builder: (ctx) {
-      var shareLinks = false;
-      var includeExportMetadata = true;
-      return StatefulBuilder(
-        builder: (context, setState) => _buildGlassmorphicDialog(
-          context: ctx,
-          child: Column(
+          ({bool? useEncryption, bool shareLinks, bool includeExportMetadata})>(
+        context: context,
+        builder: (ctx) {
+          var shareLinks = false;
+          var includeExportMetadata = true;
+          return StatefulBuilder(
+            builder: (context, setState) => _buildM3Dialog(
+              context: ctx,
+              child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -277,7 +254,7 @@ Future<SbaExportModeResult> showSbaExportModeDialog(
     context: context,
     barrierDismissible: false,
     builder: (ctx) => StatefulBuilder(
-      builder: (context, setState) => _buildGlassmorphicDialog(
+      builder: (context, setState) => _buildM3Dialog(
         context: ctx,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -316,11 +293,7 @@ Future<SbaExportModeResult> showSbaExportModeDialog(
                           borderRadius: BorderRadius.circular(12),
                         ),
                         filled: true,
-                        fillColor: isDark
-                            ? Colors.white.withValues(alpha: 0.05)
-                            : colorScheme.surfaceContainerHighest.withValues(
-                                alpha: 0.5,
-                              ),
+                        fillColor: colorScheme.surfaceContainerHighest,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -333,11 +306,7 @@ Future<SbaExportModeResult> showSbaExportModeDialog(
                           borderRadius: BorderRadius.circular(12),
                         ),
                         filled: true,
-                        fillColor: isDark
-                            ? Colors.white.withValues(alpha: 0.05)
-                            : colorScheme.surfaceContainerHighest.withValues(
-                                alpha: 0.5,
-                              ),
+                        fillColor: colorScheme.surfaceContainerHighest,
                       ),
                     ),
                   ],
@@ -431,7 +400,7 @@ Future<String?> showSbaImportPasswordDialog(BuildContext context) async {
     context: context,
     barrierDismissible: false,
     builder: (ctx) => StatefulBuilder(
-      builder: (context, setState) => _buildGlassmorphicDialog(
+      builder: (context, setState) => _buildM3Dialog(
         context: ctx,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -471,11 +440,7 @@ Future<String?> showSbaImportPasswordDialog(BuildContext context) async {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         filled: true,
-                        fillColor: isDark
-                            ? Colors.white.withValues(alpha: 0.05)
-                            : colorScheme.surfaceContainerHighest.withValues(
-                                alpha: 0.5,
-                              ),
+                        fillColor: colorScheme.surfaceContainerHighest,
                       ),
                     ),
                   ],

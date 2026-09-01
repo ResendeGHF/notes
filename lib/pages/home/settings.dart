@@ -447,16 +447,15 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
             ),
-            Container(
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
+            // Material 3 Card style for settings sections
+            Card(
+              elevation: 0,
+              color: colorScheme.surfaceContainerLow,
+              shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-                  width: 1,
-                ),
               ),
               clipBehavior: Clip.antiAlias,
+              margin: EdgeInsets.zero,
               child: Column(
                 children: [
                   for (int i = 0; i < children.length; i++) ...[
@@ -464,7 +463,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     if (i < children.length - 1 && children[i] is! SizedBox)
                       Divider(
                         height: 1,
-                        indent: 56,
+                        indent: 16,
                         endIndent: 16,
                         color: colorScheme.outlineVariant.withValues(
                           alpha: 0.3,
@@ -482,28 +481,15 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       body: CustomScrollView(
         slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.only(bottom: 8),
-            sliver: SliverAppBar(
-              primary: false,
-              collapsedHeight: kToolbarHeight,
-              expandedHeight: 120,
-              pinned: true,
-              scrolledUnderElevation: 1,
-              flexibleSpace: FlexibleSpaceBar(
-                title: Text(
-                  t.home.titles.settings,
-                  style: TextStyle(
-                    color: colorScheme.onSurface,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                centerTitle: false,
-                titlePadding: const EdgeInsetsDirectional.only(
-                  start: 24,
-                  bottom: 16,
-                ),
+          SliverAppBar.large(
+            primary: false,
+            pinned: true,
+            title: Text(
+              t.home.titles.settings,
+              style: TextStyle(
+                color: colorScheme.onSurface,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.5,
               ),
             ),
           ),
@@ -881,6 +867,64 @@ class _SettingsPageState extends State<SettingsPage> {
                 ]),
 
                 buildSection(t.settings.prefCategories.general, [
+                  ValueListenableBuilder<int>(
+                    valueListenable: stows.appAccentColor,
+                    builder: (context, accentValue, _) {
+                      final colors = [
+                        Colors.deepPurple,
+                        Colors.blue,
+                        Colors.teal,
+                        Colors.green,
+                        Colors.yellow.shade700,
+                        Colors.orange,
+                        Colors.red,
+                        Colors.pink,
+                        Colors.grey,
+                      ];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.palette_outlined, color: colorScheme.onSurfaceVariant),
+                                const SizedBox(width: 16),
+                                Text('Accent Color', style: Theme.of(context).textTheme.bodyLarge),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: colors.map((c) {
+                                  final isSelected = accentValue == c.toARGB32();
+                                  return GestureDetector(
+                                    onTap: () => stows.appAccentColor.value = c.toARGB32(),
+                                    child: Container(
+                                      margin: const EdgeInsets.only(right: 12),
+                                      width: 36,
+                                      height: 36,
+                                      decoration: BoxDecoration(
+                                        color: c,
+                                        shape: BoxShape.circle,
+                                        border: isSelected
+                                            ? Border.all(color: colorScheme.onSurface, width: 2)
+                                            : Border.all(color: Colors.transparent, width: 2),
+                                      ),
+                                      child: isSelected
+                                          ? Icon(Icons.check, size: 20, color: c.computeLuminance() > 0.5 ? Colors.black : Colors.white)
+                                          : null,
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
                   SettingsDropdown(
                     title: t.settings.prefLabels.locale,
                     icon: Icons.language,

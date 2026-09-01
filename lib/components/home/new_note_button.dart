@@ -107,30 +107,29 @@ class _NewNoteButtonState extends State<NewNoteButton> {
           : RoundedRectangleBorder(borderRadius: materialBorderRadius),
       dialRoot: (context, open, toggleChildren) {
         final platform = Theme.of(context).platform;
-        return GlassyContainer(
+        final colorScheme = Theme.of(context).colorScheme;
+        return Container(
           height: 56,
-          borderRadius:
-              platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
-              ? null
-              : materialBorderRadius,
-          child: AspectRatio(
-            aspectRatio: 1,
-            child: IconButton(
-              onPressed: toggleChildren,
-              tooltip: t.home.tooltips.newNote,
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                padding: EdgeInsets.zero,
-                shape:
-                    (platform == TargetPlatform.iOS ||
-                        platform == TargetPlatform.macOS)
-                    ? const CircleBorder()
-                    : RoundedRectangleBorder(
-                        borderRadius: materialBorderRadius,
-                      ),
-              ),
-              icon: const Center(child: Icon(Icons.add)),
+          width: 56,
+          decoration: BoxDecoration(
+            color: colorScheme.primaryContainer,
+            borderRadius: platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
+                ? BorderRadius.circular(28)
+                : BorderRadius.circular(16),
+          ),
+          child: IconButton(
+            onPressed: toggleChildren,
+            tooltip: t.home.tooltips.newNote,
+            color: colorScheme.onPrimaryContainer,
+            style: IconButton.styleFrom(
+              padding: EdgeInsets.zero,
+              shape: platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
+                  ? const CircleBorder()
+                  : RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
             ),
+            icon: const Icon(Icons.add),
           ),
         );
       },

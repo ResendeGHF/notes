@@ -1261,13 +1261,17 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
     final isUnary = _op == 'T' || _op == 'RREF' || _op == 'INV';
     final cs = Theme.of(context).colorScheme;
     return Dialog(
-      backgroundColor: Colors.transparent,
+      backgroundColor: cs.surfaceContainerHigh,
       elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(28),
+      ),
       insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
-      child: RuggedDialogShell(
-        maxWidth: 720,
-        padding: const EdgeInsets.all(24),
-        child: SingleChildScrollView(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: SingleChildScrollView(
           child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1471,6 +1475,7 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
             ),
           ),
         ),
+      ),
     );
   }
 }

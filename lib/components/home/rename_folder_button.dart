@@ -131,7 +131,10 @@ class _RenameFolderDialogState extends State<RenameFolderDialog>
               color: Colors.transparent,
               child: Container(
                 width: 320,
-                decoration: homeRuggedPanelDecoration(context),
+                decoration: BoxDecoration(
+                  color: colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(28),
+                ),
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Form(

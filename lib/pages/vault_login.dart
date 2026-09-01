@@ -83,104 +83,138 @@ class _VaultLoginPageState extends State<VaultLoginPage> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
-    final pageBg = theme.scaffoldBackgroundColor;
-
     return Scaffold(
-      backgroundColor: pageBg,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: Center(
-              child: Container(
-                constraints: const BoxConstraints(maxWidth: 400),
+      backgroundColor: colorScheme.surface,
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Card(
+              elevation: 0,
+              color: colorScheme.surfaceContainerLow,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(28),
+              ),
+              child: Padding(
                 padding: const EdgeInsets.all(32),
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-              Icon(Icons.lock, size: 64, color: colorScheme.primary),
-              const SizedBox(height: 32),
-              Text(
-                t.vault.vaultLocked,
-                style: theme.textTheme.headlineMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                t.vault.vaultLockedMessage,
-                style: theme.textTheme.bodyMedium,
-                textAlign: TextAlign.center,
-              ),
-              ValueListenableBuilder<int>(
-                valueListenable: App.pendingImportCount,
-                builder: (context, count, _) {
-                  if (count <= 0) return const SizedBox.shrink();
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        color: colorScheme.primaryContainer,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: colorScheme.primary.withValues(alpha: 0.3),
+                    Center(
+                      child: Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: colorScheme.primaryContainer,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.lock_rounded,
+                          size: 36,
+                          color: colorScheme.onPrimaryContainer,
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.file_download,
-                            color: colorScheme.primary,
-                            size: 24,
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              t.vault.filesWaitingToImport(count: count),
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: colorScheme.onPrimaryContainer,
-                              ),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      t.vault.vaultLocked,
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: colorScheme.onSurface,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      t.vault.vaultLockedMessage,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    ValueListenableBuilder<int>(
+                      valueListenable: App.pendingImportCount,
+                      builder: (context, count, _) {
+                        if (count <= 0) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 20),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colorScheme.secondaryContainer,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.download_rounded,
+                                  color: colorScheme.onSecondaryContainer,
+                                  size: 20,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    t.vault.filesWaitingToImport(count: count),
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: colorScheme.onSecondaryContainer,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ],
-                      ),
+                        );
+                      },
                     ),
-                  );
-                },
-              ),
-              const SizedBox(height: 32),
-              TextField(
-                controller: _passwordController,
-                obscureText: true,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: t.vault.password,
-                  border: const OutlineInputBorder(),
-                  errorText: _error,
-                  suffixIcon: _isLoading
-                      ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : null,
-                ),
-                onSubmitted: (_) => _unlock(),
-              ),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: _isLoading ? null : _unlock,
-                child: Text(t.vault.unlock),
-              ),
+                    const SizedBox(height: 28),
+                    TextField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: t.vault.password,
+                        filled: true,
+                        fillColor: colorScheme.surfaceContainerHighest,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide.none,
+                        ),
+                        errorText: _error,
+                        suffixIcon: _isLoading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              )
+                            : null,
+                      ),
+                      onSubmitted: (_) => _unlock(),
+                    ),
+                    const SizedBox(height: 24),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      onPressed: _isLoading ? null : _unlock,
+                      child: Text(t.vault.unlock),
+                    ),
                   ],
                 ),
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }

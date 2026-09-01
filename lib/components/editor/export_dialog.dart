@@ -313,35 +313,15 @@ class _ExportDialogState extends State<ExportDialog> {
     final isDark = theme.brightness == Brightness.dark;
 
     return Dialog(
-      backgroundColor: Colors.transparent,
+      backgroundColor: colorScheme.surfaceContainerHigh,
       elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(28),
+      ),
       insetPadding: const EdgeInsets.all(24),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(24),
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            width: 420,
-            decoration: BoxDecoration(
-              color: isDark
-                  ? const Color(0xFF1C1C1E).withValues(alpha: 0.85)
-                  : colorScheme.surface.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.1)
-                    : colorScheme.outlineVariant.withValues(alpha: 0.4),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 32,
-                  offset: const Offset(0, 16),
-                ),
-              ],
-            ),
-            child: Column(
+      child: Container(
+        width: 420,
+        child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -623,8 +603,6 @@ class _ExportDialogState extends State<ExportDialog> {
               ],
             ),
           ),
-        ),
-      ),
-    );
+        );
   }
 }

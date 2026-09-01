@@ -204,9 +204,9 @@ class _OutlineTreeRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 7),
       child: Material(
-        color: Colors.transparent,
+        color: cs.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
         child: Ink(
-          decoration: homeRuggedPanelDecoration(context, borderAlpha: 0.14),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [

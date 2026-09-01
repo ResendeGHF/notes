@@ -255,20 +255,12 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
     }
 
     Widget subtleCard({required Widget child}) {
-      return DecoratedBox(
-        decoration: BoxDecoration(
-          color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.22),
+      return Card(
+        elevation: 0,
+        color: colorScheme.surfaceContainerLow,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.20),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: colorScheme.shadow.withValues(alpha: 0.035),
-              blurRadius: 18,
-              offset: const Offset(0, 8),
-            ),
-          ],
         ),
         child: Padding(padding: const EdgeInsets.all(18), child: child),
       );

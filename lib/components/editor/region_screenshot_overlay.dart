@@ -89,9 +89,9 @@ class _RegionScreenshotOverlayState extends State<RegionScreenshotOverlay> {
           right: 12,
           child: SafeArea(
             child: Material(
-              elevation: 2,
-              borderRadius: BorderRadius.circular(10),
-              color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.95),
+              elevation: 0,
+              borderRadius: BorderRadius.circular(12),
+              color: colorScheme.surfaceContainerHighest,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: Row(

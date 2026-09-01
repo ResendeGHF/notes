@@ -61,14 +61,13 @@ class _PdfPagePickerDialogState extends State<PdfPagePickerDialog> {
     final totalPages = widget.pdfDocument.pages.length;
 
     return Dialog(
-      backgroundColor: Colors.transparent,
+      backgroundColor: colorScheme.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(28),
+      ),
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
-      child: Material(
-        color: colorScheme.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(24),
-        elevation: 0,
-        shadowColor: Colors.black38,
-        child: ConstrainedBox(
+      elevation: 0,
+      child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560, maxHeight: 700),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -240,8 +239,7 @@ class _PdfPagePickerDialogState extends State<PdfPagePickerDialog> {
             ],
           ),
         ),
-      ),
-    );
+      );
   }
 }
 

@@ -320,6 +320,8 @@ abstract class StrokeBinaryKeys {
   static const int penType = 5;
   static const int pressureEnabled = 6;
   static const int color = 7;
+  /// Shape fill color (`color + 1`; same numeric value as [cx]).
+  static const int fillColor = color + 1;
   static const int pencilTextureIndex = 15;
   static const int cx = 8;
   static const int cy = 9;

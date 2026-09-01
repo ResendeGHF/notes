@@ -393,7 +393,10 @@ class _SortButtonDialogState extends State<_SortButtonDialog>
             child: Material(
               color: Colors.transparent,
               child: DecoratedBox(
-                decoration: homeRuggedPanelDecoration(context),
+                decoration: BoxDecoration(
+                  color: colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(28),
+                ),
                 child: SizedBox(
                   width: 272,
                   child: Column(

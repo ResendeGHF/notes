@@ -16,6 +16,8 @@ import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/eraser.dart';
+import 'package:saber/data/tools/pen.dart';
 import 'package:saber/services/display_ink_feel.dart';
 
 /// One baked bitmap layer for a page (ink or background).
@@ -24,11 +26,15 @@ final class PageCacheEntry {
     required this.image,
     required this.res,
     required this.generation,
+    this.strokeCount = 0,
   });
 
   final ui.Image image;
   final double res;
   final int generation;
+
+  /// Number of ink strokes rasterized into [image] (for cheap suffix overlays).
+  final int strokeCount;
 }
 
 /// Parameters for rasterizing page background (pattern/grid only).
@@ -299,6 +305,10 @@ final class PageRasterCacheManager {
   int _inkGen(int pageIndex) => _pageInkGeneration[pageIndex] ?? 0;
   int _bgGen(int pageIndex) => _pageBgGeneration[pageIndex] ?? 0;
 
+  /// True while stylus/finger ink or eraser must own the UI isolate.
+  static bool get inkInputBusy =>
+      Pen.currentStroke != null || Eraser.isDragging;
+
   PageCacheEntry? inkForOrSchedule({
     required int pageIndex,
     required Size pageSize,
@@ -328,12 +338,11 @@ final class PageRasterCacheManager {
       inkParams: params,
       forceSchedule: forceSchedule,
     );
-    
 
-    if (existing != null && existing.generation == gen) {
-      return existing;
-    }
-    return null;
+    // Prefer any retained bitmap over a null miss. A miss forces the painter
+    // into a full vector paint of every committed stroke, which starves
+    // stylus sampling and produces "square-ish" interrupted ink.
+    return existing;
   }
 
   PageCacheEntry? backgroundForOrSchedule({
@@ -384,7 +393,7 @@ final class PageRasterCacheManager {
     required PageRasterInkParams inkParams,
     bool forceSchedule = false,
   }) {
-    if (viewportMoving && !forceSchedule) return;
+    if ((viewportMoving || inkInputBusy) && !forceSchedule) return;
     _dropInferiorQueuedJobs(pageIndex: pageIndex, isInk: true, minRes: res);
     final hasQueued = _jobQueue.any(
       (j) => j.isInk && j.pageIndex == pageIndex && j.generation == generation && _resSufficient(j.res, res),
@@ -488,11 +497,19 @@ final class PageRasterCacheManager {
     _bumpRepaint();
   }
 
-  void invalidateInk(int pageIndex) {
+  /// Marks ink stale and schedules a rebake.
+  ///
+  /// By default the previous bitmap is kept so the painter can blit it (plus a
+  /// cheap suffix overlay for newly added strokes) instead of synchronously
+  /// vector-painting the whole page — that path caused stylus lag / square ink.
+  /// Pass [discardStale] when content was removed (eraser/undo) so ghosts do not
+  /// linger.
+  void invalidateInk(int pageIndex, {bool discardStale = false}) {
     _pageInkGeneration[pageIndex] = _inkGen(pageIndex) + 1;
     _cacheGen++;
-    final old = _inkCaches.remove(pageIndex);
-    old?.image.dispose();
+    if (discardStale) {
+      _inkCaches.remove(pageIndex)?.image.dispose();
+    }
     _pendingInk.remove(pageIndex);
     _bumpRepaint();
   }
@@ -679,30 +696,9 @@ final class PageRasterCacheManager {
       hasFullBleedBackground: page.backgroundImage != null,
       forceSchedule: forceSchedule,
     );
-    inkForOrSchedule(
-      pageIndex: pageIndex,
-      pageSize: pageSize,
-      scale: scale,
-      devicePixelRatio: devicePixelRatio,
-      params: PageRasterInkParams(
-        invert: invert,
-        strokes: inkStrokes,
-        page: page,
-        primaryColor: primaryColor,
-        pageIndex: pageIndex,
-        totalPages: coreInfo.pages.length,
-        currentScale: scale,
-        defaultTextStyle: defaultTextStyle,
-        lineHeight: page.hasLocalLineHeight
-            ? page.lineHeight
-            : defaultLineHeight,
-        lineThickness: page.hasLocalLineThickness
-            ? page.lineThickness
-            : defaultLineThickness,
-        lineColor: page.lineColor,
-      ),
-      forceSchedule: forceSchedule,
-    );
+    // We deliberately DO NOT schedule ink here. Whole-page ink toImage() calls 
+    // block the raster thread and cause severe lag/flicker. Ink caching is 
+    // handled efficiently via TiledStrokePictureCache inside InnerCanvas.
   }
 
   void _enqueue(_RasterJob job) {
@@ -715,6 +711,12 @@ final class PageRasterCacheManager {
   Future<void> _processQueue() async {
     _jobRunning = true;
     while (_jobQueue.isNotEmpty && !_disposed) {
+      // Never run CanvasPainter + toImage on the UI isolate mid-stroke —
+      // that is the classic cause of dropped pointer samples / square ink.
+      if (inkInputBusy && !debugForceSyncRaster) {
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+        continue;
+      }
       final job = _jobQueue.removeFirst();
       if (job.cacheGen != _cacheGen) {
         _clearPending(job);
@@ -727,6 +729,11 @@ final class PageRasterCacheManager {
       );
       if (!_resSufficient(job.res, targetRes)) {
         _clearPending(job);
+        continue;
+      }
+      if (inkInputBusy && !debugForceSyncRaster) {
+        _jobQueue.addFirst(job);
+        await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
       }
       final image = await _buildJob(job);
@@ -749,6 +756,7 @@ final class PageRasterCacheManager {
         image: image,
         res: job.res,
         generation: job.generation,
+        strokeCount: job.isInk ? (job.inkParams?.strokes.length ?? 0) : 0,
       );
       if (job.isInk) {
         _inkCaches[job.pageIndex]?.image.dispose();

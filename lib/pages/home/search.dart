@@ -238,13 +238,7 @@ class _SearchPageState extends State<SearchPage> {
                             slivers: [
                               SliverAppBar(
                                 primary: false,
-                                collapsedHeight: kToolbarHeight,
-                                expandedHeight: 100,
                                 pinned: true,
-                                scrolledUnderElevation: 1,
-                                backgroundColor: homeAppBarBackgroundColor(
-                                  context,
-                                ),
                                 leading: null,
                                 title: ValueListenableBuilder<String>(
                                   valueListenable: searchText,

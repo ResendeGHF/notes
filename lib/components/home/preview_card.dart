@@ -4,8 +4,8 @@
 
 import 'dart:async' show Future, StreamSubscription, Timer;
 import 'dart:typed_data';
-import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -19,9 +19,9 @@ import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/home/move_note_button.dart';
 import 'package:saber/components/home/rename_note_button.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
-import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
@@ -48,8 +48,6 @@ class PreviewCard extends StatefulWidget {
   final bool selected;
   final bool isAnythingSelected;
   final bool listMode;
-
-  /// When false, list rows show only thumbnail and name (Recent Notes).
   final bool showListMetadata;
   final String? targetPath;
   final String? linkKey;
@@ -64,7 +62,7 @@ class _PreviewCardState extends State<PreviewCard> {
   final expanded = ValueNotifier(false);
   final thumbnail = _ThumbnailState();
   NoteListRowStats? _listRowStats;
-  bool _listRowStatsLoading = false;
+  bool _listRowStatsLoading = true;
 
   @override
   void initState() {
@@ -145,8 +143,6 @@ class _PreviewCardState extends State<PreviewCard> {
   void fileWriteListener(FileOperation event) {
     if (event.filePath != widget.filePath) return;
     if (event.type == FileOperationType.delete) {
-      // Watcher delete (removal == null) is often a rewrite. Do not flash
-      // delete chrome or drop the cached thumbnail.
       if (event.removal == null) return;
       ThumbnailCache.instance.invalidate(widget.filePath);
       switch (event.removal) {
@@ -175,9 +171,6 @@ class _PreviewCardState extends State<PreviewCard> {
   Future<void> _loadListRowStats() async {
     if (!widget.listMode || !widget.showListMetadata || !mounted) return;
     final base = widget.targetPath ?? widget.filePath;
-    setState(() {
-      _listRowStatsLoading = true;
-    });
     final stats = await FileManager.getNoteListRowStats(base);
     if (!mounted) return;
     setState(() {
@@ -186,60 +179,7 @@ class _PreviewCardState extends State<PreviewCard> {
     });
   }
 
-  Widget _buildListStatsMeta(ThemeData theme, ColorScheme colorScheme) {
-    final fl = t.home.fileList;
-
-    if (_listRowStatsLoading) {
-      return SizedBox(
-        height: 26,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: SizedBox(
-            height: 16,
-            width: 16,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: colorScheme.primary.withValues(alpha: 0.85),
-            ),
-          ),
-        ),
-      );
-    }
-    final s = _listRowStats;
-    if (s == null) {
-      return const HomeListMetaChip(
-        icon: Icons.info_outline_rounded,
-        text: 'Metadata unavailable',
-        tooltip: 'Metadata unavailable',
-      );
-    }
-
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: [
-        HomeListMetaChip(
-          icon: Icons.sd_storage_outlined,
-          text: formatHomeListBytes(s.sizeBytes),
-          tooltip: fl.metaSize,
-        ),
-        HomeListMetaChip(
-          icon: Icons.event_note_outlined,
-          text: s.created != null
-              ? formatHomeListDate(context, s.created!)
-              : '—',
-          tooltip: 'Created',
-        ),
-        HomeListMetaChip(
-          icon: Icons.edit_calendar_outlined,
-          text: s.modified != null
-              ? formatHomeListDate(context, s.modified!)
-              : '—',
-          tooltip: fl.metaModified,
-        ),
-      ],
-    );
-  }
+  
 
   void _toggleCardSelection() {
     final newSelected = !widget.selected;
@@ -247,31 +187,39 @@ class _PreviewCardState extends State<PreviewCard> {
     widget.toggleSelection(widget.filePath, newSelected);
   }
 
-  void _showContextMenu() async {
+  void _showContextMenu([Offset? globalPosition]) async {
     final isLink = widget.linkKey != null;
-    final RenderBox button = context.findRenderObject() as RenderBox;
     final RenderBox overlay =
         Overlay.of(context).context.findRenderObject() as RenderBox;
-    final RelativeRect position = RelativeRect.fromRect(
-      Rect.fromPoints(
-        button.localToGlobal(Offset.zero, ancestor: overlay),
-        button.localToGlobal(
-          button.size.bottomRight(Offset.zero),
-          ancestor: overlay,
+
+    final RelativeRect position;
+    if (globalPosition != null) {
+      position = RelativeRect.fromRect(
+        globalPosition & const Size(40, 40),
+        Offset.zero & overlay.size,
+      );
+    } else {
+      final RenderBox button = context.findRenderObject() as RenderBox;
+      position = RelativeRect.fromRect(
+        Rect.fromPoints(
+          button.localToGlobal(Offset.zero, ancestor: overlay),
+          button.localToGlobal(
+            button.size.bottomRight(Offset.zero),
+            ancestor: overlay,
+          ),
         ),
-      ),
-      Offset.zero & overlay.size,
-    );
+        Offset.zero & overlay.size,
+      );
+    }
 
     final cs = Theme.of(context).colorScheme;
     final String? action = await showMenu<String>(
       context: context,
       position: position,
-      elevation: 4,
-      color: homeAppBarBackgroundColor(context),
+      elevation: 3,
+      color: cs.surfaceContainerHigh,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(kSaberContainerRadius),
-        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.18)),
+        borderRadius: BorderRadius.circular(16),
       ),
       items: isLink
           ? [
@@ -330,6 +278,7 @@ class _PreviewCardState extends State<PreviewCard> {
                   title: Text(t.home.properties),
                 ),
               ),
+              const PopupMenuDivider(),
               PopupMenuItem(
                 value: 'delete',
                 child: ListTile(
@@ -343,9 +292,8 @@ class _PreviewCardState extends State<PreviewCard> {
             ],
     );
 
-    if (action == null) return;
+    if (action == null || !mounted) return;
 
-    if (!mounted) return;
     switch (action) {
       case 'go_to_file':
         final targetDir = widget.filePath.substring(
@@ -369,8 +317,10 @@ class _PreviewCardState extends State<PreviewCard> {
             unselectNotes: () {},
           ),
         );
+        break;
       case 'duplicate':
         await FileManager.duplicateFile(widget.filePath);
+        break;
       case 'move':
         showDialog(
           context: context,
@@ -379,6 +329,7 @@ class _PreviewCardState extends State<PreviewCard> {
             unselectNotes: () {},
           ),
         );
+        break;
       case 'export':
         final coreInfo = await EditorCoreInfo.loadFromFilePath(widget.filePath);
         if (!mounted) return;
@@ -390,6 +341,7 @@ class _PreviewCardState extends State<PreviewCard> {
             parentContext: context,
           ),
         );
+        break;
       case 'properties':
         final ext =
             (await FileManager.doesFileExist(
@@ -444,6 +396,7 @@ class _PreviewCardState extends State<PreviewCard> {
             ),
           ),
         );
+        break;
       case 'delete':
         if (isLink && widget.onDeleteLink != null) {
           await widget.onDeleteLink!(widget.linkKey!);
@@ -478,6 +431,7 @@ class _PreviewCardState extends State<PreviewCard> {
               : Editor.extension;
           await FileManager.deleteFile(widget.filePath + ext);
         }
+        break;
     }
   }
 
@@ -512,334 +466,7 @@ class _PreviewCardState extends State<PreviewCard> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final disableAnimations = MediaQuery.disableAnimationsOf(context);
-    final transitionDuration = Duration(
-      milliseconds: disableAnimations ? 0 : 100,
-    );
     final thumbFade = Duration(milliseconds: disableAnimations ? 0 : 320);
-
-    const invert = false;
-
-    final borderColor = widget.listMode
-        ? Colors.transparent
-        : widget.selected
-        ? colorScheme.primary
-        : colorScheme.outlineVariant.withValues(alpha: 0.5);
-
-    final borderWidth = widget.listMode ? 0.0 : 2.0;
-
-    Widget buildCardContent(VoidCallback openAction) {
-      final isLink = widget.linkKey != null;
-      return MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.isAnythingSelected
-              ? (isLink ? null : _toggleCardSelection)
-              : () async {
-                  if (widget.targetPath != null) {
-                    final target = widget.targetPath!;
-                    bool exists =
-                        await FileManager.doesFileExist(
-                          target + Editor.extension,
-                        ) ||
-                        await FileManager.doesFileExist(
-                          target + Editor.extensionOldJson,
-                        );
-                    if (!exists) {
-                      await FolderLinkManager.showBrokenLinkDialog(context);
-                      if (widget.linkKey != null &&
-                          widget.onDeleteLink != null) {
-                        await widget.onDeleteLink!(widget.linkKey!);
-                      }
-                      return;
-                    }
-                  }
-                  openAction();
-                },
-          onSecondaryTap: widget.isAnythingSelected
-              ? (isLink ? null : _toggleCardSelection)
-              : _showContextMenu,
-          onLongPress: isLink ? _showContextMenu : _toggleCardSelection,
-          child: widget.listMode
-              ? HomeListRowSurface(
-                  selected: widget.selected,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      SizedBox(
-                        width: 68,
-                        height: 84,
-                        child: ListenableBuilder(
-                          listenable: thumbnail,
-                          builder: (context, _) => DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: colorScheme.surfaceContainerLowest,
-                              borderRadius: BorderRadius.circular(13),
-                              border: Border.all(
-                                color: colorScheme.outlineVariant.withValues(
-                                  alpha: 0.32,
-                                ),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(
-                                    alpha: theme.brightness == Brightness.dark
-                                        ? 0.22
-                                        : 0.06,
-                                  ),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: InvertWidget(
-                                invert: invert,
-                                child: _buildThumbnailFace(
-                                  colorScheme,
-                                  duration: thumbFade,
-                                  compact: true,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              widget.linkKey ??
-                                  widget.filePath.substring(
-                                    widget.filePath.lastIndexOf('/') + 1,
-                                  ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 15,
-                                letterSpacing: -0.25,
-                                color: widget.selected
-                                    ? colorScheme.primary
-                                    : colorScheme.onSurface,
-                              ),
-                            ),
-                            if (widget.showListMetadata) ...[
-                              const SizedBox(height: 8),
-                              _buildListStatsMeta(theme, colorScheme),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 100),
-                        transitionBuilder: (child, anim) =>
-                            ScaleTransition(scale: anim, child: child),
-                        child: widget.selected
-                            ? Icon(
-                                Icons.check_circle_rounded,
-                                key: const ValueKey('check'),
-                                color: colorScheme.primary,
-                                size: 24,
-                              )
-                            : Icon(
-                                Icons.chevron_right_rounded,
-                                key: const ValueKey('chevron'),
-                                color: colorScheme.onSurfaceVariant.withValues(
-                                  alpha: 0.48,
-                                ),
-                                size: 24,
-                              ),
-                      ),
-                    ],
-                  ),
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AspectRatio(
-                      aspectRatio: 1 / 1.4,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          ListenableBuilder(
-                            listenable: thumbnail,
-                            builder: (context, _) => DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: colorScheme.surfaceContainerLowest,
-                              ),
-                              child: ClipRRect(
-                                borderRadius: const BorderRadius.vertical(
-                                  top: Radius.circular(
-                                    kSaberContainerRadius / 1.5,
-                                  ),
-                                ),
-                                child: InvertWidget(
-                                  invert: invert,
-                                  child: _buildThumbnailFace(
-                                    colorScheme,
-                                    duration: thumbFade,
-                                    compact: false,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: AnimatedOpacity(
-                                opacity: widget.selected ? 1.0 : 0.0,
-                                duration: const Duration(milliseconds: 100),
-                                curve: Curves.easeOut,
-                                child: ClipRRect(
-                                  borderRadius: const BorderRadius.vertical(
-                                    top: Radius.circular(
-                                      kSaberContainerRadius / 1.5,
-                                    ),
-                                  ),
-                                  child: BackdropFilter(
-                                    filter: ImageFilter.blur(
-                                      sigmaX: 6,
-                                      sigmaY: 6,
-                                    ),
-                                    child: ColoredBox(
-                                      color: colorScheme.surface.withValues(
-                                        alpha: 0.3,
-                                      ),
-                                      child: Center(
-                                        child: TweenAnimationBuilder<double>(
-                                          tween: Tween<double>(
-                                            begin: 0.0,
-                                            end: widget.selected ? 1.0 : 0.0,
-                                          ),
-                                          duration: const Duration(
-                                            milliseconds: 140,
-                                          ),
-                                          curve: Curves.easeOutCubic,
-                                          builder: (context, value, child) {
-                                            return Transform.scale(
-                                              scale: value,
-                                              child: Container(
-                                                decoration: BoxDecoration(
-                                                  color: colorScheme.primary,
-                                                  shape: BoxShape.circle,
-                                                  boxShadow: [
-                                                    BoxShadow(
-                                                      color: colorScheme.primary
-                                                          .withValues(
-                                                            alpha: 0.4,
-                                                          ),
-                                                      blurRadius: 12,
-                                                      spreadRadius: 2,
-                                                    ),
-                                                  ],
-                                                ),
-                                                padding: const EdgeInsets.all(
-                                                  8,
-                                                ),
-                                                child: Icon(
-                                                  Icons.check,
-                                                  color: colorScheme.onPrimary,
-                                                  size: 24,
-                                                ),
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Color.lerp(
-                              colorScheme.surfaceContainerLow,
-                              colorScheme.surface,
-                              0.08,
-                            )!,
-                            colorScheme.surfaceContainerLow,
-                          ],
-                        ),
-                        borderRadius: const BorderRadius.vertical(
-                          bottom: Radius.circular(kSaberContainerRadius / 1.5),
-                        ),
-                        // Removed the buggy Border() property entirely
-                        boxShadow: [
-                          BoxShadow(
-                            color: colorScheme.shadow.withValues(alpha: 0.035),
-                            offset: const Offset(0, -1),
-                            blurRadius: 3,
-                          ),
-                        ],
-                      ),
-                      child: Stack(
-                        children: [
-                          // Independent Top Border Line
-                          Positioned(
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                            child: Container(
-                              height: 1,
-                              color: colorScheme.outlineVariant.withValues(
-                                alpha: 0.1,
-                              ),
-                            ),
-                          ),
-                          // Text Content with static padding
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12.0,
-                              vertical: 10.0,
-                            ),
-                            child: SizedBox(
-                              width: double.infinity,
-                              child: Text(
-                                widget.linkKey ??
-                                    widget.filePath.substring(
-                                      widget.filePath.lastIndexOf('/') + 1,
-                                    ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  fontWeight: FontWeight.w500,
-                                  fontSize: 11,
-                                  letterSpacing: 0.2,
-                                  height: 1.3,
-                                  color: widget.selected
-                                      ? colorScheme.primary
-                                      : colorScheme.onSurfaceVariant.withValues(
-                                          alpha: 0.9,
-                                        ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-        ),
-      );
-    }
 
     String editPath = widget.targetPath ?? widget.filePath;
     if (editPath.endsWith('.sbn2')) {
@@ -853,54 +480,271 @@ class _PreviewCardState extends State<PreviewCard> {
       if (mounted) _refreshThumbnailAfterDelay();
     }
 
-    return RepaintBoundary(
-      child: Hero(
-        tag: 'note_hero_$editPath',
-        child: AnimatedContainer(
-          duration: transitionDuration,
-          curve: Curves.easeOutCubic,
-          decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(
-            widget.listMode ? 14 : kSaberContainerRadius / 1.5,
-          ),
-          border: Border.all(
-            color: borderColor,
-            width: borderWidth,
-            strokeAlign: BorderSide.strokeAlignInside,
-          ),
-          boxShadow: widget.selected && !widget.listMode
-              ? [
-                  BoxShadow(
-                    color: colorScheme.primary.withValues(alpha: 0.25),
-                    blurRadius: 16,
-                    spreadRadius: 0,
+    final isLink = widget.linkKey != null;
+    final noteName = widget.linkKey ??
+        widget.filePath.substring(widget.filePath.lastIndexOf('/') + 1);
+
+    // MODO LISTA (Google Drive / Keep list view style)
+    if (widget.listMode) {
+      final isVault = stows.localEncryptionEnabled.value;
+      final fl = t.home.fileList;
+      
+      return HomeListRowSurface(
+        selected: widget.selected,
+        padding: EdgeInsets.zero,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: widget.isAnythingSelected
+              ? (isLink ? null : _toggleCardSelection)
+              : openAction,
+          onLongPress: isLink ? () => _showContextMenu() : _toggleCardSelection,
+          onSecondaryTap: () => _showContextMenu(),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Miniatura elegante
+                Container(
+                  width: 56,
+                  height: 68,
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerLowest,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: colorScheme.outlineVariant.withValues(alpha: 0.35),
+                    ),
                   ),
-                ]
-              : [],
-        ),
-        child: widget.targetPath != null
-            ? Stack(
-                children: [
-                  buildCardContent(openAction),
-                  Positioned(
-                    bottom: 12,
-                    left: 12,
-                    child: Container(
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: colorScheme.surface.withValues(alpha: 0.8),
-                        shape: BoxShape.circle,
+                  clipBehavior: Clip.antiAlias,
+                  child: InvertWidget(
+                    invert: false,
+                    child: _buildThumbnailFace(
+                      colorScheme,
+                      duration: thumbFade,
+                      compact: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                
+                // Nome da nota (Flex 4)
+                Expanded(
+                  flex: 4,
+                  child: Text(
+                    noteName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14.5,
+                      color: widget.selected
+                          ? colorScheme.primary
+                          : colorScheme.onSurface,
+                    ),
+                  ),
+                ),
+                
+                if (widget.showListMetadata) ...[
+                  // Data de modificação (Flex 2)
+                  Expanded(
+                    flex: 2,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: _listRowStatsLoading 
+                          ? const SizedBox.shrink()
+                          : HomeListMetaChip(
+                              icon: Icons.edit_calendar_outlined,
+                              text: _listRowStats?.modified != null
+                                  ? formatHomeListDate(context, _listRowStats!.modified!)
+                                  : '—',
+                              tooltip: fl.metaModified,
+                            ),
+                    ),
+                  ),
+                  
+                  // Tamanho do arquivo (Flex 2)
+                  Expanded(
+                    flex: 2,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: _listRowStatsLoading
+                          ? const SizedBox.shrink()
+                          : HomeListMetaChip(
+                              icon: Icons.sd_storage_outlined,
+                              text: _listRowStats != null ? formatHomeListBytes(_listRowStats!.sizeBytes) : '—',
+                              tooltip: fl.metaSize,
+                            ),
+                    ),
+                  ),
+                  
+                  // Modo de carregamento do PDF (Flex 2)
+                  if (isVault)
+                    Expanded(
+                      flex: 2,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: HomeListMetaChip(
+                          icon: Icons.security_outlined,
+                          text: getEffectiveVaultPdfLoadMode(widget.targetPath ?? widget.filePath) == 'temp_file' ? 'Disk (Temp)' : 'RAM',
+                          tooltip: 'Vault PDF Load Mode',
+                        ),
                       ),
-                      child: Icon(
-                        Icons.shortcut,
-                        size: 16,
-                        color: colorScheme.onSurface,
+                    ),
+                ],
+                
+                const SizedBox(width: 8),
+                // Ações rápidas ou Checkmark
+                if (widget.selected)
+                  Icon(
+                    Icons.check_circle_rounded,
+                    color: colorScheme.primary,
+                    size: 22,
+                  )
+                else
+                  IconButton(
+                    icon: Icon(
+                      Icons.more_vert_rounded,
+                      size: 20,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    onPressed: () => _showContextMenu(),
+                    tooltip: 'More actions',
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // MODO GRADE (Google Keep Card Style)
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      color: widget.selected
+          ? colorScheme.secondaryContainer
+          : colorScheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: widget.selected
+              ? colorScheme.primary
+              : colorScheme.outlineVariant.withValues(alpha: 0.4),
+          width: widget.selected ? 2.0 : 1.0,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: widget.isAnythingSelected
+            ? (isLink ? null : _toggleCardSelection)
+            : openAction,
+        onLongPress: isLink ? () => _showContextMenu() : _toggleCardSelection,
+        onSecondaryTapUp: (details) =>
+            _showContextMenu(details.globalPosition),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Imagem de Pré-visualização
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Container(
+                    color: colorScheme.surfaceContainerLowest,
+                    child: InvertWidget(
+                      invert: false,
+                      child: _buildThumbnailFace(
+                        colorScheme,
+                        duration: thumbFade,
+                        compact: false,
+                      ),
+                    ),
+                  ),
+                  // Seletor Checkmark no Topo Esquerdo (Material 3 standard)
+                  if (widget.selected || widget.isAnythingSelected)
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: GestureDetector(
+                        onTap: _toggleCardSelection,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: widget.selected
+                                ? colorScheme.primary
+                                : colorScheme.surface.withValues(alpha: 0.85),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: widget.selected
+                                  ? colorScheme.primary
+                                  : colorScheme.outline.withValues(alpha: 0.5),
+                              width: 1.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.1),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            widget.selected
+                                ? Icons.check
+                                : Icons.circle_outlined,
+                            size: 16,
+                            color: widget.selected
+                                ? colorScheme.onPrimary
+                                : Colors.transparent,
+                          ),
+                        ),
+                      ),
+                    ),
+                  // Indicador de Atalho
+                  if (widget.targetPath != null)
+                    Positioned(
+                      bottom: 8,
+                      right: 8,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: colorScheme.surface.withValues(alpha: 0.85),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.shortcut_rounded,
+                          size: 14,
+                          color: colorScheme.onSurface,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            // Rodapé do Card
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      noteName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: widget.selected
+                            ? colorScheme.onSecondaryContainer
+                            : colorScheme.onSurface,
                       ),
                     ),
                   ),
                 ],
-              )
-            : buildCardContent(openAction),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -919,16 +763,14 @@ class _FallbackThumbnail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return ColoredBox(
-      color: InnerCanvas.defaultBackgroundColor,
+      color: cs.surfaceContainerLowest,
       child: Center(
-        child: Text(
-          t.home.noPreviewAvailable,
-          style: TextTheme.of(context).bodyMedium?.copyWith(
-            color: Stroke.defaultColor.withValues(alpha: 0.7),
-            fontStyle: FontStyle.italic,
-          ),
-          textAlign: TextAlign.center,
+        child: Icon(
+          Icons.notes_rounded,
+          size: 36,
+          color: cs.onSurfaceVariant.withValues(alpha: 0.25),
         ),
       ),
     );
@@ -960,7 +802,7 @@ class _ThumbnailChrome extends StatelessWidget {
       child: Center(
         child: Icon(
           icon,
-          size: compact ? 26 : 40,
+          size: compact ? 22 : 36,
           color: cs.onSurfaceVariant.withValues(alpha: 0.88),
         ),
       ),
@@ -1052,7 +894,7 @@ class _ThumbnailFaceState extends State<_ThumbnailFace>
       image: image,
       fit: BoxFit.cover,
       gaplessPlayback: true,
-      filterQuality: FilterQuality.low,
+      filterQuality: FilterQuality.medium,
       width: double.infinity,
       height: double.infinity,
     );
@@ -1109,7 +951,7 @@ class _ThumbnailState extends ChangeNotifier {
   ImageProvider? get image => _image;
 
   void setBytes(Uint8List bytes) {
-    if (_bytes != null && _bytes!.length == bytes.length && _bytes == bytes) {
+    if (_bytes != null && _bytes!.length == bytes.length && listEquals(_bytes, bytes)) {
       if (_chrome != _ThumbChrome.none) {
         _chrome = _ThumbChrome.none;
         notifyListeners();

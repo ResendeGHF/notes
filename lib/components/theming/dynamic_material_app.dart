@@ -15,6 +15,7 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/extensions/redirecting_localization_delegate.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 
 class DynamicMaterialApp extends StatefulWidget {
   const DynamicMaterialApp({
@@ -62,6 +63,7 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
   void initState() {
     stows.appTheme.addListener(onChanged);
     stows.hyperlegibleFont.addListener(onChanged);
+    stows.appAccentColor.addListener(onChanged);
 
     windowManager.addListener(this);
     SystemChrome.setSystemUIChangeCallback(_onFullscreenChange);
@@ -92,25 +94,26 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
 
   @override
   Widget build(BuildContext context) {
-    final lightTheme = HuxTheme.lightTheme;
-    final darkTheme = HuxTheme.darkTheme;
+    final seedColor = Color(stows.appAccentColor.value);
+    final platform = Theme.of(context).platform;
+
+    final lightTheme = SaberTheme.createThemeFromSeed(
+      seedColor,
+      Brightness.light,
+      platform,
+    );
+    final darkTheme = SaberTheme.createThemeFromSeed(
+      seedColor,
+      Brightness.dark,
+      platform,
+    );
 
     return ExplicitlyThemedApp(
       title: widget.title,
       router: widget.router,
       themeMode: stows.appTheme.value,
-      theme: lightTheme.copyWith(
-        colorScheme: lightTheme.colorScheme.copyWith(
-          primary: Colors.grey,
-          secondary: Colors.grey.shade600,
-        ),
-      ),
-      darkTheme: darkTheme.copyWith(
-        colorScheme: darkTheme.colorScheme.copyWith(
-          primary: Colors.grey.shade300,
-          secondary: Colors.grey.shade400,
-        ),
-      ),
+      theme: lightTheme,
+      darkTheme: darkTheme,
     );
   }
 
@@ -118,6 +121,7 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
   void dispose() {
     stows.appTheme.removeListener(onChanged);
     stows.hyperlegibleFont.removeListener(onChanged);
+    stows.appAccentColor.removeListener(onChanged);
 
     windowManager.removeListener(this);
     SystemChrome.setSystemUIChangeCallback(null);

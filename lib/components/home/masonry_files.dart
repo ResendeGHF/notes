@@ -38,13 +38,8 @@ class MasonryFiles extends StatefulWidget {
   final ValueNotifier<List<String>> selectedFiles;
   final Future<void> Function(String)? onDeleteLink;
 
-  /// Browse/search fade cards in and out. Recent jumps in place with no blink.
   final bool animateMutations;
-
-  /// Off for Recent so off-screen cards dispose and release thumbnail memory.
   final bool addAutomaticKeepAlives;
-
-  /// Browse list rows show size/dates. Recent list rows are thumbnail + name.
   final bool showListMetadata;
 
   @override
@@ -70,8 +65,6 @@ class _MasonryFilesState extends State<MasonryFiles> {
     super.didUpdateWidget(oldWidget);
     final filesChanged = !listEquals(oldWidget.files, widget.files);
     final linksChanged = !mapEquals(oldWidget.linkedFiles, widget.linkedFiles);
-    // Cross-axis / width changes must only rescale cells — do not rebuild the
-    // display list (avoids slot churn when the navbar toggles).
     if (filesChanged || linksChanged) {
       _syncDisplayList();
     }
@@ -133,9 +126,6 @@ class _MasonryFilesState extends State<MasonryFiles> {
       return;
     }
 
-    // At capacity (or any same-size swap), keep the grid slot count stable:
-    // show the new cards plus exiting cards in the trailing slots so we never
-    // grow an extra lonely row while one note fades out and another fades in.
     final pairedSwap = addedKeys.isNotEmpty && removingEntries.isNotEmpty;
 
     if (pairedSwap) {
@@ -145,8 +135,6 @@ class _MasonryFilesState extends State<MasonryFiles> {
       return;
     }
 
-    // Keep exiting cards in their old slots while they fade; survivors sit in
-    // the settled order without sliding every neighbor into place.
     final survivors = newEntries
         .where((e) => !_removingKeys.contains(e.key))
         .toList();
@@ -193,7 +181,6 @@ class _MasonryFilesState extends State<MasonryFiles> {
     if (!mounted) return;
     setState(() {
       _removingKeys.remove(key);
-      // Settle to the authoritative file list once the exit fade ends.
       _displayEntries = _buildEntries(widget.files, widget.linkedFiles);
     });
   }
@@ -246,24 +233,20 @@ class _MasonryFilesState extends State<MasonryFiles> {
     isAnythingSelected.value = widget.selectedFiles.value.isNotEmpty;
 
     return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       sliver: SliverLayoutBuilder(
         builder: (context, constraints) {
-          const spacing = 8.0;
+          const spacing = 12.0;
           final n = widget.crossAxisCount;
           final crossAxisExtent = constraints.crossAxisExtent;
 
           final childAspectRatio = n == 1
               ? crossAxisExtent /
-                    (widget.showListMetadata
-                        ? kHomeListRowGridExtent
-                        : kHomeListRowCompactExtent)
-              : () {
-                  final cellWidth = (crossAxisExtent - (n - 1) * spacing) / n;
-                  final thumbnailHeight = cellWidth * 1.4;
-                  final cardHeight = thumbnailHeight + 36;
-                  return cellWidth / cardHeight;
-                }();
+                  (widget.showListMetadata
+                      ? kHomeListRowGridExtent
+                      : kHomeListRowCompactExtent)
+              : 0.72; // Proporção refinada para cards verticais estilo Google Keep
+
           return SliverGrid(
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: n,

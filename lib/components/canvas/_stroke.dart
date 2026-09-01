@@ -1588,9 +1588,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // when FPS is high (the tip is pulled toward extra interpolated samples).
     final maxStep = math.max(3.2, options.size * 1.05);
     final feelMax = DisplayInkFeel.instance.maxGapFills;
-    final maxFills = _usesLiveCheapSpineMesh
+    var maxFills = _usesLiveCheapSpineMesh
         ? math.min(2, feelMax)
         : feelMax;
+    // After an input stall the stylus can jump far; fill more midpoints so the
+    // recovered segment does not read as a single square-ish chord.
+    if (distance > maxStep * 3) {
+      maxFills = math.max(maxFills, DisplayInkFeel.instance.isLowRefresh ? 4 : 5);
+    }
     final gapFillCount = (distance / maxStep).floor().clamp(0, maxFills);
 
     if (gapFillCount > 1) {
@@ -3356,9 +3361,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     // Same spine simplification live and committed — divergent tolerances popped
     // the mesh (especially caps / tips) between preview and finalized ink.
+    // Optimize tolerance during live drawing to reduce mesh complexity
+    final double effectiveTolerance = toleranceMultiplier;
     final double splineErrorSq =
-        (0.22 * toleranceMultiplier / scale) *
-        (0.22 * toleranceMultiplier / scale);
+        (0.22 * effectiveTolerance / scale) *
+        (0.22 * effectiveTolerance / scale);
 
     // Packed samples stay prediction-free so commit can rebuild without a
     // phantom tail. Live cheap-pen mesh appends the tip so the cap tracks
@@ -3373,13 +3380,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       packed[src.length + 2] = _predictionPressure ?? 0.5;
     }
 
-    final liveCheap = _usesLiveCheapSpineMesh;
     Float32List rawSmooth = _getAdaptiveSpineFast(
       packed,
       splineErrorSq,
       flattenTipSegments: true,
-      flattenEndSegments: liveCheap ? 5 : 2,
-      segStepPx: liveCheap ? 5.2 : 3.4,
+      flattenEndSegments: 2,
+      segStepPx: 3.4,
     );
     final int rawCount = rawSmooth.length ~/ 3;
     if (rawCount < 2) return null;

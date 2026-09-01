@@ -1350,7 +1350,8 @@ class FileManager {
             final bytes = toWrite is Uint8List
                 ? toWrite
                 : Uint8List.fromList(toWrite);
-            dataToWrite = bytes.length >= 256 * 1024
+            // Lower threshold to 64KB to avoid UI thread blocking during autosave
+            dataToWrite = bytes.length >= 64 * 1024
                 ? await compute(_zlibEncodeBytes, bytes)
                 : const ZLibEncoder().encode(bytes);
           }

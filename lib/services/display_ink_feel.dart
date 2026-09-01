@@ -43,8 +43,8 @@ class DisplayInkFeel {
     final hz = _refreshHz;
     if (hz >= 100) return 1.0;
     if (hz >= 80) return 0.85;
-    // Aggressively ease the 1€ filter on battery saver to remove mathematical latency.
-    if (hz <= 72) return 0.12;
+    // ~60 Hz battery saver: ease the 1€ filter so tip lag is less visible.
+    if (hz <= 72) return 0.32;
     return 0.65;
   }
 
@@ -53,8 +53,8 @@ class DisplayInkFeel {
     final hz = _refreshHz;
     if (hz >= 100) return 0.0;
     if (hz >= 80) return 0.006;
-    // Boost lookahead significantly on battery saver to combat OS input latency.
-    if (hz <= 72) return 0.040;
+    // Slightly more than one 60 Hz frame of tip lead.
+    if (hz <= 72) return 0.022;
     return 0.010;
   }
 
@@ -73,8 +73,7 @@ class DisplayInkFeel {
     final hz = _refreshHz;
     if (hz >= 100) return 0.0;
     if (hz >= 80) return 0.35;
-    // Force 100% raw pointer blend on battery saver so the tip matches the physical touch perfectly.
-    if (hz <= 72) return 1.0;
+    if (hz <= 72) return 0.86;
     return 0.55;
   }
 
@@ -110,8 +109,8 @@ class DisplayInkFeel {
     final hz = _refreshHz;
     if (hz >= 100) return 0.0;
     if (hz >= 80) return 0.004;
-    // Increased panning lead to make the canvas stick to the finger despite low polling rate.
-    if (hz <= 72) return 0.028;
+    // ~¾ of a 60 Hz frame of lead from measured pan velocity.
+    if (hz <= 72) return 0.012;
     return 0.007;
   }
 
@@ -132,17 +131,17 @@ class DisplayInkFeel {
   }
 
   /// Delay after pan/zoom stops before rebaking raster LOD / mesh upgrades.
-  /// Aumentado para 200ms-300ms para evitar micro-freezes (rasterização prematura) durante zoom.
+  /// Slightly longer at 60 Hz so settle work does not thrash mid-fling.
   Duration get viewportSettleDelay {
-    if (isLowRefresh) return const Duration(milliseconds: 300);
+    if (isLowRefresh) return const Duration(milliseconds: 250);
     if (_refreshHz < 100) return const Duration(milliseconds: 250);
-    return const Duration(milliseconds: 200);
+    return const Duration(milliseconds: 180);
   }
 
   /// Min interval between transform-driven chrome rebuilds (HUD / scrollbars /
   /// page index) while the viewport is moving at low refresh.
   Duration get chromeThrottleInterval {
-    if (isLowRefresh) return const Duration(milliseconds: 48);
+    if (isLowRefresh) return const Duration(milliseconds: 60);
     return const Duration(milliseconds: 16);
   }
 }

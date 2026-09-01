@@ -483,7 +483,7 @@ class ShapeStroke extends Stroke {
     writer.writeString(StrokeBinaryKeys.shape, 'shapeCustom');
     writer.writeInt(StrokeBinaryKeys.pageIndex, pageIndex);
     writer.writeInt(StrokeBinaryKeys.color, color.toARGB32());
-    writer.writeInt(StrokeBinaryKeys.color + 1, fillColor.toARGB32());
+    writer.writeInt(StrokeBinaryKeys.fillColor, fillColor.toARGB32());
     writer.writeBool(StrokeBinaryKeys.pressureEnabled, fill);
 
     final safeBounds = config.bounds;
@@ -555,7 +555,7 @@ class ShapeStroke extends Stroke {
         case StrokeBinaryKeys.color:
           color = reader.readColor();
           break;
-        case StrokeBinaryKeys.color + 1:
+        case StrokeBinaryKeys.fillColor:
           fillColor = reader.readColor();
           break;
         case StrokeBinaryKeys.pressureEnabled:
@@ -727,7 +727,7 @@ class ShapeStroke extends Stroke {
           reader.readIntNoKey();
           break;
         case StrokeBinaryKeys.color:
-        case StrokeBinaryKeys.color + 1:
+        case StrokeBinaryKeys.fillColor:
           reader.readColor();
           break;
         case StrokeBinaryKeys.pressureEnabled:

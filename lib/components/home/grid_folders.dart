@@ -115,12 +115,9 @@ class _GridFolder extends StatelessWidget {
 
         return Card(
           elevation: 0,
+          color: colorScheme.surfaceContainerLow,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
-            side: BorderSide(
-              color: colorScheme.outlineVariant.withValues(alpha: 0.5),
-              width: 1,
-            ),
           ),
           clipBehavior: Clip.antiAlias,
           child: InkWell(

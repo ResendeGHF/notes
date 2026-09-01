@@ -52,6 +52,12 @@ class Stows {
     volatile: !_isOnMainIsolate,
   );
 
+  final appAccentColor = PlainStow(
+    'appAccentColor',
+    0xFF673AB7, // Colors.deepPurple (Cor Padrão M3)
+    volatile: !_isOnMainIsolate,
+  );
+
   final appTheme = PlainStow(
     'appTheme',
     ThemeMode.system,

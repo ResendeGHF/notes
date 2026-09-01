@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:saber/components/home/home_list_meta_formatters.dart';
 import 'package:saber/components/home/home_list_row_chrome.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 
 /// List-mode folder row aligned with [PreviewCard] list layout: rugged panel,
@@ -96,206 +97,94 @@ class _BrowseFolderListRowState extends State<BrowseFolderListRow> {
     return null;
   }
 
-  DateTime? _resolvedCreated() {
-    final p = _props;
-    if (p == null || p['created_at'] == null) return null;
-    final n = p['created_at'];
-    if (n is int) return DateTime.fromMillisecondsSinceEpoch(n);
-    if (n is num) {
-      return DateTime.fromMillisecondsSinceEpoch(n.toInt());
-    }
-    return null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final fl = t.home.fileList;
+    
+    final count = _resolvedNoteCount();
+    final modified = _resolvedModified();
 
-    Widget metaRow() {
-      if (_loading) {
-        return SizedBox(
-          height: 26,
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: SizedBox(
-              height: 16,
-              width: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: colorScheme.primary.withValues(alpha: 0.85),
-              ),
-            ),
-          ),
-        );
-      }
-
-      final count = _resolvedNoteCount();
-      final sizeBytes = _resolvedTotalSize();
-      final created = _resolvedCreated();
-      final modified = _resolvedModified();
-
-      final countStr = count != null ? '$count' : '—';
-      final sizeStr = sizeBytes != null ? formatHomeListBytes(sizeBytes) : '—';
-      final createdStr = created != null
-          ? formatHomeListDate(context, created)
-          : '—';
-      final modifiedStr = modified != null
-          ? formatHomeListDate(context, modified)
-          : '—';
-
-      return Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          HomeListMetaChip(
-            icon: Icons.sticky_note_2_outlined,
-            text: countStr,
-            tooltip: fl.metaNotesInside,
-          ),
-          HomeListMetaChip(
-            icon: Icons.sd_storage_outlined,
-            text: sizeStr,
-            tooltip: fl.metaSize,
-          ),
-          HomeListMetaChip(
-            icon: Icons.event_note_outlined,
-            text: createdStr,
-            tooltip: 'Created',
-          ),
-          HomeListMetaChip(
-            icon: Icons.edit_calendar_outlined,
-            text: modifiedStr,
-            tooltip: fl.metaModified,
-          ),
-        ],
-      );
-    }
+    final modifiedStr = modified != null
+        ? formatHomeListDate(context, modified)
+        : '--';
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
-      child: GestureDetector(
+      child: InkWell(
         onTap: widget.isManaging ? null : widget.onTap,
-        onLongPressStart: widget.onLongPressStart,
-        child: HomeListRowSurface(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              SizedBox(
-                width: 68,
-                height: 84,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  alignment: Alignment.center,
-                  children: [
-                    Positioned.fill(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: widget.accentColor.withValues(
-                            alpha: theme.brightness == Brightness.dark
-                                ? 0.16
-                                : 0.10,
-                          ),
-                          borderRadius: BorderRadius.circular(13),
-                          border: Border.all(
-                            color: widget.accentColor.withValues(
-                              alpha: theme.brightness == Brightness.dark
-                                  ? 0.30
-                                  : 0.20,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      left: 0,
-                      top: 13,
-                      bottom: 13,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(999),
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              widget.accentColor.withValues(alpha: 0.82),
-                              widget.accentColor.withValues(alpha: 0.38),
-                            ],
-                          ),
-                        ),
-                        child: const SizedBox(width: 4),
-                      ),
-                    ),
-                    Icon(
-                      CupertinoIcons.folder_fill,
-                      color: widget.accentColor,
-                      size: 38,
-                    ),
-                    if (widget.isLink)
-                      Positioned(
-                        bottom: 14,
-                        right: 12,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: colorScheme.surface,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: colorScheme.outlineVariant.withValues(
-                                alpha: 0.30,
-                              ),
-                            ),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(3),
-                            child: Icon(
-                              Icons.shortcut,
-                              size: 12,
-                              color: widget.accentColor,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
+        borderRadius: BorderRadius.circular(16),
+        child: GestureDetector(
+          onLongPressStart: widget.onLongPressStart,
+          behavior: HitTestBehavior.opaque,
+          child: HomeListRowSurface(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    widget.isLink ? Icons.folder_shared_rounded : Icons.folder_rounded,
+                    color: widget.accentColor,
+                    size: 24,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      widget.folderName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                        letterSpacing: -0.25,
-                        color: colorScheme.onSurface,
-                      ),
+                const SizedBox(width: 16),
+                
+                // Name Column
+                Expanded(
+                  flex: 3,
+                  child: Text(
+                    widget.folderName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14.5,
+                      color: colorScheme.onSurface,
                     ),
-                    const SizedBox(height: 8),
-                    metaRow(),
-                  ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              if (widget.isManaging)
-                Icon(
-                  Icons.drag_handle,
-                  color: colorScheme.onSurfaceVariant,
-                  size: 22,
-                )
-              else
-                Icon(
-                  Icons.chevron_right_rounded,
-                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.48),
-                  size: 24,
+                
+                // Date Modified Column (Swapped from Creation to Modification properly)
+                Expanded(
+                  flex: 2,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: HomeListMetaChip(
+                      icon: Icons.edit_calendar_outlined,
+                      text: modifiedStr,
+                      tooltip: 'Date Modified',
+                    ),
+                  ),
                 ),
-            ],
+                
+                // Items/Type Column
+                Expanded(
+                  flex: 1,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: HomeListMetaChip(
+                      icon: Icons.insert_drive_file_outlined,
+                      text: count != null ? '$count' : 'Folder',
+                      tooltip: 'Items Count',
+                    ),
+                  ),
+                ),
+                
+                if (widget.isManaging) ...[
+                  const SizedBox(width: 16),
+                  Icon(
+                    Icons.drag_handle,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),

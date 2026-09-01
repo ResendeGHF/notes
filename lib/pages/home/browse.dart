@@ -1150,14 +1150,8 @@ class _BrowsePageState extends State<BrowsePage> {
                     final isDark =
                         Theme.of(context).brightness == Brightness.dark;
 
-                    return CustomPaint(
-                      painter: _WorkspaceBackgroundPainter(
-                        isDark
-                            // Increased opacity for better depth visibility in dark mode
-                            ? Colors.white.withValues(alpha: 0.12)
-                            // Increased opacity for better depth visibility in light mode
-                            : Colors.black.withValues(alpha: 0.08),
-                      ),
+                    return Container(
+                      color: Theme.of(context).colorScheme.surface,
                       child: RefreshIndicator(
                         onRefresh: () => Future.wait([
                           findChildrenOfPath(),
@@ -1322,6 +1316,7 @@ class _BrowsePageState extends State<BrowsePage> {
                                     crossAxisCount: notesCrossAxisCount,
                                     files: _filteredSearchFiles,
                                     selectedFiles: selectedFiles,
+                                    showListMetadata: listMode,
                                   ),
                                 ),
                             ] else ...[
@@ -1384,9 +1379,9 @@ class _BrowsePageState extends State<BrowsePage> {
                                   if (listMode)
                                     SliverPadding(
                                       padding: const EdgeInsets.fromLTRB(
-                                        16,
+                                        12, // Compensates for HomeListRowSurface horizontal margin
                                         0,
-                                        16,
+                                        12,
                                         4,
                                       ),
                                       sliver: SliverList.separated(
@@ -1481,7 +1476,7 @@ class _BrowsePageState extends State<BrowsePage> {
                                               crossAxisCount: folderGridCount,
                                               mainAxisSpacing: 16,
                                               crossAxisSpacing: 16,
-                                              childAspectRatio: 0.85,
+                                              childAspectRatio: 2.5, // Horizontal folder chips
                                             ),
                                         delegate: SliverChildBuilderDelegate(
                                           (context, index) {
@@ -1539,6 +1534,7 @@ class _BrowsePageState extends State<BrowsePage> {
                                       linkedFiles: children!.linkedFiles,
                                       selectedFiles: selectedFiles,
                                       onDeleteLink: _deleteFolderLink,
+                                      showListMetadata: listMode,
                                     ),
                                   ),
                                 ],
@@ -1642,8 +1638,6 @@ class _BrowsePageState extends State<BrowsePage> {
             ? Color(colorValue)
             : colors.primary;
 
-        final isDark = Theme.of(context).brightness == Brightness.dark;
-
         return TweenAnimationBuilder<double>(
           tween: Tween(begin: 0.0, end: 1.0),
           duration: const Duration(milliseconds: 350),
@@ -1678,133 +1672,52 @@ class _BrowsePageState extends State<BrowsePage> {
               borderRadius: BorderRadius.circular(12),
               splashColor: accentColor.withValues(alpha: 0.1),
               highlightColor: accentColor.withValues(alpha: 0.05),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final scale = (constraints.maxWidth / 180.0).clamp(0.5, 1.5);
-
-                  return Container(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: 8 * scale,
-                      vertical: 12 * scale,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerLowest, // Fundo ultra suave
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: colors.outlineVariant.withValues(alpha: 0.6), // Borda limpa e sutil
+                    width: 1,
+                  ),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Icon(
+                      isLink ? Icons.folder_shared_rounded : Icons.folder_rounded,
+                      size: 32,
+                      color: accentColor,
                     ),
-                    color:
-                        Colors.transparent, // Nenhuma caixa prendendo a pasta
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        // Pasta desenhada diretamente no Flutter (Mac/Windows Desktop Style)
-                        SizedBox(
-                          width: 72 * scale,
-                          height: 56 * scale,
-                          child: Stack(
-                            alignment: Alignment.bottomCenter,
-                            clipBehavior: Clip.none,
-                            children: [
-                              // Aba Traseira da Pasta
-                              Positioned(
-                                top: 0,
-                                left: 0,
-                                right: 28 * scale,
-                                bottom: 10 * scale,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: accentColor.withValues(alpha: 0.5),
-                                    borderRadius: BorderRadius.vertical(
-                                      top: Radius.circular(6 * scale),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              // Aba Frontal da Pasta com Relevo
-                              Positioned(
-                                top: 12 * scale,
-                                left: 0,
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        accentColor.withValues(alpha: 0.75),
-                                        accentColor,
-                                      ],
-                                    ),
-                                    borderRadius: BorderRadius.circular(
-                                      6 * scale,
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: accentColor.withValues(
-                                          alpha: 0.35,
-                                        ),
-                                        blurRadius: 12 * scale,
-                                        offset: Offset(0, 6 * scale),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              if (isLink)
-                                Positioned(
-                                  bottom: -4 * scale,
-                                  left: -4 * scale,
-                                  child: Container(
-                                    padding: EdgeInsets.all(4 * scale),
-                                    decoration: BoxDecoration(
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.surface,
-                                      shape: BoxShape.circle,
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(
-                                            alpha: 0.15,
-                                          ),
-                                          blurRadius: 4,
-                                        ),
-                                      ],
-                                    ),
-                                    child: Icon(
-                                      Icons.shortcut_rounded,
-                                      size: 14 * scale,
-                                      color: accentColor,
-                                    ),
-                                  ),
-                                ),
-                            ],
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            folderName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: colors.onSurface,
+                            ),
                           ),
-                        ),
-                        SizedBox(height: 16 * scale),
-                        Text(
-                          folderName,
-                          maxLines: 2,
-                          textAlign: TextAlign.center,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 13 * scale,
-                            fontWeight: FontWeight.w500,
-                            color: Theme.of(context).colorScheme.onSurface,
-                            height: 1.2,
+                          const SizedBox(height: 2),
+                          Text(
+                            '${_getFolderFileCountFromCache(folderPath)} items',
+                            maxLines: 1,
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: colors.onSurfaceVariant,
+                            ),
                           ),
-                        ),
-                        SizedBox(height: 4 * scale),
-                        Text(
-                          '${_getFolderFileCountFromCache(folderPath)} itens',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 11 * scale,
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  );
-                },
+                  ],
+                ),
               ),
             ),
           ),
@@ -1825,14 +1738,11 @@ class _BrowsePageState extends State<BrowsePage> {
     final colorScheme = Theme.of(context).colorScheme;
     final value = await showMenu<String>(
       context: context,
-      elevation: 4,
+      elevation: 3,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(kSaberContainerRadius),
-        side: BorderSide(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.18),
-        ),
+        borderRadius: BorderRadius.circular(12),
       ),
-      color: homeAppBarBackgroundColor(context),
+      color: colorScheme.surfaceContainerHigh,
       position: RelativeRect.fromRect(
         tapPosition & const Size(40, 40),
         Offset.zero & overlay.size,

@@ -1016,7 +1016,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
         for (int i = 0; i < layer.strokes.length; i++) {
           layer.strokes[i].toBinary(writer);
           // Yield often enough that vault autosave encode never starves input.
-          if ((i & 15) == 0) await Future<void>.delayed(Duration.zero);
+          if ((i & 3) == 0) await Future<void>.delayed(Duration.zero);
         }
         writer.writeIntNoKey(layer.images.length);
         for (final image in layer.images) {
@@ -1035,7 +1035,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
         writer.writeIntNoKey(flatStrokes.length);
         for (int i = 0; i < flatStrokes.length; i++) {
           flatStrokes[i].toBinary(writer);
-          if ((i & 15) == 0) await Future<void>.delayed(Duration.zero);
+          if ((i & 3) == 0) await Future<void>.delayed(Duration.zero);
         }
       }
       if (flatImages.isNotEmpty) {

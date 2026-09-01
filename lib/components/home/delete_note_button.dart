@@ -3,7 +3,7 @@
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:saber/components/theming/glassmorphic_confirm_dialog.dart';
+import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
@@ -50,34 +50,39 @@ class _DeleteNoteDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GlassmorphicConfirmDialog(
-      title: selectedFiles.length == 1
+    return AdaptiveAlertDialog(
+      title: Text(selectedFiles.length == 1
           ? t.home.deleteNote
-          : 'Delete ${selectedFiles.length} notes',
-      subtitle: selectedFiles.length == 1
+          : 'Delete ${selectedFiles.length} notes'),
+      content: Text(selectedFiles.length == 1
           ? 'Are you sure you want to delete this note?'
-          : 'Are you sure you want to delete these ${selectedFiles.length} notes?',
-      confirmText: t.common.delete,
-      cancelText: t.common.cancel,
-      isDestructive: true,
-      onCancel: () => Navigator.of(context).pop(),
-      onConfirm: () async {
-        final filesToDelete = List<String>.from(selectedFiles);
-        unselectNotes();
-        Navigator.of(context).pop();
+          : 'Are you sure you want to delete these ${selectedFiles.length} notes?'),
+      actions: [
+        CupertinoDialogAction(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(t.common.cancel),
+        ),
+        CupertinoDialogAction(
+          isDestructiveAction: true,
+          onPressed: () async {
+            final filesToDelete = List<String>.from(selectedFiles);
+            unselectNotes();
+            Navigator.of(context).pop();
 
-        for (final filePath in filesToDelete) {
-          final ext =
-              await FileManager.doesFileExist(
-                filePath + Editor.extensionOldJson,
-              )
-              ? Editor.extensionOldJson
-              : Editor.extension;
-          await FileManager.deleteFile(filePath + ext);
-        }
+            for (final filePath in filesToDelete) {
+              final ext = await FileManager.doesFileExist(
+                    filePath + Editor.extensionOldJson,
+                  )
+                  ? Editor.extensionOldJson
+                  : Editor.extension;
+              await FileManager.deleteFile(filePath + ext);
+            }
 
-        onDeleted();
-      },
+            onDeleted();
+          },
+          child: Text(t.common.delete),
+        ),
+      ],
     );
   }
 }

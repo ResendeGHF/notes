@@ -36,36 +36,16 @@ Future<({
       )?>(
     context: context,
     builder: (ctx) => Dialog(
-      backgroundColor: Colors.transparent,
+      backgroundColor: colorScheme.surfaceContainerHigh,
       elevation: 0,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-      child: ClipRRect(
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(28),
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            width: 340,
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
-            decoration: BoxDecoration(
-              color: isDark
-                  ? const Color(0xFF1E1E1E).withValues(alpha: 0.7)
-                  : Colors.white.withValues(alpha: 0.8),
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.12)
-                    : colorScheme.outlineVariant.withValues(alpha: 0.35),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12),
-                  blurRadius: 32,
-                  offset: const Offset(0, 16),
-                ),
-              ],
-            ),
-            child: Column(
+      ),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Container(
+        width: 340,
+        padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+        child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -146,9 +126,8 @@ Future<({
             ),
           ),
         ),
-      ),
-    ),
-  );
+      );
+
 
   if (result == null) return null;
 

@@ -324,28 +324,15 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
     showDialog(
       context: hostContext,
       builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
+        backgroundColor: colorScheme.surfaceContainerHigh,
         elevation: 0,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(24),
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-            child: Container(
-              width: 320,
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: isDark
-                    ? const Color(0xFF1C1C1E).withValues(alpha: 0.85)
-                    : colorScheme.surface.withValues(alpha: 0.85),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: isDark
-                      ? Colors.white.withValues(alpha: 0.1)
-                      : colorScheme.outlineVariant.withValues(alpha: 0.4),
-                  width: 1,
-                ),
-              ),
-              child: Column(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(28),
+        ),
+        child: Container(
+          width: 320,
+          padding: const EdgeInsets.all(24),
+          child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -391,9 +378,7 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
               ),
             ),
           ),
-        ),
-      ),
-    );
+        );
   }
 
   Widget _buildOptionBtn({
@@ -410,15 +395,8 @@ class _ExportNoteButtonState extends State<ExportNoteButton> {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
         decoration: BoxDecoration(
-          color: isDark
-              ? Colors.white.withValues(alpha: 0.05)
-              : colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          color: colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.1)
-                : colorScheme.outlineVariant.withValues(alpha: 0.3),
-          ),
         ),
         child: Row(
           children: [

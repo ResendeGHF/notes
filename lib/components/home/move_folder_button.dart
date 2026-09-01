@@ -82,15 +82,10 @@ class _MoveFolderDialogState extends State<MoveFolderDialog> {
 
     final h = (MediaQuery.sizeOf(context).height * 0.52).clamp(320.0, 620.0);
     return AlertDialog(
-      backgroundColor: homeAppBarBackgroundColor(context),
-      surfaceTintColor: Colors.transparent,
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
+      elevation: 0,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(kSaberContainerRadius),
-        side: BorderSide(
-          color: Theme.of(
-            context,
-          ).colorScheme.outlineVariant.withValues(alpha: 0.18),
-        ),
+        borderRadius: BorderRadius.circular(28),
       ),
       title: Text(t.home.moveFolderTo(name: widget.folderName)),
       content: SizedBox(

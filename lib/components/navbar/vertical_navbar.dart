@@ -101,7 +101,7 @@ class _VerticalNavbarState extends State<VerticalNavbar>
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
-    final surfaceColor = isDark ? const Color(0xFF111111) : colorScheme.surface;
+    final surfaceColor = colorScheme.surface;
 
     final rail = Theme(
       data: theme.copyWith(
@@ -297,7 +297,7 @@ class _DestinationRow extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final color = selected
-        ? (isDark ? Colors.white : Colors.black)
+        ? colorScheme.onSecondaryContainer
         : colorScheme.onSurfaceVariant;
     final icon =
         (selected ? destination.selectedIcon : null) ?? destination.icon;
@@ -332,8 +332,8 @@ class _DestinationRow extends StatelessWidget {
                       height: _iconSlot,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: Colors.blueGrey.withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(12),
+                          color: colorScheme.secondaryContainer,
+                          borderRadius: BorderRadius.circular(100), // M3 Stadium shape
                         ),
                       ),
                     ),
@@ -396,14 +396,13 @@ class _TaskCard extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.3),
-          ),
+      child: Card(
+        elevation: 0,
+        color: colorScheme.surfaceContainerHighest,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
         ),
+        margin: EdgeInsets.zero,
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(

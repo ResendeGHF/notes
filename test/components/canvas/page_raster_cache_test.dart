@@ -193,7 +193,7 @@ void main() {
     manager.dispose();
   });
 
-  test('invalidateInk discards in-flight generation', () async {
+  test('invalidateInk keeps stale blit until rebake replaces it', () async {
     final manager = PageRasterCacheManager();
     final page = EditorPage();
     page.strokes.add(testPolylineStroke(toolId: ToolId.ballpointPen));
@@ -214,9 +214,14 @@ void main() {
         defaultTextStyle: const TextStyle(),
       ),
     );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(manager.debugInkCacheCount, 1);
 
     manager.invalidateInk(0);
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+    // Stale bitmap retained so drawing does not fall back to full vector paint.
+    expect(manager.debugInkCacheCount, 1);
+
+    manager.invalidateInk(0, discardStale: true);
     expect(manager.debugInkCacheCount, 0);
     manager.dispose();
   });

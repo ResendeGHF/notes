@@ -4,7 +4,6 @@
 
 import 'dart:async';
 
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -15,8 +14,6 @@ import 'package:saber/data/file_tree_cache.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
 
-/// Max grapheme clusters shown in the navbar file tree; longer names are cut
-/// with "…". Font size stays fixed (no FittedBox scale-down).
 const _kFileTreeNameMaxChars = 64;
 
 String _elideFileTreeName(String name) {
@@ -84,7 +81,6 @@ class _FileTreeState extends State<FileTree> {
   @override
   void initState() {
     super.initState();
-    // Instant paint from cache (warmed by HomeDataCache.preload / prior visit).
     final cached = FileTreeCache.instance.peekChildren('/');
     final cachedLinks = FileTreeCache.instance.peekLinks('/') ?? const {};
     if (cached != null) {
@@ -150,12 +146,12 @@ class _FileTreeState extends State<FileTree> {
       return;
     }
 
-    // Only flash the skeleton when we have nothing to show yet.
     if (mounted && _rootChildren == null && !_isLoading) {
       setState(() => _isLoading = true);
     }
 
     try {
+      await FileTreeCache.instance.loadExpandedPrefs();
       final results = await Future.wait([
         backgroundRefresh
             ? FileTreeCache.instance.refreshChildren('/')
@@ -284,27 +280,27 @@ class _FileTreeEmptyState extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: scheme.surfaceContainerHighest.withValues(alpha: .20),
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: scheme.outlineVariant.withValues(alpha: .18),
+            color: scheme.outlineVariant.withValues(alpha: .30),
           ),
         ),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                CupertinoIcons.folder,
-                size: 28,
-                color: scheme.onSurfaceVariant,
+                Icons.folder_open_rounded,
+                size: 32,
+                color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               Text(
                 'No files yet',
                 style: Theme.of(
                   context,
-                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
               Text(
@@ -314,10 +310,10 @@ class _FileTreeEmptyState extends StatelessWidget {
                   context,
                 ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               TextButton.icon(
                 onPressed: onRefresh,
-                icon: const Icon(Icons.refresh, size: 16),
+                icon: const Icon(Icons.refresh_rounded, size: 18),
                 label: const Text('Refresh'),
               ),
             ],
@@ -561,7 +557,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final indent = 12.0 + (widget.level * 16.0);
+    final indent = 8.0 + (widget.level * 16.0);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -570,7 +566,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
         InkWell(
           onTap: _handleTap,
           onLongPress: _navigateToFolder,
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(6),
           child: Padding(
             padding: EdgeInsets.only(left: indent, right: 8, top: 6, bottom: 6),
             child: Row(
@@ -578,12 +574,12 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                 RotationTransition(
                   turns: _iconTurns,
                   child: Icon(
-                    FluentIcons.chevron_right_16_regular,
-                    size: 14,
+                    Icons.chevron_right_rounded,
+                    size: 20,
                     color: colorScheme.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 4),
                 ValueListenableBuilder<Map<String, int>>(
                   valueListenable: stows.folderColors,
                   builder: (context, colors, _) {
@@ -597,9 +593,9 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                       children: [
                         Icon(
                           _isExpanded
-                              ? FluentIcons.folder_open_20_filled
-                              : FluentIcons.folder_20_filled,
-                          size: 20,
+                              ? Icons.folder_open_rounded
+                              : Icons.folder_rounded,
+                          size: 22,
                           color: color,
                         ),
                         if (widget.isLink)
@@ -609,7 +605,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                             child: Container(
                               padding: const EdgeInsets.all(2),
                               decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.surface,
+                                color: colorScheme.surface,
                                 shape: BoxShape.circle,
                                 boxShadow: [
                                   BoxShadow(
@@ -620,7 +616,7 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                                 ],
                               ),
                               child: Icon(
-                                FluentIcons.link_16_filled,
+                                Icons.shortcut_rounded,
                                 size: 10,
                                 color: color,
                               ),
@@ -630,12 +626,12 @@ class _FileTreeFolderState extends State<_FileTreeFolder>
                     );
                   },
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     _elideFileTreeName(widget.name),
                     style: TextStyle(
-                      fontSize: 13,
+                      fontSize: 13.5,
                       fontWeight: _isExpanded
                           ? FontWeight.w600
                           : FontWeight.w500,
@@ -734,13 +730,13 @@ class _FileTreeFile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final indent = 12.0 + 22.0 + (level * 16.0);
+    final indent = 16.0 + 20.0 + (level * 16.0);
 
-    IconData iconData = FluentIcons.document_20_regular;
+    IconData iconData = Icons.description_outlined;
     if (name.endsWith('.pdf')) {
-      iconData = FluentIcons.document_pdf_20_regular;
+      iconData = Icons.picture_as_pdf_outlined;
     } else if (name.endsWith('.sbn') || name.endsWith('.sbn2')) {
-      iconData = FluentIcons.document_edit_20_regular;
+      iconData = Icons.edit_document;
     }
 
     String displayName = name;
@@ -774,7 +770,7 @@ class _FileTreeFile extends StatelessWidget {
           context.push(RoutePaths.editFilePath(target));
         }
       },
-      borderRadius: BorderRadius.circular(4),
+      borderRadius: BorderRadius.circular(6),
       child: Padding(
         padding: EdgeInsets.only(left: indent, right: 8, top: 6, bottom: 6),
         child: Row(
@@ -790,7 +786,7 @@ class _FileTreeFile extends StatelessWidget {
                     child: Container(
                       padding: const EdgeInsets.all(2),
                       decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surface,
+                        color: colorScheme.surface,
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
@@ -801,7 +797,7 @@ class _FileTreeFile extends StatelessWidget {
                         ],
                       ),
                       child: Icon(
-                        FluentIcons.link_16_filled,
+                        Icons.shortcut_rounded,
                         size: 10,
                         color: colorScheme.onSurfaceVariant,
                       ),
@@ -809,11 +805,15 @@ class _FileTreeFile extends StatelessWidget {
                   ),
               ],
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             Expanded(
               child: Text(
                 _elideFileTreeName(displayName),
-                style: TextStyle(fontSize: 13, color: colorScheme.onSurface),
+                style: TextStyle(
+                  fontSize: 13.5, 
+                  color: colorScheme.onSurface,
+                  fontWeight: FontWeight.w500,
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 softWrap: false,

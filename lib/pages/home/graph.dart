@@ -332,28 +332,24 @@ class _GraphPageState extends State<GraphPage> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: homeAppBarBackgroundColor(context),
-              border: Border(
-                bottom: BorderSide(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.15),
-                ),
-              ),
-            ),
+          Container(
+            color: colorScheme.surface,
             child: SafeArea(
               top: false,
               bottom: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                child: DecoratedBox(
-                  decoration: homeRuggedPanelDecoration(context),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(28),
+                  ),
                   child: Padding(
                     padding: const EdgeInsetsDirectional.fromSTEB(
-                      10,
+                      16,
+                      4,
                       8,
-                      10,
-                      8,
+                      4,
                     ),
                     child: Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
@@ -495,23 +491,18 @@ class _GraphPageState extends State<GraphPage> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          HomeGlassIconStrip(
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                style: homeToolbarCompactIconStyle(context)
-                                    .copyWith(
-                                  foregroundColor: WidgetStatePropertyAll(
-                                    _showFullGraph && _rootPath == null
-                                        ? colorScheme.primary
-                                        : colorScheme.onSurfaceVariant,
-                                  ),
-                                ),
+                                color: _showFullGraph && _rootPath == null
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurfaceVariant,
                                 tooltip: 'Show All Notes',
                                 icon: Icon(
                                   _showFullGraph && _rootPath == null
                                       ? Icons.blur_on
                                       : Icons.blur_circular,
-                                  size: 22,
                                 ),
                                 onPressed: () {
                                   setState(() {
@@ -525,29 +516,14 @@ class _GraphPageState extends State<GraphPage> {
                                   });
                                 },
                               ),
-                              const HomeToolbarDivider(),
+                              const SizedBox(width: 4),
                               IconButton(
-                                style: homeToolbarCompactIconStyle(context)
-                                    .copyWith(
-                                  foregroundColor: WidgetStateProperty
-                                      .resolveWith((states) {
-                                    if (states
-                                        .contains(WidgetState.disabled)) {
-                                      return colorScheme.onSurface.withValues(
-                                        alpha: 0.38,
-                                      );
-                                    }
-                                    return _useTreeView
-                                        ? colorScheme.primary
-                                        : colorScheme.onSurfaceVariant;
-                                  }),
-                                ),
+                                color: _useTreeView
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurfaceVariant,
                                 tooltip: t.home.tooltips.treeView,
                                 icon: Icon(
-                                  _useTreeView
-                                      ? Icons.account_tree
-                                      : Icons.hub,
-                                  size: 22,
+                                  _useTreeView ? Icons.account_tree : Icons.hub,
                                 ),
                                 onPressed: _rootPath == null
                                     ? null
@@ -558,19 +534,17 @@ class _GraphPageState extends State<GraphPage> {
                                         });
                                       },
                               ),
-                              const HomeToolbarDivider(),
+                              const SizedBox(width: 4),
                               IconButton(
-                                style: homeToolbarCompactIconStyle(context),
                                 tooltip: 'Zoom to fit',
                                 onPressed: () => _graphController.zoomToFit(),
-                                icon: const Icon(Icons.fit_screen, size: 22),
+                                icon: const Icon(Icons.fit_screen),
                               ),
-                              const HomeToolbarDivider(),
+                              const SizedBox(width: 4),
                               IconButton(
-                                style: homeToolbarCompactIconStyle(context),
                                 tooltip: 'Refresh',
                                 onPressed: _loadGraph,
-                                icon: const Icon(Icons.refresh, size: 22),
+                                icon: const Icon(Icons.refresh),
                               ),
                             ],
                           ),

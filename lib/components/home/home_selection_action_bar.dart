@@ -15,33 +15,15 @@ class HomeSelectionActionBar extends StatelessWidget {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: homeAppBarBackgroundColor(context),
-        border: Border(
-          top: BorderSide(
-            color: cs.outlineVariant.withValues(alpha: 0.22),
-            width: 1,
-          ),
+    return BottomAppBar(
+      color: cs.surfaceContainer,
+      elevation: 0,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      child: Theme(
+        data: theme.copyWith(
+          iconTheme: IconThemeData(color: cs.primary),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(
-              alpha: theme.brightness == Brightness.dark ? 0.35 : 0.06,
-            ),
-            blurRadius: 14,
-            offset: const Offset(0, -3),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        child: Theme(
-          data: theme.copyWith(
-            iconTheme: IconThemeData(color: cs.primary),
-          ),
-          child: child,
-        ),
+        child: child,
       ),
     );
   }

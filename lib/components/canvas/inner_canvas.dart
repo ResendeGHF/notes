@@ -99,8 +99,6 @@ class InnerCanvas extends StatefulWidget {
     this.onCropRectChanged,
     this.overrideInvert,
     this.pageRasterCache,
-    this.selectionHandlesInteractionMode =
-    SelectionHandlesInteractionMode.resize,
   });
 
   final int? lineHeight;
@@ -143,9 +141,6 @@ class InnerCanvas extends StatefulWidget {
 
   /// Per-editor page ink/background bitmap caches (xnotes-style LOD).
   final PageRasterCacheManager? pageRasterCache;
-
-  /// Visual mode for transform handles (resize vs rotate tap target).
-  final SelectionHandlesInteractionMode selectionHandlesInteractionMode;
 
   static const defaultBackgroundColor = Color(0xFFFCFCFC);
 
@@ -200,8 +195,9 @@ class InnerCanvasState extends State<InnerCanvas> {
   }) {
     if (widget.pageRasterCache != null) {
       _invalidatePageRasterInk(dirty: dirty);
-      return;
     }
+    // We MUST invalidate the tiled cache since we disabled PageRasterCacheManager
+    // for ink. Without this, new strokes won't bake into the tiles.
     if (dirty != null) {
       _strokePictureCache.invalidateRect(
         dirty,
@@ -476,8 +472,6 @@ class InnerCanvasState extends State<InnerCanvas> {
       oldWidget.lineThickness == widget.lineThickness &&
       oldWidget.lineColor == widget.lineColor &&
       oldWidget.textEditing == widget.textEditing &&
-      oldWidget.selectionHandlesInteractionMode ==
-      widget.selectionHandlesInteractionMode &&
       oldWidget.isPreview == widget.isPreview &&
       oldWidget.isPrint == widget.isPrint &&
       identical(oldWidget.eraserDeltaRemoved, widget.eraserDeltaRemoved) &&
@@ -819,18 +813,21 @@ class InnerCanvasState extends State<InnerCanvas> {
     !widget.isPrint &&
     (widget.currentSelection == null || widget.currentSelection!.isEmpty);
 
-    final usePageRasterCache =
+    final usePageRasterCacheBg =
     widget.pageRasterCache != null &&
-    useCachedStrokeLayer &&
     !widget.isPreview &&
     !widget.isPrint;
+    
+    // Disable whole-page raster caching for ink to prevent severe lag spikes
+    // on large pages with many strokes. TiledStrokePictureCache handles it beautifully.
+    final usePageRasterCacheInk = false;
 
-    final committedInkStrokes = usePageRasterCache
+    final committedInkStrokes = usePageRasterCacheInk
     ? committedStrokes
     .where((s) => s.toolId != ToolId.highlighter)
     .toList(growable: false)
     : committedStrokes;
-    final committedHighlighterStrokes = usePageRasterCache
+    final committedHighlighterStrokes = usePageRasterCacheInk
     ? committedStrokes
     .where((s) => s.toolId == ToolId.highlighter)
     .toList(growable: false)
@@ -901,7 +898,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                 key: ValueKey(
                   'bg_${invert}_${page.backgroundPattern?.index}_${page.backgroundColor.value}_${widget.lineHeight}_${widget.lineThickness}_${widget.lineColor?.value}_${page.marginLeft}_${page.marginRight}_${page.marginTop}_${page.marginBottom}_${page.borderColor.value}',
                 ),
-                painter: usePageRasterCache && page.backgroundImage == null
+                painter: usePageRasterCacheBg && page.backgroundImage == null
                 ? _PageRasterBgLayerPainter(
                   repaint: pageRasterRepaint,
                   manager: widget.pageRasterCache!,
@@ -1113,7 +1110,7 @@ class InnerCanvasState extends State<InnerCanvas> {
         ),
 
         // 1º PINTA O HIGHLIGHTER NO FUNDO (CASHED)
-        if (usePageRasterCache && committedHighlighterStrokes.isNotEmpty)
+        if (usePageRasterCacheInk && committedHighlighterStrokes.isNotEmpty)
           IgnorePointer(
             child: RepaintBoundary(
               child: CustomPaint(
@@ -1147,7 +1144,7 @@ class InnerCanvasState extends State<InnerCanvas> {
             child: RepaintBoundary(
               child: CustomPaint(
                 isComplex: true,
-                painter: usePageRasterCache
+                painter: usePageRasterCacheInk
                 ? _PageRasterInkLayerPainter(
                   repaint: Listenable.merge([
                     _layer2Repaint,
@@ -1323,7 +1320,6 @@ class InnerCanvasState extends State<InnerCanvas> {
                     primaryColor: colorScheme.primary,
                     invert: invert,
                     currentScale: widget.currentScale,
-                    interactionMode: widget.selectionHandlesInteractionMode,
                   )
                   : ValueListenableBuilder<int>(
                     valueListenable: widget.interactionRepaintListenable!,
@@ -1334,8 +1330,6 @@ class InnerCanvasState extends State<InnerCanvas> {
                         primaryColor: colorScheme.primary,
                         invert: invert,
                         currentScale: widget.currentScale,
-                        interactionMode:
-                        widget.selectionHandlesInteractionMode,
                       );
                     },
                   ),
@@ -1470,6 +1464,9 @@ class _PageRasterBgLayerPainter extends CustomPainter {
 }
 
 class _PageRasterInkLayerPainter extends CustomPainter {
+  static ui.Picture? _cachedPicture;
+  static int _cachedPictureSignature = 0;
+
   _PageRasterInkLayerPainter({
     required Listenable repaint,
     required this.manager,
@@ -1510,11 +1507,6 @@ class _PageRasterInkLayerPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final idealRes = currentScale * devicePixelRatio;
-    final targetRes = PageRasterCacheManager.clampedRes(
-      currentScale,
-      size,
-      devicePixelRatio: devicePixelRatio,
-    );
     final inkParams = PageRasterInkParams(
       invert: invert,
       strokes: committedStrokes,
@@ -1524,9 +1516,9 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       totalPages: totalPages,
       currentScale: currentScale,
       defaultTextStyle: defaultTextStyle,
-        lineHeight: lineHeight,
-        lineThickness: lineThickness,
-        lineColor: lineColor,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      lineColor: lineColor,
     );
     final entry = manager.inkForOrSchedule(
       pageIndex: pageIndex,
@@ -1535,18 +1527,27 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       devicePixelRatio: devicePixelRatio,
       params: inkParams,
     );
-    if (entry != null) {
-      final cacheSharp = pageRasterCacheResCoversTarget(entry.res, idealRes);
-      // Apply the same logic here to prevent vector fallback (freeze) during the settle window.
-      if (cacheSharp || !PageRasterCacheManager.viewportSettled) {
-        paintPageCacheImage(
-          canvas,
-          size,
-          entry,
-          targetRes: idealRes,
-          lowQualityFilter: !PageRasterCacheManager.viewportSettled,
-        );
-      } else {
+
+    final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
+    final isErasing = entry != null && committedStrokes.length < entry.strokeCount;
+    final needsLiveVectorCache = isDrawing || isErasing || entry == null;
+
+    if (needsLiveVectorCache) {
+      final currentSignature = Object.hash(
+        pageIndex,
+        committedStrokes.length,
+        invert,
+        primaryColor.value,
+        page.saveBinaryRevision,
+      );
+
+      if (_cachedPicture == null || _cachedPictureSignature != currentSignature) {
+        _cachedPicture?.dispose();
+        _cachedPictureSignature = currentSignature;
+
+        final recorder = ui.PictureRecorder();
+        final rCanvas = Canvas(recorder, Offset.zero & size);
+
         CanvasPainter(
           invert: invert,
           strokes: committedStrokes,
@@ -1560,33 +1561,74 @@ class _PageRasterInkLayerPainter extends CustomPainter {
           totalPages: totalPages,
           currentScale: currentScale,
           defaultTextStyle: defaultTextStyle,
-            lineHeight: lineHeight,
-            lineThickness: lineThickness,
-            lineColor: lineColor,
-            doneSelecting: true,
-            preferPathFill: false,
-        ).paint(canvas, size);
-      }
-    } else {
-      CanvasPainter(
-        invert: invert,
-        strokes: committedStrokes,
-        laserStrokes: const [],
-        currentStroke: null,
-        currentSelection: null,
-        primaryColor: primaryColor,
-        page: page,
-        showPageIndicator: false,
-        pageIndex: pageIndex,
-        totalPages: totalPages,
-        currentScale: currentScale,
-        defaultTextStyle: defaultTextStyle,
           lineHeight: lineHeight,
           lineThickness: lineThickness,
           lineColor: lineColor,
           doneSelecting: true,
           preferPathFill: true,
-      ).paint(canvas, size);
+        ).paint(rCanvas, size);
+
+        _cachedPicture = recorder.endRecording();
+      }
+
+      if (_cachedPicture != null) {
+        canvas.drawPicture(_cachedPicture!);
+      }
+    } else {
+      // Panning ou Stand-by normal: O App usa o PageRasterCacheManager completo e assíncrono
+      final cacheSharp = pageRasterCacheResCoversTarget(entry.res, idealRes);
+      
+      if (cacheSharp || !PageRasterCacheManager.viewportSettled) {
+        paintPageCacheImage(
+          canvas,
+          size,
+          entry,
+          targetRes: idealRes,
+          lowQualityFilter: !PageRasterCacheManager.viewportSettled,
+        );
+        if (entry.strokeCount < committedStrokes.length) {
+          CanvasPainter(
+            invert: invert,
+            strokes: committedStrokes.sublist(entry.strokeCount),
+            laserStrokes: const [],
+            currentStroke: null,
+            currentSelection: null,
+            primaryColor: primaryColor,
+            page: page,
+            showPageIndicator: false,
+            pageIndex: pageIndex,
+            totalPages: totalPages,
+            currentScale: currentScale,
+            defaultTextStyle: defaultTextStyle,
+            lineHeight: lineHeight,
+            lineThickness: lineThickness,
+            lineColor: lineColor,
+            doneSelecting: true,
+            preferPathFill: true,
+          ).paint(canvas, size);
+        }
+      } else {
+        // Fallback vetorial de alta qualidade durante stand-by enquanto o rasterizador aguarda sync
+        CanvasPainter(
+          invert: invert,
+          strokes: committedStrokes,
+          laserStrokes: const [],
+          currentStroke: null,
+          currentSelection: null,
+          primaryColor: primaryColor,
+          page: page,
+          showPageIndicator: false,
+          pageIndex: pageIndex,
+          totalPages: totalPages,
+          currentScale: currentScale,
+          defaultTextStyle: defaultTextStyle,
+          lineHeight: lineHeight,
+          lineThickness: lineThickness,
+          lineColor: lineColor,
+          doneSelecting: true,
+          preferPathFill: false,
+        ).paint(canvas, size);
+      }
     }
 
     if (pendingStrokes.isNotEmpty) {
@@ -1604,32 +1646,33 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         totalPages: totalPages,
         currentScale: currentScale,
         defaultTextStyle: defaultTextStyle,
-          lineHeight: lineHeight,
-          lineThickness: lineThickness,
-          lineColor: lineColor,
-          doneSelecting: true,
-      ).paint(canvas, size);
-    }
-
-    if (!showPageIndicator) return;
-    CanvasPainter(
-      invert: invert,
-      strokes: const [],
-      laserStrokes: const [],
-      currentStroke: null,
-      currentSelection: null,
-      primaryColor: primaryColor,
-      page: page,
-      showPageIndicator: true,
-      pageIndex: pageIndex,
-      totalPages: totalPages,
-      currentScale: currentScale,
-      defaultTextStyle: defaultTextStyle,
         lineHeight: lineHeight,
         lineThickness: lineThickness,
         lineColor: lineColor,
         doneSelecting: true,
-    ).paint(canvas, size);
+      ).paint(canvas, size);
+    }
+
+    if (showPageIndicator) {
+      CanvasPainter(
+        invert: invert,
+        strokes: const [],
+        laserStrokes: const [],
+        currentStroke: null,
+        currentSelection: null,
+        primaryColor: primaryColor,
+        page: page,
+        showPageIndicator: true,
+        pageIndex: pageIndex,
+        totalPages: totalPages,
+        currentScale: currentScale,
+        defaultTextStyle: defaultTextStyle,
+        lineHeight: lineHeight,
+        lineThickness: lineThickness,
+        lineColor: lineColor,
+        doneSelecting: true,
+      ).paint(canvas, size);
+    }
   }
 
   @override
@@ -1817,7 +1860,7 @@ class _PendingRasterJob {
 ///   extra sharpness.
 abstract final class RasterLodTuning {
   /// Above this canvas scale, tiles stay as vectors (no bitmap LOD).
-  static const double vectorLodMinScale = 4.0;
+  static const double vectorLodMinScale = 10.0;
 
   /// Page stroke-count breakpoints. [mediumQualityMul] is 1.0 so a typical
   /// page matches the previous zoom-only curve.
@@ -1884,7 +1927,7 @@ class TiledStrokePictureCache {
 
   /// Delay before treating the viewport as settled after motion stops.
   static Duration get viewportSettleDelay =>
-  PageRasterCacheManager.viewportSettleDelay;
+  DisplayInkFeel.instance.viewportSettleDelay;
 
   /// False while the quantized zoom LOD is still changing. After it has
   /// been still for [viewportSettleDelay], visible tiles bake once at that
@@ -2133,13 +2176,12 @@ class TiledStrokePictureCache {
       lineThickness: lineThickness,
       lineColor: lineColor,
     );
-    _ensureGrid(strokes);
 
     final pageRect = Offset.zero & size;
     final visible = canvas.getLocalClipBounds().intersect(pageRect);
     if (visible.isEmpty) return;
 
-    _visibleStrokeCount = _countVisibleStrokes(visible, strokes);
+    _visibleStrokeCount = _countVisibleStrokes(visible, strokes, page);
     if (_visibleStrokeCount <= 0) {
       _visibleStrokeCount = strokes.length;
     }
@@ -2160,20 +2202,20 @@ class TiledStrokePictureCache {
     // discarded tile this frame so deleted ink is gone immediately.
     final catchUpVisible = !_visibleTilesCaughtUp || _eagerRefillVisibleTiles;
     final capLiveRefill = deferRaster && Pen.currentStroke != null;
+    // ALWAYS respect the time budget to avoid UI thread freezes!
     final useTimeBudget =
-    !forbidRecord &&
-    (!catchUpVisible || capLiveRefill) &&
-    tileRecordBudgetMs != null &&
-    tileRecordBudgetMs > 0;
+        !forbidRecord &&
+        tileRecordBudgetMs != null &&
+        tileRecordBudgetMs > 0;
     // xnotes-style: while the viewport is moving, never record new tiles —
     // only blit existing (possibly stale) rasters.
     final tileBudget = viewportMoving
-    ? 0
-    : (capLiveRefill
-    ? 2
-    : (catchUpVisible || useTimeBudget
-    ? 0x7fffffff
-    : maxNewTilesPerPaint));
+        ? 0
+        : (capLiveRefill
+            ? 2
+            : (useTimeBudget
+                ? 0x7fffffff
+                : maxNewTilesPerPaint));
     final Stopwatch? budgetWatch = useTimeBudget
     ? (Stopwatch()..start())
     : null;
@@ -2314,7 +2356,7 @@ class TiledStrokePictureCache {
             _visibleTilesCaughtUp &&
             recordedThisPaint < tileBudget &&
             !overTime) {
-            final upgradeStrokes = _strokesForTile(tileRect, strokes);
+            final upgradeStrokes = _strokesForTile(tileRect, strokes, page);
           if (upgradeStrokes.isNotEmpty &&
             !_tileNeedsMeshBuild(upgradeStrokes)) {
             existing.dispose();
@@ -2350,7 +2392,7 @@ class TiledStrokePictureCache {
             drawTile(key, tileRect, existing);
             continue;
         }
-        final tileStrokes = _strokesForTile(tileRect, strokes);
+        final tileStrokes = _strokesForTile(tileRect, strokes, page);
         if (tileStrokes.isEmpty) continue;
         final needsMesh = _tileNeedsMeshBuild(tileStrokes);
         final canRecord =
@@ -2907,10 +2949,19 @@ class TiledStrokePictureCache {
             }
           }
 
-          int _countVisibleStrokes(Rect visible, List<Stroke> strokes) {
+          int _countVisibleStrokes(Rect visible, List<Stroke> strokes, EditorPage page) {
             if (strokes.isEmpty) return 0;
-            _ensureGrid(strokes);
             final query = visible.inflate(_cullPadding);
+            final qt = page.strokeSpatialIndex;
+            if (qt != null) {
+              int n = 0;
+              final found = qt.query(query);
+              for (final s in found) {
+                if (s.bounds.overlaps(query)) n++;
+              }
+              return n;
+            }
+            _ensureGrid(strokes);
             final grid = _grid;
             if (grid == null) return strokes.length;
             var n = 0;
@@ -2924,8 +2975,22 @@ class TiledStrokePictureCache {
             return n;
           }
 
-          List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes) {
+          List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
             final queryRect = tileRect.inflate(_cullPadding);
+            final qt = page.strokeSpatialIndex;
+            if (qt != null) {
+              final tileStrokes = <Stroke>[];
+              final found = qt.query(queryRect);
+              if (found.isEmpty) return tileStrokes;
+              final foundSet = found.toSet();
+              for (int i = 0; i < strokes.length; i++) {
+                final s = strokes[i];
+                if (foundSet.contains(s) && s.bounds.overlaps(queryRect)) {
+                  tileStrokes.add(s);
+                }
+              }
+              return tileStrokes;
+            }
             final candidateIndices = _grid?.query(queryRect) ?? const <int>[];
             final tileStrokes = <Stroke>[];
             for (final index in candidateIndices) {
