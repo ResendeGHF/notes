@@ -290,10 +290,11 @@ final class PageRasterCacheManager {
   }) {
     final dpr = devicePixelRatio ?? _devicePixelRatio();
     final zoom = effectiveScale(scale);
+    final effectiveZoom = math.min(zoom, 1.5);
     final longEdge = math.max(pageSize.width, pageSize.height);
-    if (longEdge <= 0) return (zoom * dpr).clamp(0.25, 12.0);
-    final desiredPx = zoom * dpr * longEdge;
-    if (desiredPx <= maxCachePx) return zoom * dpr;
+    if (longEdge <= 0) return (effectiveZoom * dpr).clamp(0.25, 12.0);
+    final desiredPx = effectiveZoom * dpr * longEdge;
+    if (desiredPx <= maxCachePx) return effectiveZoom * dpr;
     return maxCachePx / longEdge;
   }
 
@@ -696,9 +697,27 @@ final class PageRasterCacheManager {
       hasFullBleedBackground: page.backgroundImage != null,
       forceSchedule: forceSchedule,
     );
-    // We deliberately DO NOT schedule ink here. Whole-page ink toImage() calls 
-    // block the raster thread and cause severe lag/flicker. Ink caching is 
-    // handled efficiently via TiledStrokePictureCache inside InnerCanvas.
+    
+    inkForOrSchedule(
+      pageIndex: pageIndex,
+      pageSize: pageSize,
+      scale: scale,
+      devicePixelRatio: devicePixelRatio,
+      params: PageRasterInkParams(
+        invert: invert,
+        strokes: inkStrokes,
+        page: page,
+        primaryColor: primaryColor,
+        pageIndex: pageIndex,
+        totalPages: coreInfo.pages.length,
+        currentScale: scale,
+        defaultTextStyle: defaultTextStyle,
+        lineHeight: defaultLineHeight,
+        lineThickness: defaultLineThickness,
+        lineColor: primaryColor,
+      ),
+      forceSchedule: forceSchedule,
+    );
   }
 
   void _enqueue(_RasterJob job) {
@@ -785,6 +804,26 @@ final class PageRasterCacheManager {
     final w = math.max(1, (job.pageSize.width * job.res).ceil());
     final h = math.max(1, (job.pageSize.height * job.res).ceil());
     
+    // Calcula geometria assincronamente (fora da main thread) para não dar Freeze 
+    if (job.isInk) {
+      final params = job.inkParams!;
+      int count = 0;
+      for (final stroke in params.strokes) {
+        stroke.setLodScale(params.currentScale);
+        if (stroke.canBatchSolidMesh) {
+           stroke.solidMeshChunks;
+        } else {
+           stroke.highQualityPath;
+        }
+        count++;
+        // Yield Event Loop para não travar a UI enquanto pre-aquece geometria complexa
+        if (count % 30 == 0) {
+          await Future.delayed(Duration.zero);
+          if (_disposed || job.cacheGen != _cacheGen) return null;
+        }
+      }
+    }
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()));
     canvas.scale(job.res, job.res);

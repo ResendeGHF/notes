@@ -2096,11 +2096,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             streamline: 0.15,
           );
 
-    return getStroke(
-      sourcePoints,
-      options: _outlineOptionsForCurrentPhase(effectiveOptions),
-      rememberSimulatedPressure: false,
-    );
+    try {
+      return getStroke(
+        sourcePoints,
+        options: _outlineOptionsForCurrentPhase(effectiveOptions),
+        rememberSimulatedPressure: false,
+      );
+    } catch (e, st) {
+      log.warning('getStroke crashed in getPolygon: $e', e, st);
+      return sourcePoints.map((p) => Offset(p.x, p.y)).toList();
+    }
   }
 
   List<Offset> _getCalligraphyPolygon(
@@ -2378,27 +2383,32 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (pts.length == 1) {
       pts = [pts.first, pts.first];
     }
-    return getStroke(
-      pts,
-      options: StrokeOptions(
-        size: size,
-        thinning: 0,
-        smoothing: 0.52,
-        streamline: 0.32,
-        simulatePressure: false,
-        isComplete: true,
-        start: StrokeEndOptions.start(
-          taperEnabled: false,
-          cap: true,
-          easing: StrokeOptions.defaultEasing,
+    try {
+      return getStroke(
+        pts,
+        options: StrokeOptions(
+          size: size.abs(),
+          thinning: 0,
+          smoothing: 0.52,
+          streamline: 0.32,
+          simulatePressure: false,
+          isComplete: true,
+          start: StrokeEndOptions.start(
+            taperEnabled: false,
+            cap: true,
+            easing: StrokeOptions.defaultEasing,
+          ),
+          end: StrokeEndOptions.end(
+            taperEnabled: false,
+            cap: true,
+            easing: StrokeOptions.defaultEasing,
+          ),
         ),
-        end: StrokeEndOptions.end(
-          taperEnabled: false,
-          cap: true,
-          easing: StrokeOptions.defaultEasing,
-        ),
-      ),
-    );
+      );
+    } catch (e, st) {
+      log.warning('getStroke crashed in buildBallpointStyleOutline: $e', e, st);
+      return pts.map((p) => Offset(p.x, p.y)).toList();
+    }
   }
 
   /// Full ballpoint / laser neon pipeline: adaptive spine then constant-width outline.
@@ -2755,7 +2765,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // Committed ink is GPU-scaled (backup). Updating LOD here rebuilt spines
     // during zoom and dropped 90Hz notes to 60fps.
     if (options.isComplete) return;
-    _targetScale = scale.clamp(0.1, 5.0);
+    
+    // LIVE strokes always use 1.0x tolerance to prevent severe Catmull-Rom 
+    // flickering and shape-shifting when drawing at high/low zoom levels.
+    _targetScale = 1.0;
   }
 
   int get _predictionLiveFingerprint {
@@ -3031,20 +3044,26 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final len = math.sqrt(dx * dx + dy * dy);
       if (len > 1e-6) endTravel = (dx / len, dy / len);
     }
-    return getStroke(
-      strokePoints,
-      options: _outlineOptionsForCurrentPhase(outlineOptions),
-      startCap: includeStart && outlineOptions.start.cap,
-      endCap: includeEnd && outlineOptions.end.cap,
-      applyStartTaper: includeStart,
-      applyEndTaper: includeEnd,
-      capChordOnlyAtCappedEnds: isAdvanced,
-      dualSidedReturnJoins: isAdvanced,
-      preferStemCapTangents: false,
-      meshStyleCaps: false,
-      startTravelTangent: startTravel,
-      endTravelTangent: endTravel,
-    );
+    
+    try {
+      return getStroke(
+        strokePoints,
+        options: _outlineOptionsForCurrentPhase(outlineOptions),
+        startCap: includeStart && outlineOptions.start.cap,
+        endCap: includeEnd && outlineOptions.end.cap,
+        applyStartTaper: includeStart,
+        applyEndTaper: includeEnd,
+        capChordOnlyAtCappedEnds: isAdvanced,
+        dualSidedReturnJoins: isAdvanced,
+        preferStemCapTangents: false,
+        meshStyleCaps: false,
+        startTravelTangent: startTravel,
+        endTravelTangent: endTravel,
+      );
+    } catch (e, st) {
+      log.warning('getStroke crashed in _advancedOutlineFromSpine: $e', e, st);
+      return strokePoints.map((p) => Offset(p.x, p.y)).toList();
+    }
   }
 
   void _clearLiveCheapSpineFreeze() {
@@ -3070,11 +3089,25 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// Live getStroke / perfect-freehand should track the stylus, not settle
   /// into the committed outline. Committed geometry keeps full smoothing.
   StrokeOptions _outlineOptionsForCurrentPhase(StrokeOptions base) {
-    if (options.isComplete) return base;
-    return base.copyWith(
-      smoothing: base.smoothing * 0.42,
-      streamline: base.streamline * 0.28,
-    );
+    var opts = base;
+    if (!options.isComplete) {
+      opts = opts.copyWith(
+        smoothing: base.smoothing * 0.42,
+        streamline: base.streamline * 0.28,
+      );
+    }
+    
+    // Safeguard: Impede crashes do double.clamp no buildVariableWidthOutline
+    if (opts.minSizeRatio > opts.maxSizeRatio) {
+      opts = opts.copyWith(
+        minSizeRatio: opts.maxSizeRatio,
+        maxSizeRatio: opts.minSizeRatio,
+      );
+    }
+    if (opts.size < 0) {
+      opts = opts.copyWith(size: opts.size.abs());
+    }
+    return opts;
   }
 
   bool get _usesLiveCheapSpineMesh =>
@@ -4061,6 +4094,7 @@ class QuadTree<T> {
   static final List<QuadTree<dynamic>> _insertStack = [];
   static final List<QuadTree<dynamic>> _queryStack = [];
   static final List<QuadTree<dynamic>> _removeStack = [];
+  static final Set<dynamic> _querySeen = {};
 
   QuadTree(
     this.boundary, {
@@ -4140,7 +4174,7 @@ class QuadTree<T> {
 
   List<T> query(Rect range, [List<T>? found]) {
     found ??= [];
-    final seen = <T>{};
+    _querySeen.clear();
 
     final stack = _queryStack;
     stack.clear();
@@ -4152,7 +4186,7 @@ class QuadTree<T> {
 
       for (int i = 0; i < node.items.length; i++) {
         final item = node.items[i];
-        if (range.overlaps(_getBounds(item)) && seen.add(item)) {
+        if (range.overlaps(_getBounds(item)) && _querySeen.add(item)) {
           found.add(item);
         }
       }
@@ -4164,7 +4198,9 @@ class QuadTree<T> {
         stack.add(node.southwest! as QuadTree<dynamic>);
       }
     }
-
+    
+    // Clear the set reference so it doesn't hold memory
+    _querySeen.clear();
     return found;
   }
 
@@ -4203,6 +4239,9 @@ class SpatialGrid {
   final double cellSize;
   final Map<int, List<int>> _grid = {};
 
+  static final List<int> _queryBuffer = [];
+  static final Set<int> _seenBuffer = {};
+
   int _cellHash(int cx, int cy) {
     return (cx * 73856093) ^ (cy * 19349663);
   }
@@ -4231,19 +4270,25 @@ class SpatialGrid {
     final startY = (rect.top / cellSize).floor();
     final endY = (rect.bottom / cellSize).floor();
 
-    final Set<int> seen = {};
+    _queryBuffer.clear();
+    _seenBuffer.clear();
+
     for (var cx = startX; cx <= endX; cx++) {
       for (var cy = startY; cy <= endY; cy++) {
         final list = _grid[_cellHash(cx, cy)];
         if (list != null) {
           for (final i in list) {
-            seen.add(i);
+            if (_seenBuffer.add(i)) {
+              _queryBuffer.add(i);
+            }
           }
         }
       }
     }
-    final out = seen.toList();
-    out.sort();
-    return out;
+    
+    // Clear the set reference so it doesn't hold memory
+    _seenBuffer.clear();
+    _queryBuffer.sort();
+    return _queryBuffer;
   }
 }

@@ -267,7 +267,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     final transformation = widget._transformationController.value;
     const panAmount = 50.0;
 
-    transformation.leftTranslateByDouble(
+    final next = Matrix4.copy(transformation);
+    next.leftTranslateByDouble(
       switch (direction) {
         AxisDirection.left => panAmount,
         AxisDirection.right => -panAmount,
@@ -283,7 +284,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
       0,
       1,
     );
-    widget._transformationController.notifyListenersPlease();
+    widget._transformationController.value = next;
   }
 
   var _setupKeybindings = false;
@@ -445,7 +446,11 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   Timer? _snapZoomTimer;
 
+  bool _isClamping = false;
+
   void onTransformChanged() {
+    if (_isClamping) return;
+
     // Transform updates every pan/zoom frame via AnimatedBuilder, but the
     // page builder is bucket-throttled. Push scale here so zoom LOD rasters
     // do not wait for a widget rebuild (or a new stroke).
@@ -483,52 +488,54 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     }
 
     if (scale < 1) {
-            final center = containerBounds.maxWidth * (1 - scale) / 2;
-            adjustmentX = center - translation.x;
-          } else {
-            if (widget.isInfinite) {
-              late final minX = containerBounds.maxWidth * (1 - scale);
-              if (translation.x > 0) {
-                adjustmentX = -translation.x;
-              } else if (translation.x < minX) {
-                adjustmentX = minX - translation.x;
-              }
-            } else {
-              final cWidth = containerBounds.maxWidth;
-              final leftOffset = widget.pages.isEmpty ? 0.0 : (cWidth - min(widget.pages.first.size.width, cWidth)) / 2.0;
-              final pageWidth = cWidth - 2 * leftOffset;
+      final center = containerBounds.maxWidth * (1 - scale) / 2;
+      adjustmentX = center - translation.x;
+    } else {
+      if (widget.isInfinite) {
+        late final minX = containerBounds.maxWidth * (1 - scale);
+        if (translation.x > 0) {
+          adjustmentX = -translation.x;
+        } else if (translation.x < minX) {
+          adjustmentX = minX - translation.x;
+        }
+      } else {
+        final cWidth = containerBounds.maxWidth;
+        final leftOffset = widget.pages.isEmpty ? 0.0 : (cWidth - min(widget.pages.first.size.width, cWidth)) / 2.0;
+        final pageWidth = cWidth - 2 * leftOffset;
 
-              final scaledPageWidth = pageWidth * scale;
-              
-              if (scaledPageWidth <= cWidth) {
-                final center = cWidth * (1 - scale) / 2;
-                adjustmentX = center - translation.x;
-              } else {
-                final double allowedMargin = 0.0;
+        final scaledPageWidth = pageWidth * scale;
+        
+        if (scaledPageWidth <= cWidth) {
+          final center = cWidth * (1 - scale) / 2;
+          adjustmentX = center - translation.x;
+        } else {
+          final double allowedMargin = 0.0;
 
-                final maxX = allowedMargin - leftOffset * scale;
-                final minX = cWidth - allowedMargin - leftOffset * scale - scaledPageWidth;
+          final maxX = allowedMargin - leftOffset * scale;
+          final minX = cWidth - allowedMargin - leftOffset * scale - scaledPageWidth;
 
-                if (translation.x > maxX) {
-                  adjustmentX = maxX - translation.x;
-                } else if (translation.x < minX) {
-                  adjustmentX = minX - translation.x;
-                }
-              }
-            }
-
-            if (translation.y > 0) {
-              adjustmentY = -translation.y;
-            }
+          if (translation.x > maxX) {
+            adjustmentX = maxX - translation.x;
+          } else if (translation.x < minX) {
+            adjustmentX = minX - translation.x;
           }
+        }
+      }
+    }
 
-    if (adjustmentX.abs() > 0.1 || adjustmentY.abs() > 0.1) {
+    if (translation.y > 0) {
+      adjustmentY = -translation.y;
+    }
+
+    if (adjustmentX.abs() > 0.001 || adjustmentY.abs() > 0.001) {
+      _isClamping = true;
       // Assign a new matrix so TransformationController notifies listeners.
       // In-place leftTranslateByDouble does not, which left the canvas visually
       // uncentered after sidebar/split resize until the user panned.
       final next = Matrix4.copy(widget._transformationController.value);
       next.leftTranslateByDouble(adjustmentX, adjustmentY, 0, 1);
       widget._transformationController.value = next;
+      _isClamping = false;
     }
   }
 

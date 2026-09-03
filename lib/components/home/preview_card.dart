@@ -500,17 +500,17 @@ class _PreviewCardState extends State<PreviewCard> {
           onLongPress: isLink ? () => _showContextMenu() : _toggleCardSelection,
           onSecondaryTap: () => _showContextMenu(),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 // Miniatura elegante
                 Container(
-                  width: 56,
-                  height: 68,
+                  width: 32,
+                  height: 40,
                   decoration: BoxDecoration(
                     color: colorScheme.surfaceContainerLowest,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(6),
                     border: Border.all(
                       color: colorScheme.outlineVariant.withValues(alpha: 0.35),
                     ),

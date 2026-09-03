@@ -233,7 +233,9 @@ class _MasonryFilesState extends State<MasonryFiles> {
     isAnythingSelected.value = widget.selectedFiles.value.isNotEmpty;
 
     return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: widget.crossAxisCount == 1
+          ? const EdgeInsets.fromLTRB(12, 0, 12, 8)
+          : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       sliver: SliverLayoutBuilder(
         builder: (context, constraints) {
           const spacing = 12.0;
@@ -250,7 +252,7 @@ class _MasonryFilesState extends State<MasonryFiles> {
           return SliverGrid(
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: n,
-              mainAxisSpacing: spacing,
+              mainAxisSpacing: n == 1 ? 0.0 : spacing,
               crossAxisSpacing: spacing,
               childAspectRatio: childAspectRatio,
             ),

@@ -5,36 +5,35 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:flutter/foundation.dart';
+
 import 'package:defer_pointer/defer_pointer.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
-import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/components/canvas/_canvas_background_painter.dart';
 import 'package:saber/components/canvas/_canvas_painter.dart';
 import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
+import 'package:saber/components/canvas/page_raster_cache.dart';
+import 'package:saber/components/canvas/selection_handles_overlay.dart';
+import 'package:saber/components/canvas/shape_control_points_overlay.dart';
+import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/quill_styles.dart';
-import 'package:saber/data/prefs.dart';
-import 'package:saber/components/canvas/selection_handles_overlay.dart';
-import 'package:saber/components/canvas/selection_handles_layout.dart';
-import 'package:saber/components/canvas/shape_control_points_overlay.dart';
 import 'package:saber/data/editor/stroke_paint_image_cache.dart';
-import 'package:saber/data/stroke_geometry/outline_triangulate.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
-import 'package:saber/data/tools/pen.dart';
 import 'package:saber/data/tools/eraser.dart';
+import 'package:saber/data/tools/pen.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/i18n/strings.g.dart';
-import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/services/display_ink_feel.dart';
-import 'package:flutter/rendering.dart';
 
 bool _strokeCanMergeSolidMesh(Stroke stroke) => stroke.canBatchSolidMesh;
 
@@ -42,6 +41,42 @@ double _canvasDevicePixelRatio() {
   final views = ui.PlatformDispatcher.instance.views;
   if (views.isEmpty) return 1.0;
   return views.first.devicePixelRatio.clamp(1.0, 4.0);
+}
+
+List<ui.Vertices> mergeStrokeMeshes(List<(Float32List, Uint16List)> chunks) {
+  if (chunks.isEmpty) return const [];
+  if (chunks.length == 1) {
+    return [ui.Vertices.raw(ui.VertexMode.triangles, chunks.first.$1, indices: chunks.first.$2)];
+  }
+  final out = <ui.Vertices>[];
+  var posCount = 0;
+  var indCount = 0;
+  for (final chunk in chunks) {
+    posCount += chunk.$1.length;
+    indCount += chunk.$2.length;
+  }
+  if (posCount <= 65535 * 2) {
+    final pos = Float32List(posCount);
+    final ind = Uint16List(indCount);
+    var pOffset = 0;
+    var iOffset = 0;
+    var vertexOffset = 0;
+    for (final chunk in chunks) {
+      pos.setAll(pOffset, chunk.$1);
+      for (var i = 0; i < chunk.$2.length; i++) {
+        ind[iOffset + i] = chunk.$2[i] + vertexOffset;
+      }
+      pOffset += chunk.$1.length;
+      iOffset += chunk.$2.length;
+      vertexOffset += chunk.$1.length ~/ 2;
+    }
+    out.add(ui.Vertices.raw(ui.VertexMode.triangles, pos, indices: ind));
+  } else {
+    for (final chunk in chunks) {
+      out.add(ui.Vertices.raw(ui.VertexMode.triangles, chunk.$1, indices: chunk.$2));
+    }
+  }
+  return out;
 }
 
 Map<int, List<ui.Vertices>> _mergeSolidStrokeMeshesByColor(
@@ -167,9 +202,6 @@ class InnerCanvasState extends State<InnerCanvas> {
   TiledStrokePictureCache? _localStrokePictureCache;
 
   TiledStrokePictureCache get _strokePictureCache {
-    if (widget.pageRasterCache != null) {
-      return _localStrokePictureCache ??= TiledStrokePictureCache();
-    }
     if (widget.isPreview || widget.isPrint) {
       return _localStrokePictureCache ??= TiledStrokePictureCache();
     }
@@ -598,8 +630,6 @@ class InnerCanvasState extends State<InnerCanvas> {
   bool get _shouldAnimateShapePreview =>
   widget.currentStroke != null && widget.currentStrokeDetectedShape != null;
 
-  bool get _isEraserActive => widget.eraserPosition != null;
-
   Rect? _eraserDeltaBounds({
     required List<Stroke>? removed,
     required List<Stroke>? added,
@@ -643,9 +673,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     final want = _shouldAnimateShapePreview;
     if (want) {
       if (_shapePreviewTicker != null) return; // already running
-      _shapePreviewTicker = Timer.periodic(const Duration(milliseconds: 50), (
-        _,
-      ) {
+      _shapePreviewTicker = Timer.periodic(const Duration(milliseconds: 50), (_) {
         if (!mounted || !_shouldAnimateShapePreview) return;
         _shapePreviewTick++;
         _shapePreviewRepaint.value++;
@@ -745,7 +773,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     if (widget.overrideInvert == null && brightness == Brightness.dark) {
       return ValueListenableBuilder<Map<String, int>>(
         valueListenable: stows.noteInvertInDarkModeOverrides,
-        builder: (context, overridesMap, __) {
+        builder: (context, overridesMap, _) {
           final effectiveInvert = overridesMap[widget.coreInfo.filePath] == 1;
           return _buildContent(
             context,
@@ -818,20 +846,12 @@ class InnerCanvasState extends State<InnerCanvas> {
     !widget.isPreview &&
     !widget.isPrint;
     
-    // Disable whole-page raster caching for ink to prevent severe lag spikes
-    // on large pages with many strokes. TiledStrokePictureCache handles it beautifully.
-    final usePageRasterCacheInk = false;
-
-    final committedInkStrokes = usePageRasterCacheInk
-    ? committedStrokes
-    .where((s) => s.toolId != ToolId.highlighter)
-    .toList(growable: false)
-    : committedStrokes;
-    final committedHighlighterStrokes = usePageRasterCacheInk
-    ? committedStrokes
-    .where((s) => s.toolId == ToolId.highlighter)
-    .toList(growable: false)
-    : const <Stroke>[];
+    final committedInkStrokes = committedStrokes
+        .where((s) => s.toolId != ToolId.highlighter)
+        .toList(growable: false);
+    final committedHighlighterStrokes = committedStrokes
+        .where((s) => s.toolId == ToolId.highlighter)
+        .toList(growable: false);
 
     final pageRasterRepaint = widget.pageRasterCache == null
     ? null
@@ -842,18 +862,6 @@ class InnerCanvasState extends State<InnerCanvas> {
     final devicePixelRatio = _canvasDevicePixelRatio();
 
     final paintQuadTree = page.strokeSpatialIndex;
-    // Exclude selected strokes from mesh batches so they are not drawn both
-    // in the base layer and in the selection overlay (looks like a duplicate).
-    final selectedForExclusion = widget.currentSelection?.strokes;
-    final strokesForBatches =
-    selectedForExclusion == null || selectedForExclusion.isEmpty
-    ? committedStrokes
-    : committedStrokes
-    .where((s) => !selectedForExclusion.contains(s))
-    .toList(growable: false);
-    final batchedMeshes = useCachedStrokeLayer
-    ? null
-    : _buildBatchedMeshes(strokesForBatches, widget.currentScale);
 
     final quillEditor = widget.coreInfo.pages.isNotEmpty
     ? QuillEditor(
@@ -896,7 +904,7 @@ class InnerCanvasState extends State<InnerCanvas> {
               child: CustomPaint(
                 isComplex: true,
                 key: ValueKey(
-                  'bg_${invert}_${page.backgroundPattern?.index}_${page.backgroundColor.value}_${widget.lineHeight}_${widget.lineThickness}_${widget.lineColor?.value}_${page.marginLeft}_${page.marginRight}_${page.marginTop}_${page.marginBottom}_${page.borderColor.value}',
+                  'bg_${invert}_${page.backgroundPattern?.index}_${page.backgroundColor.toARGB32()}_${widget.lineHeight}_${widget.lineThickness}_${widget.lineColor?.toARGB32()}_${page.marginLeft}_${page.marginRight}_${page.marginTop}_${page.marginBottom}_${page.borderColor.toARGB32()}',
                 ),
                 painter: usePageRasterCacheBg && page.backgroundImage == null
                 ? _PageRasterBgLayerPainter(
@@ -911,7 +919,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                       if (page.backgroundImage != null) {
                         return Colors.white;
                       } else {
-                        return page.backgroundColor.value != 0xFFFFFFFF
+                        return page.backgroundColor.toARGB32() != 0xFFFFFFFF
                         ? page.backgroundColor
                         : backgroundColor;
                       }
@@ -931,12 +939,12 @@ class InnerCanvasState extends State<InnerCanvas> {
                     widget.coreInfo.lineThickness,
                     primaryColor:
                     widget.lineColor ??
-                    (page.lineColor.value != 0xFF9E9E9E
+                    (page.lineColor.toARGB32() != 0xFF9E9E9E
                     ? page.lineColor
                     : colorScheme.primary),
                     secondaryColor:
                     (widget.lineColor ??
-                    (page.lineColor.value != 0xFF9E9E9E
+                    (page.lineColor.toARGB32() != 0xFF9E9E9E
                     ? page.lineColor
                     : colorScheme.secondary))
                     .withValues(alpha: 0.5),
@@ -973,7 +981,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                     if (page.backgroundImage != null) {
                       return Colors.white;
                     } else {
-                      return page.backgroundColor.value != 0xFFFFFFFF
+                      return page.backgroundColor.toARGB32() != 0xFFFFFFFF
                       ? page.backgroundColor
                       : backgroundColor;
                     }
@@ -993,12 +1001,12 @@ class InnerCanvasState extends State<InnerCanvas> {
 
                   primaryColor:
                   widget.lineColor ??
-                  (page.lineColor.value != 0xFF9E9E9E
+                  (page.lineColor.toARGB32() != 0xFF9E9E9E
                   ? page.lineColor
                   : colorScheme.primary),
                   secondaryColor:
                   (widget.lineColor ??
-                  (page.lineColor.value != 0xFF9E9E9E
+                  (page.lineColor.toARGB32() != 0xFF9E9E9E
                   ? page.lineColor
                   : colorScheme.secondary))
                   .withValues(alpha: 0.5),
@@ -1109,8 +1117,8 @@ class InnerCanvasState extends State<InnerCanvas> {
           ],
         ),
 
-        // 1º PINTA O HIGHLIGHTER NO FUNDO (CASHED)
-        if (usePageRasterCacheInk && committedHighlighterStrokes.isNotEmpty)
+// 1º PINTA O HIGHLIGHTER NO FUNDO (CASHED)
+        if (committedHighlighterStrokes.isNotEmpty)
           IgnorePointer(
             child: RepaintBoundary(
               child: CustomPaint(
@@ -1118,6 +1126,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                   repaint: _layer2Repaint,
                   invert: invert,
                   strokes: committedHighlighterStrokes,
+                  quadTree: paintQuadTree,
                   laserStrokes: const [],
                   currentStroke: null,
                   currentSelection: null,
@@ -1128,11 +1137,11 @@ class InnerCanvasState extends State<InnerCanvas> {
                   totalPages: widget.coreInfo.pages.length,
                   currentScale: widget.currentScale,
                   defaultTextStyle: theme.textTheme.bodyMedium!,
-                    lineHeight: widget.lineHeight,
-                    lineThickness: widget.lineThickness?.toDouble(),
-                    lineColor: widget.lineColor,
-                    doneSelecting: true,
-                    preferPathFill: true,
+                  lineHeight: widget.lineHeight,
+                  lineThickness: widget.lineThickness?.toDouble(),
+                  lineColor: widget.lineColor,
+                  doneSelecting: true,
+                  preferPathFill: true,
                 ),
                 size: Size(widget.width, widget.height),
               ),
@@ -1144,15 +1153,17 @@ class InnerCanvasState extends State<InnerCanvas> {
             child: RepaintBoundary(
               child: CustomPaint(
                 isComplex: true,
-                painter: usePageRasterCacheInk
-                ? _PageRasterInkLayerPainter(
+                painter: _PageRasterInkLayerPainter(
                   repaint: Listenable.merge([
                     _layer2Repaint,
                     _pendingRepaint,
                     if (pageRasterRepaint != null) pageRasterRepaint,
+                    _strokePictureCache.recordGeneration,
+                    TiledStrokePictureCache.lodEpoch,
                   ]),
                   manager: widget.pageRasterCache!,
                   invert: invert,
+                  quadTree: paintQuadTree,
                   committedStrokes: committedInkStrokes,
                   pendingStrokes: _pendingInk,
                   pendingGeneration: _pendingGeneration,
@@ -1163,80 +1174,15 @@ class InnerCanvasState extends State<InnerCanvas> {
                   currentScale: widget.currentScale,
                   devicePixelRatio: devicePixelRatio,
                   defaultTextStyle: theme.textTheme.bodyMedium!,
-                    lineHeight: widget.lineHeight,
-                    lineThickness: widget.lineThickness?.toDouble(),
-                    lineColor: widget.lineColor,
-                    showPageIndicator:
-                    !widget.isPreview &&
-                    (!widget.isPrint ||
-                    stows.printPageIndicators.value) &&
-                    !widget.coreInfo.isInfinite,
-                )
-                : useCachedStrokeLayer
-                ? _CachedStrokeLayerPainter(
-                  repaint: Listenable.merge([
-                    _layer2Repaint,
-                    _pendingRepaint,
-                    _strokePictureCache.recordGeneration,
-                    TiledStrokePictureCache.lodEpoch,
-                  ]),
-                  cache: _strokePictureCache,
-                  invert: invert,
-                  liveStrokes: _liveTiledStrokes,
-                  pendingStrokes: _pendingInk,
-                  pendingGeneration: _pendingGeneration,
-                  page: page,
-                  primaryColor: colorScheme.primary,
-                  pageIndex: widget.pageIndex,
-                  totalPages: widget.coreInfo.pages.length,
-                  currentScale: widget.currentScale,
-                  enableRasterLod: !widget.isPrint,
-                  followLiveViewportScale:
-                  !widget.isPreview && !widget.isPrint,
-                  defaultTextStyle: theme.textTheme.bodyMedium!,
-                    lineHeight: widget.lineHeight,
-                    lineThickness: widget.lineThickness?.toDouble(),
-                    lineColor: widget.lineColor,
-                    showPageIndicator:
-                    !widget.isPreview &&
-                    (!widget.isPrint ||
-                    stows.printPageIndicators.value) &&
-                    !widget.coreInfo.isInfinite,
-                )
-                : CanvasPainter(
-                  repaint: _layer2Repaint,
-                  invert: invert,
-
-                  spatialGrid: null,
-                  quadTree: paintQuadTree,
-                  batchedStrokes: batchedMeshes,
                   lineHeight: widget.lineHeight,
                   lineThickness: widget.lineThickness?.toDouble(),
                   lineColor: widget.lineColor,
-                  strokes: committedStrokes,
-                  laserStrokes: const [],
-                  currentStroke: null,
-                  currentSelection: null,
-                  selectionPreview: null,
-                  primaryColor: colorScheme.primary,
-                  page: page,
                   showPageIndicator:
-                  !widget.isPreview &&
-                  (!widget.isPrint ||
-                  stows.printPageIndicators.value) &&
-                  !widget.coreInfo.isInfinite,
-                  pageIndex: widget.pageIndex,
-                  totalPages: widget.coreInfo.pages.length,
-                  currentScale: widget.currentScale,
-                  defaultTextStyle: theme.textTheme.bodyMedium!,
-                    eraserPosition: null,
-                    eraserSize: null,
-                    doneSelecting: true,
-                    excludedStrokes:
-                    widget.currentSelection != null &&
-                    widget.currentSelection!.strokes.isNotEmpty
-                    ? widget.currentSelection!.strokes.toSet()
-                    : null,
+                      !widget.isPreview &&
+                      (!widget.isPrint || stows.printPageIndicators.value) &&
+                      !widget.coreInfo.isInfinite,
+                  tiledCache: _strokePictureCache,
+                  liveStrokes: _liveTiledStrokes,
                 ),
                 size: Size(widget.width, widget.height),
               ),
@@ -1323,7 +1269,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                   )
                   : ValueListenableBuilder<int>(
                     valueListenable: widget.interactionRepaintListenable!,
-                    builder: (context, _, __) {
+                    builder: (context, _, _) {
                       return SelectionHandlesOverlay(
                         selection: widget.currentSelection!,
                         selectionPreview: widget.selectionPreview,
@@ -1356,7 +1302,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                     )
                     : ValueListenableBuilder<int>(
                       valueListenable: widget.interactionRepaintListenable!,
-                      builder: (context, _, __) {
+                      builder: (context, _, _) {
                         return ShapeControlPointsOverlay(
                           shape:
                           widget.currentSelection!.strokes.first
@@ -1387,7 +1333,7 @@ class _LiveStrokeList {
 
 class _PageRasterBgLayerPainter extends CustomPainter {
   _PageRasterBgLayerPainter({
-    required Listenable? repaint,
+    super.repaint,
     required this.manager,
     required this.pageIndex,
     required this.pageSize,
@@ -1395,7 +1341,7 @@ class _PageRasterBgLayerPainter extends CustomPainter {
     required this.devicePixelRatio,
     required this.fallback,
     required this.bgParams,
-  }) : super(repaint: repaint);
+  });
 
   final PageRasterCacheManager manager;
   final int pageIndex;
@@ -1408,11 +1354,6 @@ class _PageRasterBgLayerPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final idealRes = currentScale * devicePixelRatio;
-    final targetRes = PageRasterCacheManager.clampedRes(
-      currentScale,
-      pageSize,
-      devicePixelRatio: devicePixelRatio,
-    );
     final entry = manager.backgroundForOrSchedule(
       pageIndex: pageIndex,
       pageSize: pageSize,
@@ -1464,13 +1405,11 @@ class _PageRasterBgLayerPainter extends CustomPainter {
 }
 
 class _PageRasterInkLayerPainter extends CustomPainter {
-  static ui.Picture? _cachedPicture;
-  static int _cachedPictureSignature = 0;
-
   _PageRasterInkLayerPainter({
-    required Listenable repaint,
+    super.repaint,
     required this.manager,
     required this.invert,
+    required this.quadTree,
     required this.committedStrokes,
     required this.pendingStrokes,
     required this.pendingGeneration,
@@ -1485,10 +1424,13 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     this.lineHeight,
     this.lineThickness,
     this.lineColor,
-  }) : super(repaint: repaint);
+    required this.tiledCache,
+    required this.liveStrokes,
+  });
 
   final PageRasterCacheManager manager;
   final bool invert;
+  final QuadTree<Stroke>? quadTree;
   final List<Stroke> committedStrokes;
   final List<Stroke> pendingStrokes;
   final int pendingGeneration;
@@ -1503,6 +1445,8 @@ class _PageRasterInkLayerPainter extends CustomPainter {
   final int? lineHeight;
   final double? lineThickness;
   final Color? lineColor;
+  final TiledStrokePictureCache tiledCache;
+  final _LiveStrokeList liveStrokes;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1529,89 +1473,54 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     );
 
     final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
-    final isErasing = entry != null && committedStrokes.length < entry.strokeCount;
-    final needsLiveVectorCache = isDrawing || isErasing || entry == null;
+    bool useVectorFallback = isDrawing || entry == null;
+    if (entry != null && !useVectorFallback) {
+      if (entry.strokeCount > committedStrokes.length) {
+        useVectorFallback = true;
+      } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes) && PageRasterCacheManager.viewportSettled) {
+        useVectorFallback = true;
+      }
+    }
 
-    if (needsLiveVectorCache) {
-      final currentSignature = Object.hash(
-        pageIndex,
-        committedStrokes.length,
-        invert,
-        primaryColor.value,
-        page.saveBinaryRevision,
+    if (useVectorFallback) {
+      final isInitialLoad = tiledCache.shouldDeferMeshWarmup;
+      final idleFill = Pen.currentStroke == null && !Eraser.isDragging && !TiledStrokePictureCache.viewportMoving;
+      final budget = isInitialLoad ? 48 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
+
+      tiledCache.paint(
+        canvas: canvas,
+        size: size,
+        invert: invert,
+        strokes: liveStrokes.strokes,
+        page: page,
+        primaryColor: primaryColor,
+        pageIndex: pageIndex,
+        totalPages: totalPages,
+        currentScale: currentScale,
+        enableRasterLod: true,
+        followLiveViewportScale: true,
+        defaultTextStyle: defaultTextStyle,
+        lineHeight: lineHeight,
+        lineThickness: lineThickness,
+        lineColor: lineColor,
+        deferRaster: Eraser.isDragging || Pen.currentStroke != null,
+        tileRecordBudgetMs: budget,
+        maxNewTilesPerPaint: isInitialLoad ? 64 : (idleFill ? 8 : 2),
       );
-
-      if (_cachedPicture == null || _cachedPictureSignature != currentSignature) {
-        _cachedPicture?.dispose();
-        _cachedPictureSignature = currentSignature;
-
-        final recorder = ui.PictureRecorder();
-        final rCanvas = Canvas(recorder, Offset.zero & size);
-
-        CanvasPainter(
-          invert: invert,
-          strokes: committedStrokes,
-          laserStrokes: const [],
-          currentStroke: null,
-          currentSelection: null,
-          primaryColor: primaryColor,
-          page: page,
-          showPageIndicator: false,
-          pageIndex: pageIndex,
-          totalPages: totalPages,
-          currentScale: currentScale,
-          defaultTextStyle: defaultTextStyle,
-          lineHeight: lineHeight,
-          lineThickness: lineThickness,
-          lineColor: lineColor,
-          doneSelecting: true,
-          preferPathFill: true,
-        ).paint(rCanvas, size);
-
-        _cachedPicture = recorder.endRecording();
-      }
-
-      if (_cachedPicture != null) {
-        canvas.drawPicture(_cachedPicture!);
-      }
     } else {
-      // Panning ou Stand-by normal: O App usa o PageRasterCacheManager completo e assíncrono
-      final cacheSharp = pageRasterCacheResCoversTarget(entry.res, idealRes);
+      paintPageCacheImage(
+        canvas,
+        size,
+        entry!,
+        targetRes: idealRes,
+        lowQualityFilter: !PageRasterCacheManager.viewportSettled,
+      );
       
-      if (cacheSharp || !PageRasterCacheManager.viewportSettled) {
-        paintPageCacheImage(
-          canvas,
-          size,
-          entry,
-          targetRes: idealRes,
-          lowQualityFilter: !PageRasterCacheManager.viewportSettled,
-        );
-        if (entry.strokeCount < committedStrokes.length) {
-          CanvasPainter(
-            invert: invert,
-            strokes: committedStrokes.sublist(entry.strokeCount),
-            laserStrokes: const [],
-            currentStroke: null,
-            currentSelection: null,
-            primaryColor: primaryColor,
-            page: page,
-            showPageIndicator: false,
-            pageIndex: pageIndex,
-            totalPages: totalPages,
-            currentScale: currentScale,
-            defaultTextStyle: defaultTextStyle,
-            lineHeight: lineHeight,
-            lineThickness: lineThickness,
-            lineColor: lineColor,
-            doneSelecting: true,
-            preferPathFill: true,
-          ).paint(canvas, size);
-        }
-      } else {
-        // Fallback vetorial de alta qualidade durante stand-by enquanto o rasterizador aguarda sync
+      if (entry.strokeCount < committedStrokes.length) {
         CanvasPainter(
           invert: invert,
-          strokes: committedStrokes,
+          strokes: committedStrokes.sublist(entry.strokeCount),
+          quadTree: null, 
           laserStrokes: const [],
           currentStroke: null,
           currentSelection: null,
@@ -1623,7 +1532,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
           currentScale: currentScale,
           defaultTextStyle: defaultTextStyle,
           lineHeight: lineHeight,
-          lineThickness: lineThickness,
+          lineThickness: lineThickness?.toDouble(),
           lineColor: lineColor,
           doneSelecting: true,
           preferPathFill: false,
@@ -1647,7 +1556,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         currentScale: currentScale,
         defaultTextStyle: defaultTextStyle,
         lineHeight: lineHeight,
-        lineThickness: lineThickness,
+        lineThickness: lineThickness?.toDouble(),
         lineColor: lineColor,
         doneSelecting: true,
       ).paint(canvas, size);
@@ -1668,7 +1577,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         currentScale: currentScale,
         defaultTextStyle: defaultTextStyle,
         lineHeight: lineHeight,
-        lineThickness: lineThickness,
+        lineThickness: lineThickness?.toDouble(),
         lineColor: lineColor,
         doneSelecting: true,
       ).paint(canvas, size);
@@ -1692,140 +1601,9 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     oldDelegate.currentScale != currentScale ||
     oldDelegate.devicePixelRatio != devicePixelRatio ||
     oldDelegate.pendingGeneration != pendingGeneration ||
-    oldDelegate.pendingStrokes.length != pendingStrokes.length;
-  }
-}
-
-class _CachedStrokeLayerPainter extends CustomPainter {
-  _CachedStrokeLayerPainter({
-    required Listenable repaint,
-    required this.cache,
-    required this.invert,
-    required this.liveStrokes,
-    required this.page,
-    required this.primaryColor,
-    required this.pageIndex,
-    required this.totalPages,
-    required this.currentScale,
-    this.enableRasterLod = true,
-    this.followLiveViewportScale = true,
-    required this.defaultTextStyle,
-    required this.showPageIndicator,
-    this.lineHeight,
-    this.lineThickness,
-    this.lineColor,
-    this.pendingStrokes = const [],
-    this.pendingGeneration = 0,
-  }) : super(repaint: repaint);
-
-  final TiledStrokePictureCache cache;
-  final bool invert;
-  final _LiveStrokeList liveStrokes;
-  final List<Stroke> pendingStrokes;
-  final int pendingGeneration;
-  final EditorPage page;
-  final Color primaryColor;
-  final int pageIndex;
-  final int totalPages;
-  final double currentScale;
-  final bool enableRasterLod;
-  final bool followLiveViewportScale;
-  final TextStyle defaultTextStyle;
-  final bool showPageIndicator;
-  final int? lineHeight;
-  final double? lineThickness;
-  final Color? lineColor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final idleFill =
-    Pen.currentStroke == null &&
-    !Eraser.isDragging &&
-    !TiledStrokePictureCache.viewportMoving;
-    cache.paint(
-      canvas: canvas,
-      size: size,
-      invert: invert,
-      strokes: liveStrokes.strokes,
-      page: page,
-      primaryColor: primaryColor,
-      pageIndex: pageIndex,
-      totalPages: totalPages,
-      currentScale: currentScale,
-      enableRasterLod: enableRasterLod,
-      followLiveViewportScale: followLiveViewportScale,
-      defaultTextStyle: defaultTextStyle,
-        lineHeight: lineHeight,
-        lineThickness: lineThickness,
-        lineColor: lineColor,
-        deferRaster: Eraser.isDragging || Pen.currentStroke != null,
-        tileRecordBudgetMs: idleFill
-        ? TiledStrokePictureCache.idleTileBudgetMs
-        : null,
-    );
-
-    if (pendingStrokes.isNotEmpty) {
-      CanvasPainter(
-        invert: invert,
-        strokes: const [],
-        pendingStrokes: pendingStrokes,
-        laserStrokes: const [],
-        currentStroke: null,
-        currentSelection: null,
-        primaryColor: primaryColor,
-        page: page,
-        showPageIndicator: false,
-        pageIndex: pageIndex,
-        totalPages: totalPages,
-        currentScale: currentScale,
-        defaultTextStyle: defaultTextStyle,
-          lineHeight: lineHeight,
-          lineThickness: lineThickness,
-          lineColor: lineColor,
-          doneSelecting: true,
-      ).paint(canvas, size);
-    }
-
-    if (!showPageIndicator) return;
-    CanvasPainter(
-      invert: invert,
-      strokes: const [],
-      laserStrokes: const [],
-      currentStroke: null,
-      currentSelection: null,
-      primaryColor: primaryColor,
-      page: page,
-      showPageIndicator: true,
-      pageIndex: pageIndex,
-      totalPages: totalPages,
-      currentScale: currentScale,
-      defaultTextStyle: defaultTextStyle,
-        lineHeight: lineHeight,
-        lineThickness: lineThickness,
-        lineColor: lineColor,
-        doneSelecting: true,
-    ).paint(canvas, size);
-  }
-
-  @override
-  bool shouldRepaint(covariant _CachedStrokeLayerPainter oldDelegate) {
-    return oldDelegate.cache != cache ||
-    oldDelegate.invert != invert ||
-    oldDelegate.liveStrokes != liveStrokes ||
-    oldDelegate.page != page ||
-    oldDelegate.primaryColor != primaryColor ||
-    oldDelegate.pageIndex != pageIndex ||
-    oldDelegate.totalPages != totalPages ||
-    oldDelegate.defaultTextStyle != defaultTextStyle ||
-    oldDelegate.showPageIndicator != showPageIndicator ||
-    oldDelegate.lineHeight != lineHeight ||
-    oldDelegate.lineThickness != lineThickness ||
-    oldDelegate.lineColor != lineColor ||
-    oldDelegate.enableRasterLod != enableRasterLod ||
-    oldDelegate.followLiveViewportScale != followLiveViewportScale ||
-    oldDelegate.currentScale != currentScale ||
-    oldDelegate.pendingGeneration != pendingGeneration ||
-    oldDelegate.pendingStrokes.length != pendingStrokes.length;
+    oldDelegate.pendingStrokes.length != pendingStrokes.length ||
+    oldDelegate.tiledCache != tiledCache ||
+    oldDelegate.liveStrokes != liveStrokes;
   }
 }
 
@@ -1860,27 +1638,27 @@ class _PendingRasterJob {
 ///   extra sharpness.
 abstract final class RasterLodTuning {
   /// Above this canvas scale, tiles stay as vectors (no bitmap LOD).
-  static const double vectorLodMinScale = 10.0;
+  static const vectorLodMinScale = 1.5;
 
   /// Page stroke-count breakpoints. [mediumQualityMul] is 1.0 so a typical
   /// page matches the previous zoom-only curve.
-  static const int sparseStrokeCount = 28;
-  static const int mediumStrokeCount = 90;
-  static const int denseStrokeCount = 200;
-  static const double sparseQualityMul = 1.18;
-  static const double mediumQualityMul = 1.08;
-  static const double denseQualityMul = 0.95;
+  static const sparseStrokeCount = 28;
+  static const mediumStrokeCount = 90;
+  static const denseStrokeCount = 200;
+  static const sparseQualityMul = 1.18;
+  static const mediumQualityMul = 1.08;
+  static const denseQualityMul = 0.95;
 
   /// Extra pixels-per-logical-pixel for tiles that contain ballpoint,
   /// fountain, or calligraphy ink. 2.0 ≈ twice the samples on each edge.
-  static const double fineInkQualityBoost = 1.5;
+  static const fineInkQualityBoost = 1.5;
 
   /// Raises the per-tile bitmap cap for those same pens so the boost is
   /// not immediately clipped (e.g. 1280 → 2240 at 1×).
-  static const double fineInkCapMul = 1.80;
+  static const fineInkCapMul = 1.80;
 
   /// Static docked page-sidebar previews — sharper than live pan/zoom LOD.
-  static const double sidebarPreviewQualityMul = 1.35;
+  static const sidebarPreviewQualityMul = 1.35;
 
   static bool isFineInkTool(ToolId id) {
     return id == ToolId.ballpointPen ||
@@ -1890,15 +1668,15 @@ abstract final class RasterLodTuning {
 }
 
 class TiledStrokePictureCache {
-  static const double tileSize = 512.0;
-  static const double _cullPadding = 128.0;
-  static const int idleTileBudgetMs = 4;
-  static const int idleRasterBudgetMs = 12;
+  static const tileSize = 512.0;
+  static const _cullPadding = 128.0;
+  static const idleTileBudgetMs = 12;
+  static const idleRasterBudgetMs = 16;
 
   /// Absolute ceiling for a single tile bitmap.
-  static const int maxRasterEdgePx = 4096;
-  static const int maxConcurrentRasters = 1;
-  static const double vectorLodMinScale = RasterLodTuning.vectorLodMinScale;
+  static const maxRasterEdgePx = 4096;
+  static const maxConcurrentRasters = 1;
+  static const vectorLodMinScale = RasterLodTuning.vectorLodMinScale;
 
   /// True while the page list is scrolling/flinging or the canvas is
   /// panning/zooming. Mesh upgrades wait until this is false.
@@ -1945,11 +1723,10 @@ class TiledStrokePictureCache {
 
   /// Tests bake with [ui.Picture.toImageSync] so a paint can finish in-frame.
   @visibleForTesting
-  static bool get debugForceSyncRaster =>
-  PageRasterCacheManager.debugForceSyncRaster;
+  static bool get debugForceSyncRaster => PageRasterCacheManager.debugForceSyncRaster; // ignore: invalid_use_of_visible_for_testing_member
   @visibleForTesting
   static set debugForceSyncRaster(bool value) {
-    PageRasterCacheManager.debugForceSyncRaster = value;
+    PageRasterCacheManager.debugForceSyncRaster = value; // ignore: invalid_use_of_visible_for_testing_member
   }
 
   /// Drive Samsung-style temporal LOD from pan/zoom motion.
@@ -2011,7 +1788,7 @@ class TiledStrokePictureCache {
 
   @visibleForTesting
   static void debugResetViewportLod() {
-    PageRasterCacheManager.debugResetViewportLod();
+    PageRasterCacheManager.debugResetViewportLod(); // ignore: invalid_use_of_visible_for_testing_member
     _tileZoomSettleTimer?.cancel();
     _tileZoomSettleTimer = null;
     zoomLodSettled = true;
@@ -2043,7 +1820,7 @@ class TiledStrokePictureCache {
 
   /// Bumped when a paint left unrecorded visible tiles so the next frame
   /// can record one more without blocking the current frame.
-  final ValueNotifier<int> recordGeneration = ValueNotifier(0);
+  final recordGeneration = ValueNotifier<int>(0);
 
   int get recordedTileCount => _pictures.length;
 
@@ -2200,22 +1977,18 @@ class TiledStrokePictureCache {
     // that is what made pan/zoom/scroll scale with stroke count.
     // Cap refill only while drawing a new stroke. Eraser must refill every
     // discarded tile this frame so deleted ink is gone immediately.
-    final catchUpVisible = !_visibleTilesCaughtUp || _eagerRefillVisibleTiles;
     final capLiveRefill = deferRaster && Pen.currentStroke != null;
     // ALWAYS respect the time budget to avoid UI thread freezes!
     final useTimeBudget =
         !forbidRecord &&
         tileRecordBudgetMs != null &&
         tileRecordBudgetMs > 0;
-    // xnotes-style: while the viewport is moving, never record new tiles —
-    // only blit existing (possibly stale) rasters.
-    final tileBudget = viewportMoving
-        ? 0
-        : (capLiveRefill
-            ? 2
-            : (useTimeBudget
-                ? 0x7fffffff
-                : maxNewTilesPerPaint));
+    
+    final tileBudget = capLiveRefill
+        ? 2
+        : (useTimeBudget
+            ? 0x7fffffff
+            : maxNewTilesPerPaint);
     final Stopwatch? budgetWatch = useTimeBudget
     ? (Stopwatch()..start())
     : null;
@@ -2828,139 +2601,125 @@ class TiledStrokePictureCache {
           }
 
           void _ensureVisualSignature({
-            required Size size,
-            required EditorPage page,
-            required bool invert,
-            required double currentScale,
-            required int? lineHeight,
-            required double? lineThickness,
-            required Color? lineColor,
-          }) {
-            final signature = Object.hash(
-              size.width,
-              size.height,
-              page,
-              invert,
-              lineHeight,
-              lineThickness,
-              lineColor?.toARGB32(),
-            );
-            if (_visualSignature == signature) return;
-            if (_pictures.isNotEmpty) {
-              invalidateAll(eagerRefill: true);
-            }
-            _visualSignature = signature;
-          }
+    required Size size,
+    required EditorPage page,
+    required bool invert,
+    required double currentScale,
+    required int? lineHeight,
+    required double? lineThickness,
+    required Color? lineColor,
+  }) {
+    final signature = Object.hash(
+      size.width,
+      size.height,
+      page,
+      invert,
+      lineHeight,
+      lineThickness,
+      lineColor?.toARGB32(),
+    );
+    if (_visualSignature == signature) return;
+    if (_pictures.isNotEmpty) {
+      invalidateAll(eagerRefill: true);
+    }
+    _visualSignature = signature;
+  }
 
-          ui.Picture _recordTile({
-            required Rect tileRect,
-            required List<Stroke> tileStrokes,
-            required EditorPage page,
-            required bool invert,
-            required Color primaryColor,
-            required int pageIndex,
-            required int totalPages,
-            required double currentScale,
-            required TextStyle defaultTextStyle,
-            int? lineHeight,
-            double? lineThickness,
-            Color? lineColor,
-          }) {
-            final recorder = ui.PictureRecorder();
-            final canvas = Canvas(recorder, tileRect);
-            canvas.save();
-            canvas.clipRect(tileRect);
-            _paintTileContents(
-              canvas: canvas,
-              tileStrokes: tileStrokes,
-              page: page,
-              invert: invert,
-              primaryColor: primaryColor,
-              pageIndex: pageIndex,
-              totalPages: totalPages,
-              currentScale: currentScale,
-              defaultTextStyle: defaultTextStyle,
-                lineHeight: lineHeight,
-                lineThickness: lineThickness,
-                lineColor: lineColor,
-            );
-            canvas.restore();
-            return recorder.endRecording();
-          }
+  ui.Picture _recordTile({
+    required Rect tileRect,
+    required List<Stroke> tileStrokes,
+    required EditorPage page,
+    required bool invert,
+    required Color primaryColor,
+    required int pageIndex,
+    required int totalPages,
+    required double currentScale,
+    required TextStyle defaultTextStyle,
+    int? lineHeight,
+    double? lineThickness,
+    Color? lineColor,
+  }) {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, tileRect);
+    canvas.save();
+    canvas.clipRect(tileRect);
+    _paintTileContents(
+      canvas: canvas,
+      tileStrokes: tileStrokes,
+      page: page,
+      invert: invert,
+      primaryColor: primaryColor,
+      pageIndex: pageIndex,
+      totalPages: totalPages,
+      currentScale: currentScale,
+      defaultTextStyle: defaultTextStyle,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      lineColor: lineColor,
+    );
+    canvas.restore();
+    return recorder.endRecording();
+  }
 
-          void _paintTileContents({
-            required Canvas canvas,
-            required List<Stroke> tileStrokes,
-            required EditorPage page,
-            required bool invert,
-            required Color primaryColor,
-            required int pageIndex,
-            required int totalPages,
-            required double currentScale,
-            required TextStyle defaultTextStyle,
-            int? lineHeight,
-            double? lineThickness,
-            Color? lineColor,
-          }) {
-            final mergedMeshes = _mergeSolidStrokeMeshesByColor(
-              tileStrokes,
-              currentScale,
-            );
+  void _paintTileContents({
+    required Canvas canvas,
+    required List<Stroke> tileStrokes,
+    required EditorPage page,
+    required bool invert,
+    required Color primaryColor,
+    required int pageIndex,
+    required int totalPages,
+    required double currentScale,
+    required TextStyle defaultTextStyle,
+    int? lineHeight,
+    double? lineThickness,
+    Color? lineColor,
+  }) {
+    final mergedMeshes = _mergeSolidStrokeMeshesByColor(
+      tileStrokes,
+      currentScale,
+    );
 
-            CanvasPainter(
-              invert: invert,
-              // Mesh strokes stay in `strokes` so skipBatched still excludes them
-              // from the per-stroke pass; batched drawVertices no longer depends
-              // on that list being non-empty.
-              strokes: tileStrokes,
-              laserStrokes: const [],
-              currentStroke: null,
-              currentSelection: null,
-              primaryColor: primaryColor,
-              page: page,
-              showPageIndicator: false,
-              pageIndex: pageIndex,
-              totalPages: totalPages,
-              currentScale: currentScale,
-              defaultTextStyle: defaultTextStyle,
-                lineHeight: lineHeight,
-                lineThickness: lineThickness,
-                lineColor: lineColor,
-                doneSelecting: true,
-                batchedStrokes: mergedMeshes.isEmpty ? null : mergedMeshes,
-                // Spine-mesh pens drawVertices. Advanced Pen is path-only
-                // ([canBatchSolidMesh] is false) and fills highQualityPath.
-                preferPathFill: false,
-            ).paint(canvas, page.size);
-          }
+    CanvasPainter(
+      invert: invert,
+      strokes: tileStrokes,
+      laserStrokes: const [],
+      currentStroke: null,
+      currentSelection: null,
+      primaryColor: primaryColor,
+      page: page,
+      showPageIndicator: false,
+      pageIndex: pageIndex,
+      totalPages: totalPages,
+      currentScale: currentScale,
+      defaultTextStyle: defaultTextStyle,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness?.toDouble(),
+      lineColor: lineColor,
+      doneSelecting: true,
+      batchedStrokes: mergedMeshes.isEmpty ? null : mergedMeshes,
+      preferPathFill: false,
+    ).paint(canvas, page.size);
+  }
 
-          void _markFineInk(int key, List<Stroke> strokes) {
-            var fine = false;
-            for (final stroke in strokes) {
-              if (RasterLodTuning.isFineInkTool(stroke.toolId)) {
-                fine = true;
-                break;
-              }
-            }
-            if (fine) {
-              _fineInkKeys.add(key);
-            } else {
-              _fineInkKeys.remove(key);
-            }
-          }
+  void _markFineInk(int key, List<Stroke> strokes) {
+    var fine = false;
+    for (final stroke in strokes) {
+      if (RasterLodTuning.isFineInkTool(stroke.toolId)) {
+        fine = true;
+        break;
+      }
+    }
+    if (fine) {
+      _fineInkKeys.add(key);
+    } else {
+      _fineInkKeys.remove(key);
+    }
+  }
 
-          int _countVisibleStrokes(Rect visible, List<Stroke> strokes, EditorPage page) {
+  int _countVisibleStrokes(Rect visible, List<Stroke> strokes, EditorPage page) {
             if (strokes.isEmpty) return 0;
             final query = visible.inflate(_cullPadding);
-            final qt = page.strokeSpatialIndex;
-            if (qt != null) {
-              int n = 0;
-              final found = qt.query(query);
-              for (final s in found) {
-                if (s.bounds.overlaps(query)) n++;
-              }
-              return n;
-            }
             _ensureGrid(strokes);
             final grid = _grid;
             if (grid == null) return strokes.length;
@@ -2970,27 +2729,14 @@ class TiledStrokePictureCache {
                 index < strokes.length &&
                 strokes[index].bounds.overlaps(query)) {
                 n++;
-                }
+              }
             }
             return n;
           }
 
           List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
             final queryRect = tileRect.inflate(_cullPadding);
-            final qt = page.strokeSpatialIndex;
-            if (qt != null) {
-              final tileStrokes = <Stroke>[];
-              final found = qt.query(queryRect);
-              if (found.isEmpty) return tileStrokes;
-              final foundSet = found.toSet();
-              for (int i = 0; i < strokes.length; i++) {
-                final s = strokes[i];
-                if (foundSet.contains(s) && s.bounds.overlaps(queryRect)) {
-                  tileStrokes.add(s);
-                }
-              }
-              return tileStrokes;
-            }
+            _ensureGrid(strokes);
             final candidateIndices = _grid?.query(queryRect) ?? const <int>[];
             final tileStrokes = <Stroke>[];
             for (final index in candidateIndices) {
@@ -3179,19 +2925,19 @@ class TiledStrokePictureCache {
           }
 
           static int _sidebarPreviewEdgePx(
-            double logical,
-            double previewScale,
-            double dpr,
-          ) {
-            final px =
-            (logical *
-            previewScale *
-            dpr *
-            rasterQuality(previewScale) *
-            RasterLodTuning.sidebarPreviewQualityMul)
-            .round();
-            return px.clamp(32, maxRasterEdgePx);
-          }
+          double logical,
+          double previewScale,
+          double dpr,
+        ) {
+          final px =
+          (logical *
+          previewScale *
+          dpr *
+          rasterQuality(previewScale) *
+          RasterLodTuning.sidebarPreviewQualityMul)
+          .round();
+          return px.clamp(32, maxRasterEdgePx);
+        }
 }
 
 class _LinksCard extends StatelessWidget {
@@ -3205,7 +2951,7 @@ class _LinksCard extends StatelessWidget {
     required this.colorScheme,
   });
 
-  static const double _width = 280;
+  static const _width = 280.0;
 
   final EditorCoreInfo coreInfo;
   final int pageIndex;
@@ -3216,7 +2962,7 @@ class _LinksCard extends StatelessWidget {
   final ColorScheme colorScheme;
 
   static String _linkLabel(NoteLink link) {
-    if (link.label?.isNotEmpty == true) return link.label!;
+    if (link.label?.isNotEmpty ?? false) return link.label!;
     final name = link.targetPath.split('/').last;
     if (link.isRange) {
       return 'p${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1}: $name';

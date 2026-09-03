@@ -581,7 +581,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
         _transformer.value = finalMatrix;
 
         final Offset focalPointSceneCheck = _toScene(
-          finalMatrix,
+          _transformer.value,
           details.localFocalPoint,
         );
         if (_round(_referenceFocalPoint!) != _round(focalPointSceneCheck)) {
@@ -765,13 +765,14 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
     final Offset focalPointScene = _transformer.toScene(local);
 
-    _transformer.value = _matrixScale(_transformer.value, scaleChange);
+    var nextMatrix = _matrixScale(_transformer.value, scaleChange);
 
-    final Offset focalPointSceneScaled = _transformer.toScene(local);
-    _transformer.value = _matrixTranslate(
-      _transformer.value,
+    final Offset focalPointSceneScaled = _toScene(nextMatrix, local);
+    nextMatrix = _matrixTranslate(
+      nextMatrix,
       focalPointSceneScaled - focalPointScene,
     );
+    _transformer.value = nextMatrix;
   }
 
   void _handleInertiaAnimation() {
@@ -822,15 +823,17 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     final Offset referenceFocalPoint = _transformer.toScene(
       _scaleAnimationFocalPoint,
     );
-    _transformer.value = _matrixScale(_transformer.value, scaleChange);
+    var nextMatrix = _matrixScale(_transformer.value, scaleChange);
 
-    final Offset focalPointSceneScaled = _transformer.toScene(
+    final Offset focalPointSceneScaled = _toScene(
+      nextMatrix,
       _scaleAnimationFocalPoint,
     );
-    _transformer.value = _matrixTranslate(
-      _transformer.value,
+    nextMatrix = _matrixTranslate(
+      nextMatrix,
       focalPointSceneScaled - referenceFocalPoint,
     );
+    _transformer.value = nextMatrix;
   }
 
   void _handleTransformation() {

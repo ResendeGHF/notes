@@ -3,9 +3,9 @@
 
 import 'package:flutter/material.dart';
 
-const double kHomeListRowHeight = 88;
-const double kHomeListRowGridExtent = 100;
-const double kHomeListRowCompactExtent = 88;
+const double kHomeListRowHeight = 64;
+const double kHomeListRowGridExtent = 64;
+const double kHomeListRowCompactExtent = 64;
 
 class HomeListRowSurface extends StatelessWidget {
   const HomeListRowSurface({

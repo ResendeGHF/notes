@@ -108,28 +108,35 @@ class _NewNoteButtonState extends State<NewNoteButton> {
       dialRoot: (context, open, toggleChildren) {
         final platform = Theme.of(context).platform;
         final colorScheme = Theme.of(context).colorScheme;
-        return Container(
+        
+        final isApple = platform == TargetPlatform.iOS || platform == TargetPlatform.macOS;
+        final borderRadius = isApple || open ? 28.0 : 16.0;
+
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeInOutCubic,
           height: 56,
           width: 56,
           decoration: BoxDecoration(
-            color: colorScheme.primaryContainer,
-            borderRadius: platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
-                ? BorderRadius.circular(28)
-                : BorderRadius.circular(16),
+            color: open ? colorScheme.secondaryContainer : colorScheme.primaryContainer,
+            borderRadius: BorderRadius.circular(borderRadius),
           ),
           child: IconButton(
             onPressed: toggleChildren,
             tooltip: t.home.tooltips.newNote,
-            color: colorScheme.onPrimaryContainer,
+            color: open ? colorScheme.onSecondaryContainer : colorScheme.onPrimaryContainer,
             style: IconButton.styleFrom(
               padding: EdgeInsets.zero,
-              shape: platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
-                  ? const CircleBorder()
-                  : RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(borderRadius),
+              ),
             ),
-            icon: const Icon(Icons.add),
+            icon: AnimatedRotation(
+              turns: open ? 0.125 : 0.0,
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOutCubic,
+              child: const Icon(Icons.add),
+            ),
           ),
         );
       },

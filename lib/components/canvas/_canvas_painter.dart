@@ -98,6 +98,7 @@ class CanvasPainter extends CustomPainter {
   final bool preferPathFill;
 
   static final _reusableQueryBuffer = <Stroke>[];
+  static final _reusableStrokeSet = <Stroke>{};
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -128,12 +129,17 @@ class CanvasPainter extends CustomPainter {
       _reusableQueryBuffer.clear();
       if (quadTree != null) {
         final found = quadTree!.query(cullingRect);
-        final strokeSet = strokes.length > 64 ? strokes.toSet() : null;
+        _reusableStrokeSet.clear();
+        final bool useSet = strokes.length > 64;
+        if (useSet) {
+          _reusableStrokeSet.addAll(strokes);
+        }
         for (final s in found) {
-          if (strokeSet != null ? strokeSet.contains(s) : strokes.contains(s)) {
+          if (useSet ? _reusableStrokeSet.contains(s) : strokes.contains(s)) {
             _reusableQueryBuffer.add(s);
           }
         }
+        _reusableStrokeSet.clear();
       } else {
         final indices = spatialGrid!.query(cullingRect);
         for (final i in indices) {
