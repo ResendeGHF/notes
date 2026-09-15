@@ -644,7 +644,7 @@ class FileManager {
     String destinationPath,
     String password, {
     void Function(double progress, String message, {int totalNotes})?
-        onProgress,
+    onProgress,
   }) async {
     final docsDir = Directory(documentsDirectory);
     if (!docsDir.existsSync()) {
@@ -773,43 +773,31 @@ class FileManager {
 
   static Future<bool> isDataBackupArchive(String path) async {
     try {
-      final stamp = DateTime.now().microsecondsSinceEpoch;
-      final tmpZip = '$path.isdata_$stamp.zip';
-      var zipPath = path;
-      var ownsZip = false;
+      final header = File(path).openSync(mode: FileMode.read);
+      late final Uint8List peek;
       try {
-        final header = File(path).openSync(mode: FileMode.read);
-        late final Uint8List peek;
-        try {
-          peek = Uint8List.fromList(header.readSync(32));
-        } finally {
-          header.closeSync();
-        }
-        // Encrypted monoliths need a password — caller should use the
-        // password-aware check. Treat encrypted files as "not plain data".
-        if (SbaEncryption.isEncrypted(peek)) return false;
-
-        final input = InputFileStream(zipPath);
-        final archive = ZipDecoder().decodeStream(input);
-        final manifestFiles = archive.files
-            .where((f) => f.name == _dataBackupManifestPath)
-            .toList();
-        input.closeSync();
-        final manifestFile =
-            manifestFiles.isNotEmpty ? manifestFiles.first : null;
-        if (manifestFile == null) return false;
-        final manifestJson = BackupFormat.decodeJsonFile(
-          _archiveFileBytes(manifestFile),
-        );
-        return manifestJson['type'] == 'data';
+        peek = Uint8List.fromList(header.readSync(32));
       } finally {
-        if (ownsZip) {
-          try {
-            final f = File(tmpZip);
-            if (f.existsSync()) f.deleteSync();
-          } catch (_) {}
-        }
+        header.closeSync();
       }
+      // Encrypted monoliths need a password — caller should use the
+      // password-aware check. Treat encrypted files as "not plain data".
+      if (SbaEncryption.isEncrypted(peek)) return false;
+
+      final input = InputFileStream(path);
+      final archive = ZipDecoder().decodeStream(input);
+      final manifestFiles = archive.files
+          .where((f) => f.name == _dataBackupManifestPath)
+          .toList();
+      input.closeSync();
+      final manifestFile = manifestFiles.isNotEmpty
+          ? manifestFiles.first
+          : null;
+      if (manifestFile == null) return false;
+      final manifestJson = BackupFormat.decodeJsonFile(
+        _archiveFileBytes(manifestFile),
+      );
+      return manifestJson['type'] == 'data';
     } catch (_) {
       return false;
     }
@@ -1849,7 +1837,7 @@ class FileManager {
               await SaverGallery.saveImage(
                 Uint8List.fromList(bytes),
                 fileName: fileName,
-                androidRelativePath: 'Pictures/Saber',
+                albumPath: 'Pictures/Saber',
                 skipIfExists: true,
               );
               savedToGallery = true;
@@ -1862,7 +1850,7 @@ class FileManager {
             await SaverGallery.saveImage(
               Uint8List.fromList(bytes),
               fileName: fileName,
-              androidRelativePath: 'Pictures/Saber',
+              albumPath: 'Pictures/Saber',
               skipIfExists: true,
             );
             savedToGallery = true;
@@ -3204,23 +3192,20 @@ class FileManager {
       ];
     }
 
-    final out = <NoteIndexEntry>[];
-    for (final path in visible) {
-      out.add(_noteIndexEntryFromDisk(path));
-    }
+    final out = await Future.wait(visible.map((path) => _noteIndexEntryFromDiskAsync(path)));
     return out;
   }
 
-  static NoteIndexEntry _noteIndexEntryFromDisk(String path) {
+  static Future<NoteIndexEntry> _noteIndexEntryFromDiskAsync(String path) async {
     var modified = 0;
     var size = 0;
     try {
-      final file2 = getFile(path + Editor.extension);
-      final file = file2.existsSync()
-          ? file2
-          : getFile(path + Editor.extensionOldJson);
-      if (file.existsSync()) {
-        final stat = file.statSync();
+      var file = getFile(path + Editor.extension);
+      if (!await file.exists()) {
+        file = getFile(path + Editor.extensionOldJson);
+      }
+      if (await file.exists()) {
+        final stat = await file.stat();
         modified = stat.modified.millisecondsSinceEpoch;
         size = stat.size;
       }
@@ -3259,7 +3244,7 @@ class FileManager {
         sizeBytes: size ?? 0,
       );
     }
-    return _noteIndexEntryFromDisk(base);
+    return await _noteIndexEntryFromDiskAsync(base);
   }
 
   static Future<List<String>> getRecentlyAccessed() async {
@@ -4396,13 +4381,13 @@ class FolderLinkManager {
       var dir = directoryPath.replaceAll('\\', '/');
       if (!dir.endsWith('/')) dir += '/';
       final path = '${dir}$_linksFileName';
-      
+
       final bytes = await FileManager.readFile(
         path,
         suppressLogs: true,
         allowMissing: true,
       );
-      
+
       if (bytes != null && bytes.isNotEmpty) {
         // allowMalformed protege contra bytes de padding perdidos no cofre
         final content = utf8.decode(bytes, allowMalformed: true);
@@ -4419,14 +4404,14 @@ class FolderLinkManager {
 
   static Future<void> addLink(String directoryPath, String targetPath) async {
     final links = await getLinks(directoryPath);
-    
-    // Remove barras invertidas e qualquer barra solitária no final do caminho 
+
+    // Remove barras invertidas e qualquer barra solitária no final do caminho
     // para evitar que o nome da pasta seja uma string vazia ("")
     var cleanTarget = targetPath.replaceAll('\\', '/');
     while (cleanTarget.endsWith('/') && cleanTarget.length > 1) {
       cleanTarget = cleanTarget.substring(0, cleanTarget.length - 1);
     }
-    
+
     final parts = cleanTarget.split('/');
     String name = parts.last;
 
@@ -4439,11 +4424,11 @@ class FolderLinkManager {
     }
 
     links[finalName] = targetPath;
-    
+
     var dir = directoryPath.replaceAll('\\', '/');
     if (!dir.endsWith('/')) dir += '/';
     final path = '${dir}$_linksFileName';
-    
+
     await FileManager.writeFile(
       path,
       utf8.encode(jsonEncode(links)),
@@ -4457,7 +4442,7 @@ class FolderLinkManager {
       var dir = directoryPath.replaceAll('\\', '/');
       if (!dir.endsWith('/')) dir += '/';
       final path = '${dir}$_linksFileName';
-      
+
       await FileManager.writeFile(
         path,
         utf8.encode(jsonEncode(links)),
@@ -4681,7 +4666,7 @@ class BackupManager {
     try {
       const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
       await _notificationsPlugin.initialize(
-        const InitializationSettings(android: androidInit),
+        settings: const InitializationSettings(android: androidInit),
       );
       _notificationsInitialized = true;
     } catch (e) {
@@ -4700,9 +4685,7 @@ class BackupManager {
   /// Blocking Backup now: worker isolate so Android does not ANR.
   static Future<void> performIncrementalBackupForeground() async {
     if (!_canRunIncrementalBackup) {
-      throw Exception(
-        'Please select a target file and generate a key first.',
-      );
+      throw Exception('Please select a target file and generate a key first.');
     }
     await BackgroundOperationLock.runSerialized(() async {
       await _performIncrementalBackupWork(backgroundIsolate: false);
@@ -4712,9 +4695,7 @@ class BackupManager {
   /// Run in background / auto-backup: worker isolate, UI stays usable.
   static Future<void> performIncrementalBackupBackground() async {
     if (!_canRunIncrementalBackup) {
-      throw Exception(
-        'Please select a target file and generate a key first.',
-      );
+      throw Exception('Please select a target file and generate a key first.');
     }
     await BackgroundOperationQueue.instance.enqueue<void>(
       kind: BackgroundOperationKind.backup,
@@ -4750,7 +4731,12 @@ class BackupManager {
 
     _isCancelled = false;
 
-    void report(double p, String msg, {bool indeterminate = false, int totalNotes = 0}) {
+    void report(
+      double p,
+      String msg, {
+      bool indeterminate = false,
+      int totalNotes = 0,
+    }) {
       status.value = BackupStatus(
         isRunning: true,
         progress: p,
@@ -4793,10 +4779,7 @@ class BackupManager {
       }
 
       final extraDbFiles = <String, String>{};
-      const dbNames = [
-        '.saber_tags.db',
-        '.saber_note_links.db',
-      ];
+      const dbNames = ['.saber_tags.db', '.saber_note_links.db'];
       for (final dbName in dbNames) {
         final dbPath = p.join(FileManager.documentsDirectory, dbName);
         if (File(dbPath).existsSync()) {
@@ -4813,9 +4796,7 @@ class BackupManager {
 
       report(
         0.03,
-        noteCount > 0
-            ? 'Backing up $noteCount notes...'
-            : 'Starting backup...',
+        noteCount > 0 ? 'Backing up $noteCount notes...' : 'Starting backup...',
         indeterminate: true,
         totalNotes: noteCount,
       );
@@ -4845,11 +4826,13 @@ class BackupManager {
         report(p, msg, indeterminate: p < 0.05, totalNotes: lastNotes);
         if (backgroundIsolate && (p - lastNotifyAt >= 0.02 || p >= 1)) {
           lastNotifyAt = p;
-          unawaited(_updateNotification(
-            (p * 100).round().clamp(0, 100),
-            100,
-            totalNotes: lastNotes,
-          ));
+          unawaited(
+            _updateNotification(
+              (p * 100).round().clamp(0, 100),
+              100,
+              totalNotes: lastNotes,
+            ),
+          );
         }
       }
 
@@ -4880,7 +4863,7 @@ class BackupManager {
   static Future<void> _runIncrementalBackupInIsolate(
     IncrementalBackupRequest request,
     void Function(double progress, String message, {int? totalNotes})
-        onProgress,
+    onProgress,
   ) async {
     final receive = ReceivePort();
     try {
@@ -5222,17 +5205,17 @@ class BackupManager {
           ? '$totalNotes notes — $current%'
           : '$current / $total assets synced';
       await _notificationsPlugin.show(
-        888,
-        t.backup.notificationTitle,
-        body,
-        NotificationDetails(android: androidDetails),
+        id: 888,
+        title: t.backup.notificationTitle,
+        body: body,
+        notificationDetails: NotificationDetails(android: androidDetails),
       );
     } catch (_) {}
   }
 
   static Future<void> _cancelNotification() async {
     try {
-      await _notificationsPlugin.cancel(888);
+      await _notificationsPlugin.cancel(id: 888);
     } catch (_) {}
   }
 }

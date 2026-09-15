@@ -9,9 +9,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pdf_combiner/models/merge_input.dart';
 import 'package:pdf_combiner/pdf_combiner.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
-import 'package:saber/components/navbar/horizontal_navbar.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -75,7 +75,7 @@ class _NewNoteButtonState extends State<NewNoteButton> {
           '${outputDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.pdf';
 
       final result = await PdfCombiner.mergeMultiplePDFs(
-        inputPaths: paths,
+        inputs: paths.map((p) => MergeInput.path(p)).toList(),
         outputPath: outputPath,
       );
 
@@ -94,310 +94,673 @@ class _NewNoteButtonState extends State<NewNoteButton> {
 
   @override
   Widget build(BuildContext context) {
-    final materialBorderRadius = BorderRadius.circular(16);
-    return SpeedDial(
-      spacing: 3,
-      mini: true,
-      openCloseDial: isDialOpen,
-      childPadding: const EdgeInsets.all(5),
-      spaceBetweenChildren: 4,
-      switchLabelPosition: Directionality.of(context) == TextDirection.rtl,
-      shape: widget.cupertino
-          ? const CircleBorder()
-          : RoundedRectangleBorder(borderRadius: materialBorderRadius),
-      dialRoot: (context, open, toggleChildren) {
-        final platform = Theme.of(context).platform;
-        final colorScheme = Theme.of(context).colorScheme;
-        
-        final isApple = platform == TargetPlatform.iOS || platform == TargetPlatform.macOS;
-        final borderRadius = isApple || open ? 28.0 : 16.0;
+    final originalTheme = Theme.of(context);
 
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeInOutCubic,
-          height: 56,
-          width: 56,
-          decoration: BoxDecoration(
-            color: open ? colorScheme.secondaryContainer : colorScheme.primaryContainer,
-            borderRadius: BorderRadius.circular(borderRadius),
-          ),
-          child: IconButton(
-            onPressed: toggleChildren,
-            tooltip: t.home.tooltips.newNote,
-            color: open ? colorScheme.onSecondaryContainer : colorScheme.onPrimaryContainer,
-            style: IconButton.styleFrom(
-              padding: EdgeInsets.zero,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(borderRadius),
+    return Theme(
+      data: originalTheme.copyWith(
+        hoverColor: Colors.transparent,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        focusColor: Colors.transparent,
+      ),
+     child: Padding(
+        padding: const EdgeInsets.only(right: 16.0, bottom: 16.0),
+        child: SpeedDial(
+          spacing: 12,
+          spaceBetweenChildren: 8,
+          renderOverlay: false,
+          elevation: 0,
+          openCloseDial: isDialOpen,
+          switchLabelPosition: Directionality.of(context) == TextDirection.rtl,
+          childrenButtonSize: Size.zero,
+          dialRoot: (context, open, toggleChildren) {
+            final colorScheme = Theme.of(context).colorScheme;
+
+            final double size = open ? 56.0 : 72.0;
+            final double borderRadius = open ? 16.0 : 22.0;
+
+            return Theme(
+              data: originalTheme,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
+                height: size,
+                width: size,
+                decoration: BoxDecoration(
+                  color: open
+                      ? colorScheme.surfaceContainerHigh
+                      : colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(borderRadius),
+                  boxShadow: [
+                    BoxShadow(
+                      color: colorScheme.shadow.withValues(alpha: open ? 0.1 : 0.15),
+                      blurRadius: open ? 4 : 8,
+                      offset: Offset(0, open ? 2 : 4),
+                    ),
+                  ],
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: toggleChildren,
+                    borderRadius: BorderRadius.circular(borderRadius),
+                    child: Center(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 300),
+                        switchInCurve: Curves.easeOutBack,
+                        switchOutCurve: Curves.easeInBack,
+                        transitionBuilder: (Widget child, Animation<double> animation) {
+                          return RotationTransition(
+                            turns: Tween<double>(begin: 0.5, end: 1.0).animate(animation),
+                            child: ScaleTransition(scale: animation, child: child),
+                          );
+                        },
+                        child: open
+                            ? Icon(
+                                Icons.close,
+                                key: const ValueKey('close'),
+                                size: 24.0,
+                                color: colorScheme.onSurfaceVariant,
+                              )
+                            : Icon(
+                                Icons.add_rounded,
+                                key: const ValueKey('add'),
+                                size: 36.0,
+                                color: colorScheme.onPrimaryContainer,
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
-            icon: AnimatedRotation(
-              turns: open ? 0.125 : 0.0,
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeInOutCubic,
-              child: const Icon(Icons.add),
-            ),
-          ),
-        );
-      },
-      children: [
-        SpeedDialChild(
-          child: const Icon(Icons.create),
-          label: t.home.create.newNote,
-          onTap: () async {
-            await _closeDialBeforeNavigation();
-            if (!context.mounted) return;
-
-            if (widget.path == null) {
-              context.push(RoutePaths.edit);
-            } else {
-              final newFilePath = await FileManager.newFilePath(
-                '${widget.path}/',
-              );
-
-              if (!context.mounted) return;
-              context.push(RoutePaths.editFilePath(newFilePath));
-            }
+            );
           },
-        ),
-        SpeedDialChild(
-          child: const Icon(Icons.note_add),
-          label: t.home.create.importNote,
-          onTap: () async {
-            VaultAdapter.preventLock = true;
-            FilePickerResult? result;
-            try {
-              result = await FilePicker.platform.pickFiles(
-                type: FileType.any,
-                allowMultiple: true,
-                withData: false,
-              );
-            } finally {
-              VaultAdapter.preventLock = false;
-            }
+          children: [
+            SpeedDialChild(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              child: const Offstage(),
+              labelWidget: Theme(
+                data: originalTheme,
+                child: Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  child: Material(
+                    elevation: 1,
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    shadowColor: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.2),
+                    shape: const StadiumBorder(),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () async {
+                        await _closeDialBeforeNavigation();
+                        if (!context.mounted) return;
 
-            if (result == null || result.files.isEmpty) return;
+                        if (widget.path == null) {
+                          context.push(RoutePaths.edit);
+                        } else {
+                          final newFilePath = await FileManager.newFilePath(
+                            '${widget.path}/',
+                          );
 
-            isDialOpen.value = false;
+                          if (!context.mounted) return;
+                          context.push(RoutePaths.editFilePath(newFilePath));
+                        }
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 14,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.edit_outlined,
+                              size: 20,
+                              color: Theme.of(context).colorScheme.onSecondaryContainer,
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              t.home.create.newNote,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: Theme.of(context).colorScheme.onSecondaryContainer,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              onTap: () async {
+                await _closeDialBeforeNavigation();
+                if (!context.mounted) return;
 
-            final files = result.files.where((f) => f.path != null).toList();
-            if (files.isEmpty) return;
+                if (widget.path == null) {
+                  context.push(RoutePaths.edit);
+                } else {
+                  final newFilePath = await FileManager.newFilePath(
+                    '${widget.path}/',
+                  );
 
-            if (!context.mounted) return;
-            final scaffoldCtx = context;
-            final router = GoRouter.of(scaffoldCtx);
-            final themeData = Theme.of(scaffoldCtx);
-            final mediaQueryData = MediaQuery.of(scaffoldCtx);
+                  if (!context.mounted) return;
+                  context.push(RoutePaths.editFilePath(newFilePath));
+                }
+              },
+            ),
+            SpeedDialChild(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              child: const Offstage(),
+              labelWidget: Theme(
+                data: originalTheme,
+                child: Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  child: Material(
+                    elevation: 1,
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    shadowColor: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.2),
+                    shape: const StadiumBorder(),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () async {
+                        VaultAdapter.preventLock = true;
+                        List<PlatformFile>? filesResult;
+                        try {
+                          filesResult = await FilePicker.pickFiles(
+                            type: FileType.any,
+                          );
+                        } finally {
+                          VaultAdapter.preventLock = false;
+                        }
 
-            await BackgroundOperationQueue.instance.enqueue<void>(
-              kind: BackgroundOperationKind.importFile,
-              headline: t.home.create.importNote,
-              initialDetail: t.home.create.importNote,
-              work: (onProgress) async {
-                final pdfFiles = files
-                    .where((f) => f.path!.toLowerCase().endsWith('.pdf'))
-                    .toList();
-                final otherFiles = files
-                    .where((f) => !f.path!.toLowerCase().endsWith('.pdf'))
-                    .toList();
+                        if (filesResult == null || filesResult.isEmpty) return;
 
-                if (pdfFiles.isNotEmpty) {
-                  if (!Editor.canRasterPdf) {
-                    if (scaffoldCtx.mounted) {
-                      ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
-                        SnackBar(content: Text(t.home.deviceNoPdfImport)),
-                      );
-                    }
-                    return;
-                  }
+                        isDialOpen.value = false;
 
-                  bool shouldMerge = false;
-                  final bool isMultiple = pdfFiles.length > 1;
+                        final files = filesResult.where((f) => f.path != null).toList();
+                        if (files.isEmpty) return;
 
-                  if (isMultiple) {
-                    onProgress(0, t.home.importPdf, indeterminate: true);
-                    if (!scaffoldCtx.mounted) return;
-                    final bool? userChoice = await _showMergeDialog(
-                      scaffoldCtx,
-                      pdfFiles.length,
-                    );
-                    if (userChoice == null) return;
-                    shouldMerge = userChoice;
+                        if (!context.mounted) return;
+                        final scaffoldCtx = context;
+                        final router = GoRouter.of(scaffoldCtx);
+                        final themeData = Theme.of(scaffoldCtx);
+                        final mediaQueryData = MediaQuery.of(scaffoldCtx);
 
-                    onProgress(0, t.home.importPdf, indeterminate: true);
-                    await Future<void>.delayed(
-                      const Duration(milliseconds: 100),
-                    );
-                  }
+                        await BackgroundOperationQueue.instance.enqueue<void>(
+                          kind: BackgroundOperationKind.importFile,
+                          headline: t.home.create.importNote,
+                          initialDetail: t.home.create.importNote,
+                          work: (onProgress) async {
+                            final pdfFiles = files
+                                .where((f) => f.path!.toLowerCase().endsWith('.pdf'))
+                                .toList();
+                            final otherFiles = files
+                                .where((f) => !f.path!.toLowerCase().endsWith('.pdf'))
+                                .toList();
 
-                  try {
-                    if (shouldMerge && isMultiple) {
-                      onProgress(0, 'Merging PDFs', indeterminate: true);
+                            if (pdfFiles.isNotEmpty) {
+                              if (!Editor.canRasterPdf) {
+                                if (scaffoldCtx.mounted) {
+                                  ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                                    SnackBar(content: Text(t.home.deviceNoPdfImport)),
+                                  );
+                                }
+                                return;
+                              }
 
-                      final paths = pdfFiles.map((e) => e.path!).toList();
-                      final mergedPdfPath = await _mergePdfsAndSave(paths);
+                              bool shouldMerge = false;
+                              final bool isMultiple = pdfFiles.length > 1;
 
-                      if (mergedPdfPath != null) {
-                        final firstFileName = pdfFiles.first.name;
-                        final fileNameWithoutExtension = firstFileName
-                            .substring(0, firstFileName.length - '.pdf'.length);
+                              if (isMultiple) {
+                                onProgress(0, t.home.importPdf, indeterminate: true);
+                                if (!scaffoldCtx.mounted) return;
+                                final bool? userChoice = await _showMergeDialog(
+                                  scaffoldCtx,
+                                  pdfFiles.length,
+                                );
+                                if (userChoice == null) return;
+                                shouldMerge = userChoice;
 
-                        final sbnFilePath =
-                            await FileManager.suffixFilePathToMakeItUnique(
-                              '${widget.path ?? ''}/$fileNameWithoutExtension (Merged)',
+                                onProgress(0, t.home.importPdf, indeterminate: true);
+                                await Future<void>.delayed(
+                                  const Duration(milliseconds: 100),
+                                );
+                              }
+
+                              try {
+                                if (shouldMerge && isMultiple) {
+                                  onProgress(0, 'Merging PDFs', indeterminate: true);
+
+                                  final paths = pdfFiles.map((e) => e.path!).toList();
+                                  final mergedPdfPath = await _mergePdfsAndSave(paths);
+
+                                  if (mergedPdfPath != null) {
+                                    final firstFileName = pdfFiles.first.name;
+                                    final fileNameWithoutExtension = firstFileName
+                                        .substring(0, firstFileName.length - '.pdf'.length);
+
+                                    final sbnFilePath =
+                                        await FileManager.suffixFilePathToMakeItUnique(
+                                          '${widget.path ?? ''}/$fileNameWithoutExtension (Merged)',
+                                        );
+
+                                    await FileManager.generateThumbnailFromPdf(
+                                      mergedPdfPath,
+                                      '$sbnFilePath${Editor.extension}.p',
+                                    );
+
+                                    onProgress(1, firstFileName, indeterminate: false);
+                                    if (scaffoldCtx.mounted) {
+                                      router.push(
+                                        RoutePaths.editImportPdf(
+                                          sbnFilePath,
+                                          mergedPdfPath,
+                                        ),
+                                      );
+                                    }
+                                  }
+                                } else if (isMultiple) {
+                                  int successCount = 0;
+                                  final int total = pdfFiles.length;
+
+                                  for (int i = 0; i < total; i++) {
+                                    final file = pdfFiles[i];
+
+                                    onProgress(
+                                      (i + 1) / total,
+                                      '${i + 1}/$total · ${file.name}',
+                                    );
+                                    await Future<void>.delayed(Duration.zero);
+
+                                    final name = file.name.substring(
+                                      0,
+                                      file.name.length - '.pdf'.length,
+                                    );
+                                    final sbnFilePath =
+                                        await FileManager.suffixFilePathToMakeItUnique(
+                                          '${widget.path ?? ''}/$name',
+                                        );
+
+                                    final success = await FileManager.createNoteFromPdf(
+                                      sbnFilePath,
+                                      file.path!,
+                                      theme: themeData,
+                                      mediaQuery: mediaQueryData,
+                                      onImportProgress: (p, status) {
+                                        onProgress(
+                                          (i + p) / total,
+                                          '${i + 1}/$total · $status',
+                                        );
+                                      },
+                                    );
+
+                                    if (success) successCount++;
+                                  }
+
+                                  if (scaffoldCtx.mounted) {
+                                    ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          '$successCount notes imported successfully.',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                } else {
+                                  final file = pdfFiles.first;
+                                  final name = file.name.substring(
+                                    0,
+                                    file.name.length - '.pdf'.length,
+                                  );
+
+                                  final sbnFilePath =
+                                      await FileManager.suffixFilePathToMakeItUnique(
+                                        '${widget.path ?? ''}/$name',
+                                      );
+
+                                  await FileManager.createNoteFromPdf(
+                                    sbnFilePath,
+                                    file.path!,
+                                    theme: themeData,
+                                    mediaQuery: mediaQueryData,
+                                    onImportProgress: onProgress,
+                                  );
+
+                                  if (scaffoldCtx.mounted) {
+                                    router.push(RoutePaths.editFilePath(sbnFilePath));
+                                  }
+                                }
+                              } catch (e) {
+                                if (scaffoldCtx.mounted) {
+                                  ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                                    SnackBar(
+                                      content: Text(t.home.errorImporting(error: e)),
+                                    ),
+                                  );
+                                }
+                              }
+                            }
+
+                            if (otherFiles.isNotEmpty) {
+                              int count = 0;
+                              String? lastImportedPath;
+
+                              for (int i = 0; i < otherFiles.length; i++) {
+                                final file = otherFiles[i];
+                                onProgress(
+                                  (i + 1) / otherFiles.length,
+                                  '${i + 1}/${otherFiles.length} · ${file.name}',
+                                );
+                                await Future<void>.delayed(Duration.zero);
+
+                                final filePath = file.path!;
+                                if (filePath.toLowerCase().endsWith('.sbn') ||
+                                    filePath.toLowerCase().endsWith('.sbn2') ||
+                                    filePath.toLowerCase().endsWith('.sba')) {
+                                  final importedPath = await FileManager.importFile(
+                                    filePath,
+                                    '${widget.path ?? ''}/',
+                                    theme: themeData,
+                                    mediaQuery: mediaQueryData,
+                                    getEncryptionPassword:
+                                        filePath.toLowerCase().endsWith('.sba')
+                                        ? () async {
+                                            if (!scaffoldCtx.mounted) return null;
+                                            return showSbaImportPasswordDialog(scaffoldCtx);
+                                          }
+                                        : null,
+                                  );
+
+                                  if (importedPath != null) {
+                                    count++;
+                                    lastImportedPath = importedPath;
+                                  }
+                                }
+                              }
+
+                              if (otherFiles.length == 1 && lastImportedPath != null) {
+                                if (scaffoldCtx.mounted) {
+                                  router.push(RoutePaths.editFilePath(lastImportedPath!));
+                                }
+                              } else if (scaffoldCtx.mounted) {
+                                ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                                  SnackBar(
+                                    content: Text(t.home.filesImported(count: count)),
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                        );
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 14,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.upload_file_rounded,
+                              size: 20,
+                              color: Theme.of(context).colorScheme.onSecondaryContainer,
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              t.home.create.importNote,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: Theme.of(context).colorScheme.onSecondaryContainer,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              onTap: () async {
+                VaultAdapter.preventLock = true;
+                List<PlatformFile>? filesResult;
+                try {
+                  filesResult = await FilePicker.pickFiles(
+                    type: FileType.any,
+                  );
+                } finally {
+                  VaultAdapter.preventLock = false;
+                }
+
+                if (filesResult == null || filesResult.isEmpty) return;
+
+                isDialOpen.value = false;
+
+                final files = filesResult.where((f) => f.path != null).toList();
+                if (files.isEmpty) return;
+
+                if (!context.mounted) return;
+                final scaffoldCtx = context;
+                final router = GoRouter.of(scaffoldCtx);
+                final themeData = Theme.of(scaffoldCtx);
+                final mediaQueryData = MediaQuery.of(scaffoldCtx);
+
+                await BackgroundOperationQueue.instance.enqueue<void>(
+                  kind: BackgroundOperationKind.importFile,
+                  headline: t.home.create.importNote,
+                  initialDetail: t.home.create.importNote,
+                  work: (onProgress) async {
+                    final pdfFiles = files
+                        .where((f) => f.path!.toLowerCase().endsWith('.pdf'))
+                        .toList();
+                    final otherFiles = files
+                        .where((f) => !f.path!.toLowerCase().endsWith('.pdf'))
+                        .toList();
+
+                    if (pdfFiles.isNotEmpty) {
+                      if (!Editor.canRasterPdf) {
+                        if (scaffoldCtx.mounted) {
+                          ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                            SnackBar(content: Text(t.home.deviceNoPdfImport)),
+                          );
+                        }
+                        return;
+                      }
+
+                      bool shouldMerge = false;
+                      final bool isMultiple = pdfFiles.length > 1;
+
+                      if (isMultiple) {
+                        onProgress(0, t.home.importPdf, indeterminate: true);
+                        if (!scaffoldCtx.mounted) return;
+                        final bool? userChoice = await _showMergeDialog(
+                          scaffoldCtx,
+                          pdfFiles.length,
+                        );
+                        if (userChoice == null) return;
+                        shouldMerge = userChoice;
+
+                        onProgress(0, t.home.importPdf, indeterminate: true);
+                        await Future<void>.delayed(
+                          const Duration(milliseconds: 100),
+                        );
+                      }
+
+                      try {
+                        if (shouldMerge && isMultiple) {
+                          onProgress(0, 'Merging PDFs', indeterminate: true);
+
+                          final paths = pdfFiles.map((e) => e.path!).toList();
+                          final mergedPdfPath = await _mergePdfsAndSave(paths);
+
+                          if (mergedPdfPath != null) {
+                            final firstFileName = pdfFiles.first.name;
+                            final fileNameWithoutExtension = firstFileName
+                                .substring(0, firstFileName.length - '.pdf'.length);
+
+                            final sbnFilePath =
+                                await FileManager.suffixFilePathToMakeItUnique(
+                                  '${widget.path ?? ''}/$fileNameWithoutExtension (Merged)',
+                                );
+
+                            await FileManager.generateThumbnailFromPdf(
+                              mergedPdfPath,
+                              '$sbnFilePath${Editor.extension}.p',
                             );
 
-                        await FileManager.generateThumbnailFromPdf(
-                          mergedPdfPath,
-                          '$sbnFilePath${Editor.extension}.p',
-                        );
+                            onProgress(1, firstFileName, indeterminate: false);
+                            if (scaffoldCtx.mounted) {
+                              router.push(
+                                RoutePaths.editImportPdf(
+                                  sbnFilePath,
+                                  mergedPdfPath,
+                                ),
+                              );
+                            }
+                          }
+                        } else if (isMultiple) {
+                          int successCount = 0;
+                          final int total = pdfFiles.length;
 
-                        onProgress(1, firstFileName, indeterminate: false);
-                        if (scaffoldCtx.mounted) {
-                          router.push(
-                            RoutePaths.editImportPdf(
+                          for (int i = 0; i < total; i++) {
+                            final file = pdfFiles[i];
+
+                            onProgress(
+                              (i + 1) / total,
+                              '${i + 1}/$total · ${file.name}',
+                            );
+                            await Future<void>.delayed(Duration.zero);
+
+                            final name = file.name.substring(
+                              0,
+                              file.name.length - '.pdf'.length,
+                            );
+                            final sbnFilePath =
+                                await FileManager.suffixFilePathToMakeItUnique(
+                                  '${widget.path ?? ''}/$name',
+                                );
+
+                            final success = await FileManager.createNoteFromPdf(
                               sbnFilePath,
-                              mergedPdfPath,
+                              file.path!,
+                              theme: themeData,
+                              mediaQuery: mediaQueryData,
+                              onImportProgress: (p, status) {
+                                onProgress(
+                                  (i + p) / total,
+                                  '${i + 1}/$total · $status',
+                                );
+                              },
+                            );
+
+                            if (success) successCount++;
+                          }
+
+                          if (scaffoldCtx.mounted) {
+                            ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '$successCount notes imported successfully.',
+                                ),
+                              ),
+                            );
+                          }
+                        } else {
+                          final file = pdfFiles.first;
+                          final name = file.name.substring(
+                            0,
+                            file.name.length - '.pdf'.length,
+                          );
+
+                          final sbnFilePath =
+                              await FileManager.suffixFilePathToMakeItUnique(
+                                '${widget.path ?? ''}/$name',
+                              );
+
+                          await FileManager.createNoteFromPdf(
+                            sbnFilePath,
+                            file.path!,
+                            theme: themeData,
+                            mediaQuery: mediaQueryData,
+                            onImportProgress: onProgress,
+                          );
+
+                          if (scaffoldCtx.mounted) {
+                            router.push(RoutePaths.editFilePath(sbnFilePath));
+                          }
+                        }
+                      } catch (e) {
+                        if (scaffoldCtx.mounted) {
+                          ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                            SnackBar(
+                              content: Text(t.home.errorImporting(error: e)),
                             ),
                           );
                         }
                       }
-                    } else if (isMultiple) {
-                      int successCount = 0;
-                      final int total = pdfFiles.length;
+                    }
 
-                      for (int i = 0; i < total; i++) {
-                        final file = pdfFiles[i];
+                    if (otherFiles.isNotEmpty) {
+                      int count = 0;
+                      String? lastImportedPath;
 
+                      for (int i = 0; i < otherFiles.length; i++) {
+                        final file = otherFiles[i];
                         onProgress(
-                          (i + 1) / total,
-                          '${i + 1}/$total · ${file.name}',
+                          (i + 1) / otherFiles.length,
+                          '${i + 1}/${otherFiles.length} · ${file.name}',
                         );
                         await Future<void>.delayed(Duration.zero);
 
-                        final name = file.name.substring(
-                          0,
-                          file.name.length - '.pdf'.length,
-                        );
-                        final sbnFilePath =
-                            await FileManager.suffixFilePathToMakeItUnique(
-                              '${widget.path ?? ''}/$name',
-                            );
+                        final filePath = file.path!;
+                        if (filePath.toLowerCase().endsWith('.sbn') ||
+                            filePath.toLowerCase().endsWith('.sbn2') ||
+                            filePath.toLowerCase().endsWith('.sba')) {
+                          final importedPath = await FileManager.importFile(
+                            filePath,
+                            '${widget.path ?? ''}/',
+                            theme: themeData,
+                            mediaQuery: mediaQueryData,
+                            getEncryptionPassword:
+                                filePath.toLowerCase().endsWith('.sba')
+                                ? () async {
+                                    if (!scaffoldCtx.mounted) return null;
+                                    return showSbaImportPasswordDialog(scaffoldCtx);
+                                  }
+                                : null,
+                          );
 
-                        final success = await FileManager.createNoteFromPdf(
-                          sbnFilePath,
-                          file.path!,
-                          theme: themeData,
-                          mediaQuery: mediaQueryData,
-                          onImportProgress: (p, status) {
-                            onProgress(
-                              (i + p) / total,
-                              '${i + 1}/$total · $status',
-                            );
-                          },
-                        );
-
-                        if (success) successCount++;
+                          if (importedPath != null) {
+                            count++;
+                            lastImportedPath = importedPath;
+                          }
+                        }
                       }
 
-                      if (scaffoldCtx.mounted) {
+                      if (otherFiles.length == 1 && lastImportedPath != null) {
+                        if (scaffoldCtx.mounted) {
+                          router.push(RoutePaths.editFilePath(lastImportedPath!));
+                        }
+                      } else if (scaffoldCtx.mounted) {
                         ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
                           SnackBar(
-                            content: Text(
-                              '$successCount notes imported successfully.',
-                            ),
+                            content: Text(t.home.filesImported(count: count)),
                           ),
                         );
                       }
-                    } else {
-                      final file = pdfFiles.first;
-                      final name = file.name.substring(
-                        0,
-                        file.name.length - '.pdf'.length,
-                      );
-
-                      final sbnFilePath =
-                          await FileManager.suffixFilePathToMakeItUnique(
-                            '${widget.path ?? ''}/$name',
-                          );
-
-                      await FileManager.createNoteFromPdf(
-                        sbnFilePath,
-                        file.path!,
-                        theme: themeData,
-                        mediaQuery: mediaQueryData,
-                        onImportProgress: onProgress,
-                      );
-
-                      if (scaffoldCtx.mounted) {
-                        router.push(RoutePaths.editFilePath(sbnFilePath));
-                      }
                     }
-                  } catch (e) {
-                    if (scaffoldCtx.mounted) {
-                      ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
-                        SnackBar(
-                          content: Text(t.home.errorImporting(error: e)),
-                        ),
-                      );
-                    }
-                  }
-                }
-
-                if (otherFiles.isNotEmpty) {
-                  int count = 0;
-                  String? lastImportedPath;
-
-                  for (int i = 0; i < otherFiles.length; i++) {
-                    final file = otherFiles[i];
-                    onProgress(
-                      (i + 1) / otherFiles.length,
-                      '${i + 1}/${otherFiles.length} · ${file.name}',
-                    );
-                    await Future<void>.delayed(Duration.zero);
-
-                    final filePath = file.path!;
-                    if (filePath.toLowerCase().endsWith('.sbn') ||
-                        filePath.toLowerCase().endsWith('.sbn2') ||
-                        filePath.toLowerCase().endsWith('.sba')) {
-                      final importedPath = await FileManager.importFile(
-                        filePath,
-                        '${widget.path ?? ''}/',
-                        theme: themeData,
-                        mediaQuery: mediaQueryData,
-                        getEncryptionPassword:
-                            filePath.toLowerCase().endsWith('.sba')
-                            ? () async {
-                                if (!scaffoldCtx.mounted) return null;
-                                return showSbaImportPasswordDialog(scaffoldCtx);
-                              }
-                            : null,
-                      );
-
-                      if (importedPath != null) {
-                        count++;
-                        lastImportedPath = importedPath;
-                      }
-                    }
-                  }
-
-                  if (otherFiles.length == 1 && lastImportedPath != null) {
-                    if (scaffoldCtx.mounted) {
-                      router.push(RoutePaths.editFilePath(lastImportedPath));
-                    }
-                  } else if (scaffoldCtx.mounted) {
-                    ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
-                      SnackBar(
-                        content: Text(t.home.filesImported(count: count)),
-                      ),
-                    );
-                  }
-                }
+                  },
+                );
               },
-            );
-          },
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }

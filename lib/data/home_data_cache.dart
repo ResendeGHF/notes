@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:saber/components/home/sort_button.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/file_tree_cache.dart';
@@ -43,11 +45,42 @@ class HomeDataCache {
   int _browseRootEpoch = 0;
 
   void preload() {
+    _loadRecentMetaCacheSync();
     getRecentOrLoad();
     getAllNotesOrLoad();
     getAllOrLoad();
     getBrowseRootOrLoad();
     FileTreeCache.instance.preload();
+  }
+
+  void _saveRecentMetaCache() {
+    try {
+      if (_allNotes == null) return;
+      final file = File(p.join(FileManager.documentsDirectory, '.recent_meta_cache.json'));
+      final list = _allNotes!.map((e) => {
+        'p': e.path,
+        'm': e.modifiedMillis,
+        's': e.sizeBytes,
+      }).toList();
+      file.writeAsString(jsonEncode(list));
+    } catch (_) {}
+  }
+
+  void _loadRecentMetaCacheSync() {
+    try {
+      final file = File(p.join(FileManager.documentsDirectory, '.recent_meta_cache.json'));
+      if (file.existsSync()) {
+        final list = jsonDecode(file.readAsStringSync()) as List;
+        final notes = list.map((e) => NoteIndexEntry(
+          path: e['p'] as String,
+          modifiedMillis: e['m'] as int,
+          sizeBytes: e['s'] as int,
+        )).toList();
+        _allNotes = notes;
+        _allNotesByPath.clear();
+        _allNotesByPath.addEntries(notes.map((e) => MapEntry(e.path, e)));
+      }
+    } catch (_) {}
   }
 
   static String _normalizeNotePath(String path) {
@@ -231,6 +264,7 @@ class HomeDataCache {
     _allNotesByPath
       ..clear()
       ..addEntries(notes.map((e) => MapEntry(e.path, e)));
+    _saveRecentMetaCache();
   }
 
   Future<List<NoteIndexEntry>> getAllNotesOrLoad() async {

@@ -16,7 +16,7 @@ class ThumbnailCache {
   static const int _maxBytes = 48 * 1024 * 1024;
 
   /// Cap concurrent `.p` vault reads so fling does not stampede decrypt workers.
-  static const int _maxInflightLoads = 4;
+  static const int _maxInflightLoads = 64;
 
   final LinkedHashMap<String, _CacheEntry> _cache = LinkedHashMap();
   int _totalBytes = 0;

@@ -311,283 +311,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// FragmentShader pencil stays off Picture tiles. Fills are vector-in-tiles.
   bool get isExpensivePaintStroke => paint.usesPencilNoise;
 
-  PencilOrientedPlan? _pencilPlan;
-  final List<PointVector> _lockedPencilSpine = [];
-  final List<PencilDrawChunk> _liveFrozenPencilChunks = [];
-  int _pencilLockedPointCount = 0;
-  PencilDrawChunk? _livePencilTip;
-  List<PencilDrawChunk>? _livePencilTipChunks;
-  int _livePencilTipHash = 0;
-  List<PencilDrawChunk>? _committedPencilChunks;
-
-  /// Frozen interior ribbon for live ballpoint / fountain / calligraphy.
-  /// Tip quads and the end cap rebuild each sample; commit uses one mesh.
-  Float32List? _liveCheapFrozenPositions;
-  int _liveCheapFrozenSpineCount = 0;
-  Float32List? _liveCheapFrozenSmoothPrefix;
   List<PointVector>? _liveRenderScratch;
 
-  /// Cached direction-run plan for committed pencil. Live strokes only
-  /// extend [_lockedPencilSpine] — already-placed grain samples stay put.
-  PencilOrientedPlan orientedPencilPlan(
-    double currentScale, {
-    int visibleCount = 1,
-  }) {
-    final lod = PencilShader.lodFor(
-      currentScale: currentScale,
-      size: options.size,
-      visibleCount: visibleCount,
-    );
-    if (options.isComplete &&
-        _pencilPlan != null &&
-        _pencilPlan!.tier == lod.tier) {
-      return _pencilPlan!;
-    }
-    if (!options.isComplete && points.isNotEmpty) {
-      if (_lockedPencilSpine.isEmpty) {
-        PencilShader.extendLockedSpine(
-          locked: _lockedPencilSpine,
-          tip: points.first,
-          minSegLen: lod.minSegLen,
-        );
-      }
-      final live = _pointsForLiveRender(points);
-      PencilShader.extendLockedSpine(
-        locked: _lockedPencilSpine,
-        tip: live.isNotEmpty ? live.last : points.last,
-        minSegLen: lod.minSegLen,
-      );
-    } else {
-      final spine = shaderSpine;
-      if (spine.isNotEmpty) {
-        if (_lockedPencilSpine.isEmpty) {
-          PencilShader.extendLockedSpine(
-            locked: _lockedPencilSpine,
-            tip: spine.first,
-            minSegLen: lod.minSegLen,
-          );
-        }
-        PencilShader.extendLockedSpine(
-          locked: _lockedPencilSpine,
-          tip: spine.last,
-          minSegLen: lod.minSegLen,
-        );
-      }
-    }
-    final useLocked = _lockedPencilSpine.length >= 2;
-    final plan = PencilShader.buildOrientedPlan(
-      spine: useLocked ? _lockedPencilSpine : shaderSpine,
-      lod: lod,
-      alreadyDecimated: useLocked,
-    );
-    if (options.isComplete) {
-      _pencilPlan = plan;
-    }
-    return plan;
+  void dispose() {
+    _cachedVertices = null;
+    _cachedVerticesHash = null;
+    _rawPositions = null;
+    _rawIndices = null;
+    _rawColors = null;
+    _cachedPath = null;
+    _cachedPathValid = false;
+    _invalidateVectorFillPicture();
   }
-
-  void _invalidatePencilPlan() {
-    _pencilPlan = null;
-  }
-
-  void _clearLivePencilChunks() {
-    _liveFrozenPencilChunks.clear();
-    _pencilLockedPointCount = 0;
-    _livePencilTip = null;
-    _livePencilTipChunks = null;
-    _livePencilTipHash = 0;
-    _committedPencilChunks = null;
-  }
-
-  bool get _usesLivePencilChunks =>
-      toolId == ToolId.advancedPencil || paint.usesPencilNoise;
-
-  @visibleForTesting
-  int get debugFrozenAdvancedMeshCount => 0;
-
-  @visibleForTesting
-  int get debugLiveLockedPointCount => _liveCheapFrozenSpineCount;
-
-  @visibleForTesting
-  List<Float32List> get debugFrozenAdvancedPositions => const [];
-
-  @visibleForTesting
-  void debugSetLivePrediction(Offset tip, [double? pressure]) {
-    _predictionTip = tip;
-    _predictionPressure = pressure ?? 0.5;
-  }
-
-  @visibleForTesting
-  int get debugFrozenPencilChunkCount => _liveFrozenPencilChunks.length;
-
-  @visibleForTesting
-  List<double> get debugFirstFrozenPencilSpineXY =>
-      _liveFrozenPencilChunks.isEmpty
-      ? const []
-      : List<double>.from(_liveFrozenPencilChunks.first.plan.spineXY);
-
-  @visibleForTesting
-  List<double> get debugFirstFrozenPencilPressure =>
-      _liveFrozenPencilChunks.isEmpty
-      ? const []
-      : List<double>.from(_liveFrozenPencilChunks.first.plan.spinePressure);
-
-  /// Frozen + tip pencil chunks. Already-drawn pieces keep their outline,
-  /// grain tangent, and pressure coverage until the stylus is lifted.
-  List<PencilDrawChunk>? get pencilDrawChunks {
-    final committed = _committedPencilChunks;
-    if (committed != null && committed.isNotEmpty) return committed;
-    if (options.isComplete || !_usesLivePencilChunks) return null;
-    if (points.length < 2) return null;
-    return _ensureLivePencilChunks();
-  }
-
-  List<PencilDrawChunk> _ensureLivePencilChunks() {
-    if (points.length - _pencilLockedPointCount >=
-        _pencilLockBehind + _pencilLockMinChunk) {
-      final newLock = points.length - _pencilLockBehind;
-      final from = math.max(0, _pencilLockedPointCount - _pencilLockOverlap);
-      // Mid-stroke freezes must not taper/cap the join — that pinched the
-      // ribbon to a point and looked like missing segments (worse at low zoom
-      // where adaptive spine reshape + grain coverage amplify the gap).
-      _liveFrozenPencilChunks.addAll(
-        _buildPencilChunks(
-          points.sublist(from, newLock),
-          isStrokeStart: from == 0 && _liveFrozenPencilChunks.isEmpty,
-          isStrokeEnd: false,
-        ),
-      );
-      _pencilLockedPointCount = newLock;
-      _livePencilTip = null;
-      _livePencilTipChunks = null;
-      _livePencilTipHash = 0;
-    }
-
-    final tipStart = math.max(0, _pencilLockedPointCount - _pencilLockOverlap);
-    final tipPoints = _pointsForLiveRender(points.sublist(tipStart));
-    final tipHash = Object.hash(
-      visualFingerprint,
-      tipStart,
-      tipPoints.length,
-    );
-    if (_livePencilTip == null || _livePencilTipHash != tipHash) {
-      final built = _buildPencilChunks(
-        tipPoints,
-        isStrokeStart: tipStart == 0 && _liveFrozenPencilChunks.isEmpty,
-        isStrokeEnd: true,
-      );
-      // Tip may split into several shader chunks; keep all of them live.
-      _livePencilTipChunks = built;
-      _livePencilTip = built.isEmpty ? null : built.last;
-      _livePencilTipHash = tipHash;
-    }
-
-    return [
-      ..._liveFrozenPencilChunks,
-      ...?_livePencilTipChunks,
-    ];
-  }
-
-  List<PencilDrawChunk> _buildPencilChunks(
-    List<PointVector> basePoints, {
-    bool isStrokeStart = true,
-    bool isStrokeEnd = true,
-  }) {
-    if (basePoints.length < 2) return const [];
-    final spine = _prepareAdvancedSpine(
-      basePoints,
-      stabilizeStart: isStrokeStart,
-      stabilizeEnd: isStrokeEnd,
-      flattenEnds: isStrokeStart || isStrokeEnd,
-    );
-    if (spine.length < 2) return const [];
-    return _chunksFromPreparedSpine(
-      spine,
-      isStrokeStart: isStrokeStart,
-      isStrokeEnd: isStrokeEnd,
-    );
-  }
-
-  List<PencilDrawChunk> _chunksFromPreparedSpine(
-    List<PointVector> spine, {
-    required bool isStrokeStart,
-    required bool isStrokeEnd,
-  }) {
-    if (spine.length < 2) return const [];
-    if (spine.length <= PencilShader.maxSpinePts) {
-      final chunk = _chunkFromPreparedSpine(
-        spine,
-        includeStart: isStrokeStart,
-        includeEnd: isStrokeEnd,
-      );
-      return chunk == null ? const [] : [chunk];
-    }
-    final out = <PencilDrawChunk>[];
-    // Generous overlap so open joins between shader uploads stay covered.
-    final overlap = math.max(8, (options.size * 1.25).round().clamp(8, 16));
-    var start = 0;
-    while (start < spine.length - 1) {
-      final end = math.min(start + PencilShader.maxSpinePts, spine.length);
-      final isFirst = start == 0;
-      final isLast = end >= spine.length;
-      final chunk = _chunkFromPreparedSpine(
-        spine.sublist(start, end),
-        includeStart: isStrokeStart && isFirst,
-        includeEnd: isStrokeEnd && isLast,
-      );
-      if (chunk != null) out.add(chunk);
-      if (isLast) break;
-      start = end - overlap;
-    }
-    return out;
-  }
-
-  PencilDrawChunk? _chunkFromPreparedSpine(
-    List<PointVector> spine, {
-    bool includeStart = true,
-    bool includeEnd = true,
-  }) {
-    if (spine.length < 2) return null;
-    final outline = _advancedOutlineFromSpine(
-      spine,
-      includeStart: includeStart,
-      includeEnd: includeEnd,
-    );
-    if (outline.length < 3) return null;
-    return PencilDrawChunk(
-      outline: getPath(outline, smooth: false),
-      plan: PencilShader.buildOrientedPlan(
-        spine: spine,
-        lod: _livePencilLod,
-        alreadyDecimated: true,
-      ),
-    );
-  }
-
-  PencilLod get _livePencilLod => PencilShader.lodFor(
-    currentScale: _targetScale <= 0 ? 1.0 : _targetScale,
-    size: options.size,
-    visibleCount: 1,
-  );
-
-  static const int _pencilLockBehind = 12;
-  static const int _pencilLockMinChunk = 8;
-  /// Overlap between frozen ribbon and live tip (raw samples). Large enough
-  /// that open mid-joins stay covered after independent streamlining.
-  static const int _pencilLockOverlap = 14;
-
-  void _shiftLockedPencilSpine(Offset offset) {
-    if (offset == Offset.zero || _lockedPencilSpine.isEmpty) return;
-    for (var i = 0; i < _lockedPencilSpine.length; i++) {
-      final p = _lockedPencilSpine[i];
-      _lockedPencilSpine[i] = PointVector(
-        p.dx + offset.dx,
-        p.dy + offset.dy,
-        p.pressure,
-      );
-    }
-  }
-
+  
   bool pressureEnabled;
   final StrokeOptions options;
   double? _cachedAveragePressure;
@@ -814,25 +550,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     _cachedPath = _cachedPath?.shift(offset);
     _neonInnerPath = _neonInnerPath?.shift(offset);
-    _pencilPlan?.shift(offset);
-    _shiftLockedPencilSpine(offset);
-    for (final chunk in _liveFrozenPencilChunks) {
-      chunk.shift(offset);
-    }
-    final tipChunks = _livePencilTipChunks;
-    if (tipChunks != null) {
-      for (final chunk in tipChunks) {
-        chunk.shift(offset);
-      }
-    } else {
-      _livePencilTip?.shift(offset);
-    }
-    final committed = _committedPencilChunks;
-    if (committed != null) {
-      for (final chunk in committed) {
-        chunk.shift(offset);
-      }
-    }
 
     if (_cachedBounds != null) {
       _cachedBounds = _cachedBounds!.shift(offset);
@@ -878,16 +595,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     rotatePolygon(_highQualityPolygon);
     _exportPolygon = null;
     _highQualitySpine = null;
-    for (var i = 0; i < _lockedPencilSpine.length; i++) {
-      final p = _lockedPencilSpine[i];
-      final dx = p.dx - center.dx;
-      final dy = p.dy - center.dy;
-      _lockedPencilSpine[i] = PointVector(
-        center.dx + dx * cos - dy * sin,
-        center.dy + dx * sin + dy * cos,
-        p.pressure,
-      );
-    }
 
     rotationDeg = (rotationDeg + angleRad * 180.0 / math.pi) % 360.0;
 
@@ -896,8 +603,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedPathValid = false;
     _invalidateVectorFillPicture();
     _neonInnerPath = null;
-    _invalidatePencilPlan();
-    _clearLivePencilChunks();
     _mapMeshPositions((x, y) {
       final dx = x - center.dx;
       final dy = y - center.dy;
@@ -922,11 +627,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedVerticesHash = null;
     _packedPoints = null;
     _neonInnerPath = null;
-    _invalidatePencilPlan();
     _invalidateVectorFillPicture();
     if (!preserveBounds) {
-      _clearLiveCheapSpineFreeze();
-      _clearLivePencilChunks();
       _invalidateSpatialData();
     }
   }
@@ -945,16 +647,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       );
     }
     options.size *= factor;
-    for (var i = 0; i < _lockedPencilSpine.length; i++) {
-      final p = _lockedPencilSpine[i];
-      final dx = p.dx - center.dx;
-      final dy = p.dy - center.dy;
-      _lockedPencilSpine[i] = PointVector(
-        center.dx + dx * factor,
-        center.dy + dy * factor,
-        p.pressure,
-      );
-    }
     markPolygonNeedsUpdating(preserveBounds: true);
     _mapMeshPositions((x, y) {
       return (
@@ -966,6 +658,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _refreshSpineMeshAfterTransform();
     _invalidateSpatialData();
   }
+
+  
+
+ 
 
   /// Drop this stroke's mesh from the process-wide cache before mutating
   /// positions in place. Otherwise later strokes with the same pre-transform
@@ -993,6 +689,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ui.VertexMode.triangles,
       pos,
       indices: ind,
+      colors: _rawColors,
     );
     _cachedVerticesHash = visualFingerprint;
   }
@@ -1506,13 +1203,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   double? _drawSampleTimeSec;
   double? _prevDrawSampleTimeSec;
 
-  Offset? _predictionTip;
-  double? _predictionPressure;
+  List<PointVector>? _predictedTail;
 
   /// Raw pointer kinematics for live stroke prediction (not affected by stabilization).
   Offset? _predPrevRawPos;
   double? _predPrevRawTimeSec;
   Offset? _predEmaVelocity;
+  Offset? _predEmaAcceleration;
   Offset? _predInstantVelPrev;
   Offset? _predInstantVelLast;
 
@@ -1652,16 +1349,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
 
     if (recomputePrediction) {
-      _recomputePredictionTip();
-      if (_predictionTip != null && _cachedBounds != null) {
-        final px = _predictionTip!.dx;
-        final py = _predictionTip!.dy;
-        _cachedBounds = Rect.fromLTRB(
-          math.min(_cachedBounds!.left, px - r),
-          math.min(_cachedBounds!.top, py - r),
-          math.max(_cachedBounds!.right, px + r),
-          math.max(_cachedBounds!.bottom, py + r),
-        );
+      _recomputePredictionTail();
+      if (_predictedTail != null && _cachedBounds != null) {
+        for (final pt in _predictedTail!) {
+          final px = pt.x;
+          final py = pt.y;
+          _cachedBounds = Rect.fromLTRB(
+            math.min(_cachedBounds!.left, px - r),
+            math.min(_cachedBounds!.top, py - r),
+            math.max(_cachedBounds!.right, px + r),
+            math.max(_cachedBounds!.bottom, py + r),
+          );
+        }
       }
     }
 
@@ -1680,6 +1379,21 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final beta = lowHz
           ? (dt < 0.020 ? 0.74 : 0.62)
           : (dt < 0.011 ? 0.68 : 0.56);
+          
+      if (_predEmaVelocity != null) {
+        final accelX = (instant.dx - _predEmaVelocity!.dx) / dt;
+        final accelY = (instant.dy - _predEmaVelocity!.dy) / dt;
+        final instantAccel = Offset(accelX, accelY);
+        
+        final betaA = lowHz ? 0.5 : 0.4;
+        _predEmaAcceleration = _predEmaAcceleration == null
+            ? instantAccel
+            : Offset(
+                _predEmaAcceleration!.dx * (1 - betaA) + instantAccel.dx * betaA,
+                _predEmaAcceleration!.dy * (1 - betaA) + instantAccel.dy * betaA,
+              );
+      }
+      
       _predEmaVelocity = _predEmaVelocity == null
           ? instant
           : Offset(
@@ -1764,30 +1478,33 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _lastTimestampSeconds = null;
     _drawSampleTimeSec = null;
     _prevDrawSampleTimeSec = null;
-    _predictionTip = null;
-    _predictionPressure = null;
+    _predictedTail = null;
     _predPrevRawPos = null;
     _predPrevRawTimeSec = null;
     _predEmaVelocity = null;
+    _predEmaAcceleration = null;
     _predInstantVelPrev = null;
     _predInstantVelLast = null;
   }
 
   void clearLivePrediction() {
-    _predictionTip = null;
-    _predictionPressure = null;
+    _predictedTail = null;
   }
 
-  void _recomputePredictionTip() {
-    _predictionTip = null;
-    _predictionPressure = null;
+  void _recomputePredictionTail() {
+    _predictedTail = null;
     if (!_allowsStrokeStabilizationAndPrediction) return;
     if (options.isComplete || !stows.strokePrediction.value) return;
     if (points.length < 2) return;
 
     Offset v;
+    Offset a = Offset.zero;
+
     if (_predEmaVelocity != null && _predEmaVelocity!.distance > 1e-3) {
       v = _predEmaVelocity!;
+      if (_predEmaAcceleration != null) {
+        a = _predEmaAcceleration!;
+      }
     } else if (_drawSampleTimeSec != null && _prevDrawSampleTimeSec != null) {
       final dt = (_drawSampleTimeSec! - _prevDrawSampleTimeSec!).clamp(
         1.2e-3,
@@ -1800,8 +1517,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       return;
     }
 
-    // At low refresh the 1€ velocity lags the stylus; prefer raw EMA so tip
-    // lead does not re-inject the filter lag we just eased.
     if (stows.strokeStabilization.value &&
         _filteredVelocity != null &&
         _filteredVelocity!.distance > 18 &&
@@ -1817,12 +1532,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     var turnFactor = 1.0;
     if (_predInstantVelPrev != null && _predInstantVelLast != null) {
-      final a = _predInstantVelPrev!;
-      final b = _predInstantVelLast!;
-      final la = a.distance;
-      final lb = b.distance;
+      final va = _predInstantVelPrev!;
+      final vb = _predInstantVelLast!;
+      final la = va.distance;
+      final lb = vb.distance;
       if (la > 2.0 && lb > 2.0) {
-        final cos = (a.dx * b.dx + a.dy * b.dy) / (la * lb);
+        final cos = (va.dx * vb.dx + va.dy * vb.dy) / (la * lb);
         turnFactor = (0.22 + 0.78 * ((cos + 1) * 0.5)).clamp(0.18, 1.0);
       }
     } else if (points.length >= 3) {
@@ -1854,23 +1569,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         turnFactor *
         speedNorm;
 
-    var dx = v.dx * lookaheadSec;
-    var dy = v.dy * lookaheadSec;
-    var dist = math.sqrt(dx * dx + dy * dy);
-    final maxDist =
-        (options.size * (2.6 + 3.6 * amount) * feel.predictionDistanceScale)
-            .clamp(6.0, 72.0);
-    if (dist > maxDist && dist > 0) {
-      final s = maxDist / dist;
-      dx *= s;
-      dy *= s;
-      dist = maxDist;
+    // Kinematics limitation for smooth curvature
+    final accelMagnitude = a.distance;
+    final maxAccel = speed * 18.0; 
+    if (accelMagnitude > maxAccel && accelMagnitude > 0) {
+        final scale = maxAccel / accelMagnitude;
+        a = Offset(a.dx * scale, a.dy * scale);
     }
-    if (dist < 0.28) return;
+    
+    // Dampen acceleration further based on turn factor
+    final dampening = turnFactor;
+    a = Offset(a.dx * dampening, a.dy * dampening);
 
     final last = points.last;
-    // At low refresh, lean the tip origin toward the raw stylus so filter lag
-    // does not leave a visible gap between pen and ink.
     final raw = _predPrevRawPos;
     final blend = feel.rawTipBlend;
     final originX = raw == null || blend <= 0
@@ -1879,8 +1590,35 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final originY = raw == null || blend <= 0
         ? last.y
         : last.y * (1.0 - blend) + raw.dy * blend;
-    _predictionTip = Offset(originX + dx, originY + dy);
-    _predictionPressure = last.pressure;
+        
+    final maxDist =
+        (options.size * (2.6 + 3.6 * amount) * feel.predictionDistanceScale)
+            .clamp(6.0, 72.0);
+
+    _predictedTail = [];
+    
+    // Generate multiple points for the prediction tail to form a kinematic curve
+    const int numPredictionPoints = 2;
+    for (int i = 1; i <= numPredictionPoints; i++) {
+        final t = lookaheadSec * (i / numPredictionPoints);
+        var dx = v.dx * t + 0.5 * a.dx * t * t;
+        var dy = v.dy * t + 0.5 * a.dy * t * t;
+        
+        var dist = math.sqrt(dx * dx + dy * dy);
+        if (dist > maxDist && dist > 0) {
+          final s = maxDist / dist;
+          dx *= s;
+          dy *= s;
+          dist = maxDist;
+        }
+        
+        if (dist < 0.28 && i == numPredictionPoints) {
+            if (_predictedTail!.isEmpty) _predictedTail = null;
+            return;
+        }
+        
+        _predictedTail!.add(PointVector(originX + dx, originY + dy, last.pressure));
+    }
   }
 
   List<PointVector> _pointsForLiveRender(
@@ -1890,21 +1628,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (!_allowsStrokeStabilizationAndPrediction ||
         options.isComplete ||
         !stows.strokePrediction.value ||
-        _predictionTip == null) {
+        _predictedTail == null || _predictedTail!.isEmpty) {
       return source;
     }
     if (source.isEmpty) return source;
 
-    final p = _predictionPressure ?? source.last.pressure;
-    final tip = PointVector(_predictionTip!.dx, _predictionTip!.dy, p);
     if (!reuseBuffer) {
-      return [...source, tip];
+      return [...source, ..._predictedTail!];
     }
     final scratch = _liveRenderScratch ??= <PointVector>[];
     scratch
       ..clear()
       ..addAll(source)
-      ..add(tip);
+      ..addAll(_predictedTail!);
     return scratch;
   }
 
@@ -1966,12 +1702,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final List<PointVector> sourcePoints;
     if (toolId == ToolId.highlighter) {
       if (basePoints.length >= 3) {
-        // Dense slow samples make Catmull-Rom + offset normals unstable.
-        // Decimate relative to brush radius before smoothing.
         final radius = (options.size / 2) * highlighterStrokeScaleFactor;
         final decimated = decimateStrokeSpine(
           basePoints,
-          minDistance: math.max(0.75, radius * 0.35),
+          minDistance: math.max(1.5, radius * 1.5), 
         );
         sourcePoints = decimated.length >= 3
             ? _getSmoothSpine(decimated)
@@ -2047,6 +1781,38 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       var strokePoints = sourcePoints;
       if (strokePoints.length == 1)
         strokePoints = [strokePoints.first, strokePoints.first];
+
+      final minChord = math.max(3.0, options.size * 0.4);
+      (double, double)? startTravel;
+      if (options.start.cap && strokePoints.length >= 2) {
+        final a = strokePoints.first;
+        // Skip micro-jitter points at pen down to get a stable chord direction
+        double dx = 0, dy = 0, len = 0;
+        for (int i = 1; i < strokePoints.length; i++) {
+          final b = strokePoints[i];
+          dx = b.x - a.x;
+          dy = b.y - a.y;
+          len = math.sqrt(dx * dx + dy * dy);
+          if (len >= minChord) break;
+        }
+        if (len > 1e-6) startTravel = (dx / len, dy / len);
+      }
+
+      (double, double)? endTravel;
+      if (options.end.cap && strokePoints.length >= 2) {
+        final b = strokePoints.last;
+        // Skip micro-jitter points at pen up to get a stable chord direction
+        double dx = 0, dy = 0, len = 0;
+        for (int i = strokePoints.length - 2; i >= 0; i--) {
+          final a = strokePoints[i];
+          dx = b.x - a.x;
+          dy = b.y - a.y;
+          len = math.sqrt(dx * dx + dy * dy);
+          if (len >= minChord) break;
+        }
+        if (len > 1e-6) endTravel = (dx / len, dy / len);
+      }
+
       return getStroke(
         strokePoints,
         options: _outlineOptionsForCurrentPhase(
@@ -2060,6 +1826,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ),
         ),
         rememberSimulatedPressure: false,
+        preserveLegacyTips: true,
+        startTravelTangent: startTravel,
+        endTravelTangent: endTravel,
       );
     }
 
@@ -2070,7 +1839,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
       // Single closed outline (not a triangle mesh) so translucent ink does
       // not show darker overlap artifacts. Flat vs rounded via [flatEdge].
-      return buildConstantWidthOutline(
+      return _buildHighlighterOutline(
         strokePoints,
         radius: (options.size / 2) * highlighterStrokeScaleFactor,
         roundCaps: !flatEdge,
@@ -2607,8 +2376,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint
-        .._lockedPencilSpine.addAll(_lockedPencilSpine);
+        ..paint = paint;
 
   /// Freehand ink that can be rewritten as another pen (not shapes).
   bool get canConvertStrokeType =>
@@ -2762,24 +2530,30 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   double get exportTargetScale => _targetScale;
 
   void setLodScale(double scale) {
-    // Committed ink is GPU-scaled (backup). Updating LOD here rebuilt spines
-    // during zoom and dropped 90Hz notes to 60fps.
+    if (toolId == ToolId.highlighter) {
+      if (_targetScale != 1.0) {
+        _targetScale = 1.0;
+        if (options.isComplete) {
+          markPolygonNeedsUpdating(preserveBounds: true);
+        }
+      }
+      return;
+    }
+
     if (options.isComplete) return;
-    
-    // LIVE strokes always use 1.0x tolerance to prevent severe Catmull-Rom 
-    // flickering and shape-shifting when drawing at high/low zoom levels.
     _targetScale = 1.0;
   }
 
   int get _predictionLiveFingerprint {
     // If the stroke is complete, we must use the last valid prediction to ensure
     // the visual fingerprint remains stable until the final geometry is fully cached.
-    if (options.isComplete && _predictionTip == null) return 0;
+    if (options.isComplete && _predictedTail == null) return 0;
     
     if (!options.isComplete && !stows.strokePrediction.value) return 0;
-    final tip = _predictionTip;
-    if (tip == null) return 0;
-    return Object.hash((tip.dx * 128).round(), (tip.dy * 128).round());
+    final tail = _predictedTail;
+    if (tail == null || tail.isEmpty) return 0;
+    final tip = tail.last;
+    return Object.hash((tip.x * 128).round(), (tip.y * 128).round());
   }
 
   int get visualFingerprint {
@@ -2790,6 +2564,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       toolId == ToolId.highlighter ? flatEdge : null,
       neon,
       inkUsesPredictionInPath ? _predictionLiveFingerprint : 0,
+      paint.pressureMapsToCoverage,
     );
   }
 
@@ -2943,9 +2718,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     bool flattenEnds = true,
   }) {
     if (basePoints.isEmpty) return basePoints;
+
+    final bool bypassLiveDegradation = toolId == ToolId.advancedPencil || toolId == ToolId.advancedPen;
+    final bool effectivelyComplete = options.isComplete || bypassLiveDegradation;
+
     var advanced = streamlinePoints(
       basePoints,
-      streamline: options.isComplete
+      streamline: effectivelyComplete
           ? options.streamline
           : options.streamline * 0.28,
     );
@@ -2971,8 +2750,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         flattenTipSegments: flattenEnds,
         flattenEndSegments: !flattenEnds
             ? 1
-            : (options.isComplete ? 2 : 5),
-        segStepPx: options.isComplete ? 2.5 : 4.8,
+            : (effectivelyComplete ? 2 : 5),
+        segStepPx: effectivelyComplete ? 2.5 : 4.8,
       );
       final n = smooth.length ~/ 3;
       advanced = List.generate(
@@ -3010,7 +2789,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         toolId == ToolId.advancedPencil && paint.pressureMapsToCoverage
         ? options.copyWith(thinning: 0)
         : options;
-    final isAdvanced = toolId == ToolId.advancedPen;
+    final isAdvanced = toolId == ToolId.advancedPen || toolId == ToolId.advancedPencil;
     // Advanced Pen fills a closed getStroke outline (path), not a spine mesh.
     // Round caps use circular semicircle arcs (_capArc) centered on the tip —
     // not mesh-style hemisphere strips. Those strips read as a sideways
@@ -3066,31 +2845,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
   }
 
-  void _clearLiveCheapSpineFreeze() {
-    _liveCheapFrozenPositions = null;
-    _liveCheapFrozenSpineCount = 0;
-    _liveCheapFrozenSmoothPrefix = null;
-  }
-
-  static bool _cheapSmoothPrefixMatches(
-    Float32List prefix,
-    Float32List smooth,
-    int count,
-  ) {
-    final n = count * 3;
-    if (prefix.length < n || smooth.length < n) return false;
-    for (var i = 0; i < n; i += 3) {
-      if ((prefix[i] - smooth[i]).abs() > 0.4) return false;
-      if ((prefix[i + 1] - smooth[i + 1]).abs() > 0.4) return false;
-    }
-    return true;
-  }
-
   /// Live getStroke / perfect-freehand should track the stylus, not settle
   /// into the committed outline. Committed geometry keeps full smoothing.
   StrokeOptions _outlineOptionsForCurrentPhase(StrokeOptions base) {
     var opts = base;
-    if (!options.isComplete) {
+    final bool bypassLiveDegradation = toolId == ToolId.advancedPencil || toolId == ToolId.advancedPen;
+    
+    if (!options.isComplete && !bypassLiveDegradation) {
       opts = opts.copyWith(
         smoothing: base.smoothing * 0.42,
         streamline: base.streamline * 0.28,
@@ -3125,28 +2886,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// committed rebuild drops the lookahead tail).
   void finishLiveGeometry() {
     options.isComplete = true;
-    // Do NOT clear prediction here for tools that use path-based rendering (Ballpoint).
-    // Clearing it before the final path is cached causes a one-frame flickering cap.
-    if (_usesLivePencilChunks) {
-      clearLivePrediction();
-    }
-    if (_usesLivePencilChunks && points.length >= 2) {
-      // One continuous prepare on pen-up so mid-stroke open joins / freeze
-      // seams cannot leave permanent gaps in the committed ribbon.
-      _committedPencilChunks = _buildPencilChunks(
-        points,
-        isStrokeStart: true,
-        isStrokeEnd: true,
-      );
-      if (_committedPencilChunks!.isNotEmpty) {
-        _liveFrozenPencilChunks.clear();
-        _pencilLockedPointCount = 0;
-        _livePencilTip = null;
-        _livePencilTipChunks = null;
-        _livePencilTipHash = 0;
-        return;
-      }
-    }
     markPolygonNeedsUpdating();
   }
 
@@ -3226,20 +2965,166 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _vertexCacheLru.add(key);
   }
 
-  void dispose() {
-    _cachedVertices = null;
-    _cachedVerticesHash = null;
-    _rawPositions = null;
-    _rawIndices = null;
-    _rawColors = null;
-    _cachedPath = null;
-    _cachedPathValid = false;
-    _invalidatePencilPlan();
-    _invalidateVectorFillPicture();
-    _clearLiveCheapSpineFreeze();
-  }
-
   static const _capSegments = 10;
+
+  static List<Offset> _buildHighlighterOutline(
+    List<PointVector> points, {
+    required double radius,
+    required bool roundCaps,
+  }) {
+    if (points.length < 2) return [];
+
+    final packed = Float32List(points.length * 3);
+    for (int i = 0; i < points.length; i++) {
+      packed[i * 3] = points[i].x;
+      packed[i * 3 + 1] = points[i].y;
+      packed[i * 3 + 2] = points[i].pressure ?? 0.5;
+    }
+
+    final startChord = _localOpeningChordTangent(packed, points.length, radius);
+    final tx0 = startChord.$1;
+    final ty0 = startChord.$2;
+    final nx0 = -ty0;
+    final ny0 = tx0;
+
+    final endChord = _localClosingChordTangent(packed, points.length, radius);
+    final txLast = endChord.$1;
+    final tyLast = endChord.$2;
+    final nxLast = -tyLast;
+    final nyLast = txLast;
+
+    final leftSide = <Offset>[];
+    final rightSide = <Offset>[];
+
+    for (int i = 0; i < points.length; i++) {
+      double nx, ny;
+      double miterLength = 1.0;
+
+      if (i == 0) {
+        nx = nx0;
+        ny = ny0;
+      } else if (i == points.length - 1) {
+        nx = nxLast;
+        ny = nyLast;
+      } else {
+        final dx1 = points[i].x - points[i - 1].x;
+        final dy1 = points[i].y - points[i - 1].y;
+        final len1 = math.sqrt(dx1 * dx1 + dy1 * dy1);
+        final dx2 = points[i + 1].x - points[i].x;
+        final dy2 = points[i + 1].y - points[i].y;
+        final len2 = math.sqrt(dx2 * dx2 + dy2 * dy2);
+
+        double t1x = 0, t1y = 0, t2x = 0, t2y = 0;
+        if (len1 > 0) { t1x = dx1 / len1; t1y = dy1 / len1; }
+        if (len2 > 0) { t2x = dx2 / len2; t2y = dy2 / len2; }
+
+        if (len1 > 0 && len2 > 0) {
+          final tx = t1x + t2x;
+          final ty = t1y + t2y;
+          final tLen = math.sqrt(tx * tx + ty * ty);
+          if (tLen > 0) {
+            nx = -ty / tLen;
+            ny = tx / tLen;
+          } else {
+            nx = -t1y; ny = t1x;
+          }
+
+          final dot = t1x * t2x + t1y * t2y;
+          if (dot > -0.9) {
+            miterLength = 1.0 / math.sqrt((1.0 + dot) / 2.0);
+            miterLength = miterLength.clamp(1.0, 4.0);
+          }
+        } else if (len1 > 0) {
+          nx = -t1y; ny = t1x;
+        } else {
+          nx = -t2y; ny = t2x;
+        }
+      }
+
+      leftSide.add(Offset(
+        points[i].x + nx * radius * miterLength,
+        points[i].y + ny * radius * miterLength,
+      ));
+      rightSide.add(Offset(
+        points[i].x - nx * radius * miterLength,
+        points[i].y - ny * radius * miterLength,
+      ));
+    }
+
+    final result = <Offset>[];
+    
+    final p0 = points.first;
+    if (roundCaps) {
+      const segments = 12;
+      for (int i = 0; i <= segments; i++) {
+        final angle = math.pi * (i / segments);
+        final vx = math.cos(angle) * nx0 + math.sin(angle) * (-tx0);
+        final vy = math.cos(angle) * ny0 + math.sin(angle) * (-ty0);
+        result.add(Offset(p0.x + radius * vx, p0.y + radius * vy));
+      }
+    } else {
+      final extendDist = radius * 0.3;
+      final cornerRadius = radius * 0.2;
+      
+      result.add(leftSide.first);
+      result.add(Offset(
+        leftSide.first.dx - tx0 * (extendDist - cornerRadius),
+        leftSide.first.dy - ty0 * (extendDist - cornerRadius),
+      ));
+      result.add(Offset(
+        p0.x + nx0 * (radius - cornerRadius) - tx0 * extendDist,
+        p0.y + ny0 * (radius - cornerRadius) - ty0 * extendDist,
+      ));
+      result.add(Offset(
+        p0.x - nx0 * (radius - cornerRadius) - tx0 * extendDist,
+        p0.y - ny0 * (radius - cornerRadius) - ty0 * extendDist,
+      ));
+      result.add(Offset(
+        rightSide.first.dx - tx0 * (extendDist - cornerRadius),
+        rightSide.first.dy - ty0 * (extendDist - cornerRadius),
+      ));
+      result.add(rightSide.first);
+    }
+
+    result.addAll(rightSide);
+
+    final pLast = points.last;
+    if (roundCaps) {
+      const segments = 12;
+      for (int i = 0; i <= segments; i++) {
+        final angle = math.pi * (i / segments);
+        final vx = math.cos(angle) * (-nxLast) + math.sin(angle) * txLast;
+        final vy = math.cos(angle) * (-nyLast) + math.sin(angle) * tyLast;
+        result.add(Offset(pLast.x + radius * vx, pLast.y + radius * vy));
+      }
+    } else {
+      final extendDist = radius * 0.3;
+      final cornerRadius = radius * 0.2;
+      
+      result.add(rightSide.last);
+      result.add(Offset(
+        rightSide.last.dx + txLast * (extendDist - cornerRadius),
+        rightSide.last.dy + tyLast * (extendDist - cornerRadius),
+      ));
+      result.add(Offset(
+        pLast.x - nxLast * (radius - cornerRadius) + txLast * extendDist,
+        pLast.y - nyLast * (radius - cornerRadius) + tyLast * extendDist,
+      ));
+      result.add(Offset(
+        pLast.x + nxLast * (radius - cornerRadius) + txLast * extendDist,
+        pLast.y + nyLast * (radius - cornerRadius) + tyLast * extendDist,
+      ));
+      result.add(Offset(
+        leftSide.last.dx + txLast * (extendDist - cornerRadius),
+        leftSide.last.dy + tyLast * (extendDist - cornerRadius),
+      ));
+      result.add(leftSide.last);
+    }
+
+    result.addAll(leftSide.reversed);
+
+    return result;
+  }
 
   /// Chord direction from spine start across only the first few edges — avoids
   /// far-down-the-spine chords that swing as more ink is added.
@@ -3404,13 +3289,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // phantom tail. Live cheap-pen mesh appends the tip so the cap tracks
     // the stylus (path tools already did this in getPolygon).
     Float32List packed = _packedPoints!;
-    if (_usesLiveCheapSpineMesh && _predictionTip != null) {
+    if (_usesLiveCheapSpineMesh && _predictedTail != null) {
       final src = _packedPoints!;
-      packed = Float32List(src.length + 3);
+      final extraLen = _predictedTail!.length * 3;
+      packed = Float32List(src.length + extraLen);
       packed.setAll(0, src);
-      packed[src.length] = _predictionTip!.dx;
-      packed[src.length + 1] = _predictionTip!.dy;
-      packed[src.length + 2] = _predictionPressure ?? 0.5;
+      for (int i = 0; i < _predictedTail!.length; i++) {
+        packed[src.length + i * 3] = _predictedTail![i].x;
+        packed[src.length + i * 3 + 1] = _predictedTail![i].y;
+        packed[src.length + i * 3 + 2] = _predictedTail![i].pressure ?? 0.5;
+      }
     }
 
     Float32List rawSmooth = _getAdaptiveSpineFast(
@@ -3450,24 +3338,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
     if (count < 2) return null;
 
-    var startSpine = 0;
-    var reuseStartCap = false;
-    if (_usesLiveCheapSpineMesh) {
-      final frozen = _liveCheapFrozenSpineCount;
-      final frozenPos = _liveCheapFrozenPositions;
-      final prefix = _liveCheapFrozenSmoothPrefix;
-      if (frozen > 2 &&
-          frozenPos != null &&
-          prefix != null &&
-          count > frozen + 2 &&
-          _cheapSmoothPrefixMatches(prefix, smoothPoints, frozen)) {
-        startSpine = frozen;
-        reuseStartCap = true;
-      } else {
-        _clearLiveCheapSpineFreeze();
-      }
-    }
-
     final bool isHighlighter = toolId == ToolId.highlighter;
     final bool isBallpoint = toolId == ToolId.ballpointPen;
     final bool isCalligraphy = toolId == ToolId.calligraphyPen;
@@ -3499,7 +3369,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             ? highlighterWantsCaps
             : (isCalligraphy ? false : (options.end.cap || isBallpoint))) &&
         (!options.end.taperEnabled || !canTaper || roundCapOverridesTaper);
-    if (reuseStartCap) generateStartCap = false;
+
+    final bool useCoverage = toolId == ToolId.advancedPencil && paint.pressureMapsToCoverage;
 
     // Spine points can emit >1 quad pair when miter subdivisions activate.
     final int maxPairs =
@@ -3508,16 +3379,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         48;
     final Float32List positions = Float32List(maxPairs * 4);
     final Uint16List indices = Uint16List(maxPairs * 6);
+    final Int32List? colorsArray = useCoverage ? Int32List(maxPairs * 2) : null;
 
     int vIndex = 0, iIndex = 0, pairCount = 0;
-    final frozenPos = _liveCheapFrozenPositions;
-    if (reuseStartCap && frozenPos != null) {
-      positions.setRange(0, frozenPos.length, frozenPos);
-      vIndex = frozenPos.length;
-      pairCount = vIndex >> 2;
-    }
 
-    void addVertexPair(double px, double py, double nx, double ny, double w) {
+    void addVertexPair(double px, double py, double nx, double ny, double w, double pressure) {
       double vx = nx, vy = ny;
       if (isCalligraphy) {
         double rxNorm = 1.3;
@@ -3544,6 +3410,17 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       positions[vIndex++] = py + vy * w;
       positions[vIndex++] = px - vx * w;
       positions[vIndex++] = py - vy * w;
+      
+      if (useCoverage) {
+        // Transição linear com piso base (0.25) para não perder os detalhes
+        // texturizados do shader/ruído em pinceladas muito leves.
+        final double cov = 0.25 + 0.75 * pressure.clamp(0.0, 1.0);
+        final int alpha = (cov * 255).clamp(0, 255).toInt();
+        final int c = (alpha << 24) | 0x00FFFFFF;
+        colorsArray![pairCount * 2] = c;
+        colorsArray[pairCount * 2 + 1] = c;
+      }
+
       pairCount++;
     }
 
@@ -3632,6 +3509,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           nx,
           ny,
           math.cos(angle) * width,
+          hemisP0,
         );
       }
     }
@@ -3654,9 +3532,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       taperLenEndMesh = (options.end.customTaper ?? 10).round().clamp(4, 64);
     }
 
-    final spinePairStart = Int32List(count);
-    for (int i = startSpine; i < count; i++) {
-      spinePairStart[i] = pairCount;
+    for (int i = 0; i < count; i++) {
       final int o = i * 3;
       final double px = smoothPoints[o], py = smoothPoints[o + 1];
       final double pp = usePressure ? smoothedPressures[i] : 0.5;
@@ -3749,7 +3625,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           pressure *= (t * (2 - t));
         }
       }
-      final double width = (isBallpoint || isHighlighter || isCalligraphy)
+      final double width = (isBallpoint || isHighlighter || isCalligraphy || useCoverage)
           ? baseSize
           : math.max(0.1, baseSize * (0.2 + 0.8 * pressure * 2));
 
@@ -3774,34 +3650,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         for (int step = 0; step <= segments; step++) {
           double t = step / segments;
           double a = angleB + diff * t;
-          addVertexPair(px, py, math.cos(a), math.sin(a), width);
+          addVertexPair(px, py, math.cos(a), math.sin(a), width, pressure);
         }
       } else {
         double miterLength =
             1.0 / math.sqrt(math.max(0.01, (1.0 + dotMiter) / 2.0));
         miterLength = miterLength.clamp(1.0, 2.5);
-        addVertexPair(px, py, nx * miterLength, ny * miterLength, width);
-      }
-    }
-
-    if (_usesLiveCheapSpineMesh && count > 24) {
-      // Freeze earlier at ~60 Hz so tip remesh stays inside one vsync budget.
-      // Lowering 'tipKeep' on battery saver cuts down the vertices calculated per frame, saving CPU.
-      final tipKeep = DisplayInkFeel.instance.isLowRefresh ? 6 : 16;
-      final lockAt = count - tipKeep;
-      if (lockAt > _liveCheapFrozenSpineCount &&
-          lockAt > startSpine &&
-          lockAt < count) {
-        final pairAt = spinePairStart[lockAt];
-        if (pairAt > 0 && pairAt * 4 <= vIndex) {
-          _liveCheapFrozenPositions = Float32List.fromList(
-            positions.sublist(0, pairAt * 4),
-          );
-          _liveCheapFrozenSpineCount = lockAt;
-          final prefix = Float32List(lockAt * 3);
-          prefix.setRange(0, prefix.length, smoothPoints);
-          _liveCheapFrozenSmoothPrefix = prefix;
-        }
+        addVertexPair(px, py, nx * miterLength, ny * miterLength, width, pressure);
       }
     }
 
@@ -3839,6 +3694,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           nx,
           ny,
           math.cos(angle) * width,
+          hemisP,
         );
       }
     }
@@ -3859,13 +3715,15 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       vIndex,
     );
     final Uint16List finalIndices = Uint16List.sublistView(indices, 0, iIndex);
+    final Int32List? finalColors = useCoverage ? Int32List.sublistView(colorsArray!, 0, pairCount * 2) : null;
 
     final ui.Vertices verts = ui.Vertices.raw(
       ui.VertexMode.triangles,
       finalPositions,
       indices: finalIndices,
+      colors: finalColors,
     );
-    return _StrokeMeshData(verts, finalPositions, finalIndices);
+    return _StrokeMeshData(verts, finalPositions, finalIndices, finalColors);
   }
 
   static Float32List _getAdaptiveSpineFast(
@@ -4059,7 +3917,7 @@ class _StrokeMeshData {
   final Float32List positions;
   final Uint16List indices;
   final Int32List? colors;
-  _StrokeMeshData(this.vertices, this.positions, this.indices, {this.colors});
+  _StrokeMeshData(this.vertices, this.positions, this.indices, [this.colors]);
 }
 
 enum StrokeQuality {

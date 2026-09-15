@@ -34,6 +34,8 @@ import 'package:saber/data/tools/pen.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/services/display_ink_feel.dart';
+import 'package:pdfrx/pdfrx.dart' hide PdfLink;
+import 'package:saber/components/editor/pdf_link_detector.dart';
 
 bool _strokeCanMergeSolidMesh(Stroke stroke) => stroke.canBatchSolidMesh;
 
@@ -79,7 +81,7 @@ List<ui.Vertices> mergeStrokeMeshes(List<(Float32List, Uint16List)> chunks) {
   return out;
 }
 
-Map<int, List<ui.Vertices>> _mergeSolidStrokeMeshesByColor(
+Map<int, List<ui.Vertices>> mergeSolidStrokeMeshesByColor(
   List<Stroke> strokes,
   double scale,
 ) {
@@ -133,6 +135,7 @@ class InnerCanvas extends StatefulWidget {
     this.imageCropState,
     this.onCropRectChanged,
     this.overrideInvert,
+    this.showPdfLinkBoxes,
     this.pageRasterCache,
   });
 
@@ -173,6 +176,7 @@ class InnerCanvas extends StatefulWidget {
   final bool doneSelecting;
 
   final bool? overrideInvert;
+  final ValueListenable<bool>? showPdfLinkBoxes;
 
   /// Per-editor page ink/background bitmap caches (xnotes-style LOD).
   final PageRasterCacheManager? pageRasterCache;
@@ -189,6 +193,9 @@ class InnerCanvas extends StatefulWidget {
 
 class InnerCanvasState extends State<InnerCanvas> {
   late final ValueNotifier<int> _layer2Repaint;
+  Listenable? _cachedCanvasRepaint;
+  Listenable? _cachedRasterRepaint;
+  Listenable? _cachedInkRepaint;
 
   bool _linkMarkersCollapsed = true;
 
@@ -212,8 +219,8 @@ class InnerCanvasState extends State<InnerCanvas> {
     return pages[_safePageIndex].strokePictureCache;
   }
 
-  void _invalidatePageRasterInk({Rect? dirty}) {
-    widget.pageRasterCache?.invalidateInk(widget.pageIndex);
+  void _invalidatePageRasterInk({Rect? dirty, bool discardStale = false}) {
+    widget.pageRasterCache?.invalidateInk(widget.pageIndex, discardStale: discardStale);
   }
 
   void _invalidatePageRasterBg() {
@@ -224,9 +231,10 @@ class InnerCanvasState extends State<InnerCanvas> {
     Rect? dirty,
     bool eagerRefill = false,
     double padding = 0,
+    bool discardStale = false,
   }) {
     if (widget.pageRasterCache != null) {
-      _invalidatePageRasterInk(dirty: dirty);
+      _invalidatePageRasterInk(dirty: dirty, discardStale: discardStale);
     }
     // We MUST invalidate the tiled cache since we disabled PageRasterCacheManager
     // for ink. Without this, new strokes won't bake into the tiles.
@@ -282,7 +290,7 @@ class InnerCanvasState extends State<InnerCanvas> {
       (_cachedBatchScale - clamped).abs() < 0.001) {
       return _cachedBatchedMeshes!;
       }
-      final merged = _mergeSolidStrokeMeshesByColor(strokes, clamped);
+      final merged = mergeSolidStrokeMeshesByColor(strokes, clamped);
     _cachedBatchedMeshes = merged;
     _cachedBatchScale = clamped;
     _cachedBatchStrokeCount = strokes.length;
@@ -364,7 +372,8 @@ class InnerCanvasState extends State<InnerCanvas> {
       }
     }
     _pageStrokeSnapshot = current;
-    _liveTiledStrokes.strokes = current;
+    final currentInk = current.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+    _liveTiledStrokes.strokes = currentInk;
     if (!changed) return;
 
     _pendingBakeTimer?.cancel();
@@ -373,7 +382,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     _pendingInkSet.clear();
     _pendingGeneration++;
     _invalidateCommittedStrokesFlatCache();
-    _tiledStrokesSnapshot = current;
+    _tiledStrokesSnapshot = currentInk;
     _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: dirty == null);
     _layer2Repaint.value++;
     _pendingRepaint.value++;
@@ -384,6 +393,42 @@ class InnerCanvasState extends State<InnerCanvas> {
   int _shapePreviewTick = 0;
   late final ScrollController _quillScrollController;
 
+  List<PdfLink>? _pagePdfLinks;
+
+  void _loadPdfLinks() {
+    final pages = widget.coreInfo.pages;
+    if (pages.isEmpty) return;
+    final page = pages[_safePageIndex];
+    if (page.backgroundImage is PdfEditorImage) {
+      final pdfImg = page.backgroundImage as PdfEditorImage;
+      final notifier = widget.coreInfo.assetCacheAll.getPdfNotifier(pdfImg.assetId);
+      
+      void fetchLinks(PdfDocument doc) async {
+        final links = await PdfLinkDetector.detectLinksOnPage(doc, pdfImg.pdfPage);
+        if (mounted) {
+          setState(() {
+            _pagePdfLinks = links;
+          });
+        }
+      }
+
+      if (notifier.value != null) {
+        fetchLinks(notifier.value!);
+      } else {
+        late VoidCallback listener;
+        listener = () {
+          if (notifier.value != null) {
+            fetchLinks(notifier.value!);
+            notifier.removeListener(listener);
+          }
+        };
+        notifier.addListener(listener);
+      }
+    } else {
+      _pagePdfLinks = null;
+    }
+  }
+
   bool _isCapturingThumbnail = false;
   final GlobalKey _thumbnailCaptureKey = GlobalKey();
 
@@ -393,6 +438,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     _layer2Repaint = ValueNotifier(0);
     _quillScrollController = ScrollController();
     widget.redrawPageListenable?.addListener(_onPageChanged);
+    _loadPdfLinks();
 
     if (widget.coreInfo.pages.isNotEmpty) {
       final page = widget.coreInfo.pages[_safePageIndex];
@@ -401,7 +447,7 @@ class InnerCanvasState extends State<InnerCanvas> {
       _lastStrokeCount = _totalStrokesAcrossLayers(page);
       _lastObservedSaveBinaryRevision = page.saveBinaryRevision;
       _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-      _liveTiledStrokes.strokes = _pageStrokeSnapshot;
+      _liveTiledStrokes.strokes = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
     }
     _syncShapePreviewTicker();
     StrokePaintImageCache.instance.revision.addListener(
@@ -437,9 +483,47 @@ class InnerCanvasState extends State<InnerCanvas> {
     return widget.pageIndex.clamp(0, p.length - 1);
   }
 
+  Listenable get _canvasRepaintListenable {
+    return _cachedCanvasRepaint ??= Listenable.merge([
+      if (widget.redrawPageListenable != null) widget.redrawPageListenable!,
+      if (widget.interactionRepaintListenable != null) widget.interactionRepaintListenable!,
+      if (widget.eraserPositionListenable != null) widget.eraserPositionListenable!,
+      _shapePreviewRepaint,
+      _pendingRepaint,
+      _layer2Repaint, // ALWAYS include it to avoid recreating the Listenable when selection changes
+      StrokePaintImageCache.instance.revision,
+    ]);
+  }
+
+  Listenable? get _pageRasterRepaintListenable {
+    if (widget.pageRasterCache == null) return null;
+    return _cachedRasterRepaint ??= Listenable.merge([
+      widget.pageRasterCache!.repaintEpoch,
+      PageRasterCacheManager.lodEpoch,
+    ]);
+  }
+
+  Listenable get _inkRepaintListenable {
+    return _cachedInkRepaint ??= Listenable.merge([
+      _layer2Repaint,
+      _pendingRepaint,
+      if (_pageRasterRepaintListenable != null) _pageRasterRepaintListenable!,
+      _strokePictureCache.recordGeneration,
+      TiledStrokePictureCache.lodEpoch,
+    ]);
+  }
+
   @override
   void didUpdateWidget(InnerCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.redrawPageListenable != widget.redrawPageListenable ||
+        oldWidget.interactionRepaintListenable != widget.interactionRepaintListenable ||
+        oldWidget.eraserPositionListenable != widget.eraserPositionListenable ||
+        oldWidget.pageRasterCache != widget.pageRasterCache) {
+      _cachedCanvasRepaint = null;
+      _cachedRasterRepaint = null;
+      _cachedInkRepaint = null;
+    }
     if (widget.redrawPageListenable != oldWidget.redrawPageListenable) {
       oldWidget.redrawPageListenable?.removeListener(_onPageChanged);
       widget.redrawPageListenable?.addListener(_onPageChanged);
@@ -523,11 +607,12 @@ class InnerCanvasState extends State<InnerCanvas> {
         _eraserSessionDirty = null;
         _eraserNeedsFullInvalidate = false;
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-        _tiledStrokesSnapshot = _pageStrokeSnapshot;
-        _liveTiledStrokes.strokes = _pageStrokeSnapshot;
+        _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+        _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
         _invalidateCommittedStrokesFlatCache();
         _invalidateCommittedStrokeCache();
         _layer2Repaint.value++;
+        _loadPdfLinks();
       } else if (isEraserActive) {
         // Refill only the eraser's tiles so deleted ink disappears this frame.
         // Use the pointer circle for area splits (not the whole stroke bounds —
@@ -544,8 +629,8 @@ class InnerCanvasState extends State<InnerCanvas> {
           _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(
             growable: false,
           );
-          _tiledStrokesSnapshot = _pageStrokeSnapshot;
-          _liveTiledStrokes.strokes = _pageStrokeSnapshot;
+          _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+          _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
           if (dirtyBounds != null) {
             _eraserSessionDirty = _eraserSessionDirty == null
             ? dirtyBounds
@@ -564,8 +649,8 @@ class InnerCanvasState extends State<InnerCanvas> {
       } else if (eraserFinished) {
         _bakePendingNow();
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-        _tiledStrokesSnapshot = _pageStrokeSnapshot;
-        _liveTiledStrokes.strokes = _pageStrokeSnapshot;
+        _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+        _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
         _invalidateCommittedStrokesFlatCache();
         final sessionDirty = _eraserSessionDirty;
         final needsFull = _eraserNeedsFullInvalidate;
@@ -596,8 +681,11 @@ class InnerCanvasState extends State<InnerCanvas> {
         _invalidatePageRasterBg();
         _layer2Repaint.value++;
       } else if (invertChanged) {
+        _bakePendingNow();
+        _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
+        _tiledStrokesSnapshot = const [];
         _invalidateCommittedStrokesFlatCache();
-        _invalidateCommittedStrokeCache(eagerRefill: true);
+        _invalidateCommittedStrokeCache(eagerRefill: true, discardStale: true);
         _invalidatePageRasterBg();
         _layer2Repaint.value++;
       } else if (page.laserStrokes.isNotEmpty ||
@@ -703,6 +791,19 @@ class InnerCanvasState extends State<InnerCanvas> {
     _lastLaserStrokeCount = laserCount;
     if (eraserActive) {
       _applyPageStrokeDelta(page);
+      
+      // Forces tile invalidation under the eraser to show in-place point mutations in real time
+      final pos = widget.eraserPositionListenable?.value ?? widget.eraserPosition;
+      if (pos != null) {
+        final radius = (widget.eraserSize ?? 16) + 8;
+        final pointerRect = Rect.fromCircle(center: pos, radius: radius);
+        _eraserSessionDirty = _eraserSessionDirty == null
+            ? pointerRect
+            : _eraserSessionDirty!.expandToInclude(pointerRect);
+        _invalidateCommittedStrokeCache(dirty: pointerRect, eagerRefill: true, padding: 48);
+        _layer2Repaint.value++;
+      }
+      
       _lastStrokeCount = strokeCount;
       return;
     }
@@ -834,7 +935,14 @@ class InnerCanvasState extends State<InnerCanvas> {
       _cachedFlatLayerOrderHash = layerOrderHash;
     }
 
-    final tiledStrokes = _reuseTiledSnapshot(committedStrokes);
+    final committedInkStrokes = committedStrokes
+        .where((s) => s.toolId != ToolId.highlighter)
+        .toList(growable: false);
+    final committedHighlighterStrokes = committedStrokes
+        .where((s) => s.toolId == ToolId.highlighter)
+        .toList(growable: false);
+
+    final tiledStrokes = _reuseTiledSnapshot(committedInkStrokes);
     _liveTiledStrokes.strokes = tiledStrokes;
 
     final useCachedStrokeLayer =
@@ -845,21 +953,10 @@ class InnerCanvasState extends State<InnerCanvas> {
     widget.pageRasterCache != null &&
     !widget.isPreview &&
     !widget.isPrint;
-    
-    final committedInkStrokes = committedStrokes
-        .where((s) => s.toolId != ToolId.highlighter)
-        .toList(growable: false);
-    final committedHighlighterStrokes = committedStrokes
-        .where((s) => s.toolId == ToolId.highlighter)
-        .toList(growable: false);
 
-    final pageRasterRepaint = widget.pageRasterCache == null
-    ? null
-    : Listenable.merge([
-      widget.pageRasterCache!.repaintEpoch,
-      PageRasterCacheManager.lodEpoch,
-    ]);
+    final pageRasterRepaint = _pageRasterRepaintListenable;
     final devicePixelRatio = _canvasDevicePixelRatio();
+    final isMoving = PageRasterCacheManager.viewportMoving;
 
     final paintQuadTree = page.strokeSpatialIndex;
 
@@ -1037,6 +1134,26 @@ class InnerCanvasState extends State<InnerCanvas> {
                 readOnly: true,
               ),
 
+            if (widget.showPdfLinkBoxes != null && _pagePdfLinks != null && _pagePdfLinks!.isNotEmpty && page.backgroundImage is PdfEditorImage)
+              Positioned.fill(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: widget.showPdfLinkBoxes!,
+                  builder: (context, show, child) {
+                    if (!show) return const SizedBox.shrink();
+                    return IgnorePointer(
+                      child: CustomPaint(
+                        painter: _PdfLinkBoxesPainter(
+                          links: _pagePdfLinks!,
+                          widgetSize: Size(widget.width, widget.height),
+                          pdfNaturalSize: (page.backgroundImage as PdfEditorImage).naturalSize,
+                          showBoxes: show,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+
               Positioned.fill(
                 child: IgnorePointer(
                   ignoring: widget.coreInfo.readOnly || !widget.textEditing,
@@ -1049,39 +1166,42 @@ class InnerCanvasState extends State<InnerCanvas> {
                   child: Stack(
                     children: [
                       for (final image in page.allImagesInDrawOrder) ...[
-                        CanvasImage(
-                          filePath: widget.coreInfo.filePath,
-                          image: image,
-                          pageSize: Size(widget.width, widget.height),
-                          setAsBackground: widget.setAsBackground,
-                          readOnly:
-                          widget.coreInfo.readOnly ||
-                          !widget.currentToolIsSelect,
-                          selected:
-                          widget.currentSelection?.images.contains(image) ??
-                          false,
-                          previewRect:
-                          (widget.currentSelection?.images.contains(image) ??
-                          false) &&
-                          widget.selectionPreview != null
-                          ? widget.selectionPreview!.transformRect(
-                            image.dstRect,
-                          )
-                          : null,
-                          previewRotationDeg:
-                          (widget.currentSelection?.images.contains(image) ??
-                          false) &&
-                          widget.selectionPreview != null
-                          ? image.rotationDeg +
-                          widget.selectionPreview!.rotationDeltaDeg
-                          : null,
-                          canvasScale: widget.currentScale,
-                          cropPreviewRect:
-                          widget.imageCropState != null &&
-                          identical(widget.imageCropState!.image, image)
-                          ? widget.imageCropState!.normalizedCrop
-                          : null,
-                          onCropRectChanged: widget.onCropRectChanged,
+                        KeyedSubtree(
+                          key: ValueKey('img_${image.id}_inv_$invert'),
+                          child: CanvasImage(
+                            filePath: widget.coreInfo.filePath,
+                            image: image,
+                            pageSize: Size(widget.width, widget.height),
+                            setAsBackground: widget.setAsBackground,
+                            readOnly:
+                            widget.coreInfo.readOnly ||
+                            !widget.currentToolIsSelect,
+                            selected:
+                            widget.currentSelection?.images.contains(image) ??
+                            false,
+                            previewRect:
+                            (widget.currentSelection?.images.contains(image) ??
+                            false) &&
+                            widget.selectionPreview != null
+                            ? widget.selectionPreview!.transformRect(
+                              image.dstRect,
+                            )
+                            : null,
+                            previewRotationDeg:
+                            (widget.currentSelection?.images.contains(image) ??
+                            false) &&
+                            widget.selectionPreview != null
+                            ? image.rotationDeg +
+                            widget.selectionPreview!.rotationDeltaDeg
+                            : null,
+                            canvasScale: widget.currentScale,
+                            cropPreviewRect:
+                            widget.imageCropState != null &&
+                            identical(widget.imageCropState!.image, image)
+                            ? widget.imageCropState!.normalizedCrop
+                            : null,
+                            onCropRectChanged: widget.onCropRectChanged,
+                          ),
                         ),
                       ],
                     ],
@@ -1154,13 +1274,7 @@ class InnerCanvasState extends State<InnerCanvas> {
               child: CustomPaint(
                 isComplex: true,
                 painter: _PageRasterInkLayerPainter(
-                  repaint: Listenable.merge([
-                    _layer2Repaint,
-                    _pendingRepaint,
-                    if (pageRasterRepaint != null) pageRasterRepaint,
-                    _strokePictureCache.recordGeneration,
-                    TiledStrokePictureCache.lodEpoch,
-                  ]),
+                  repaint: _inkRepaintListenable,
                   manager: widget.pageRasterCache!,
                   invert: invert,
                   quadTree: paintQuadTree,
@@ -1201,21 +1315,7 @@ class InnerCanvasState extends State<InnerCanvas> {
                 child: CustomPaint(
                   willChange: true,
                   painter: CanvasPainter(
-                    repaint: Listenable.merge([
-                      if (widget.redrawPageListenable != null)
-                        widget.redrawPageListenable!,
-                        if (widget.interactionRepaintListenable != null)
-                          widget.interactionRepaintListenable!,
-                          if (widget.eraserPositionListenable != null)
-                            widget.eraserPositionListenable!,
-                            _shapePreviewRepaint,
-                            _pendingRepaint,
-                            if (widget.currentSelection != null ||
-                              widget.eraserPosition != null ||
-                              page.laserStrokes.isNotEmpty)
-                              _layer2Repaint,
-                              StrokePaintImageCache.instance.revision,
-                    ]),
+                    repaint: _canvasRepaintListenable,
 
                     strokes:
                     widget.currentSelection != null &&
@@ -1362,16 +1462,17 @@ class _PageRasterBgLayerPainter extends CustomPainter {
       params: bgParams,
       hasFullBleedBackground: false,
     );
+    final isMoving = PageRasterCacheManager.viewportMoving;
     if (entry != null) {
       final cacheSharp = pageRasterCacheResCoversTarget(entry.res, idealRes);
-      // Use !viewportSettled to keep the lightweight raster until the settle delay finishes!
-      if (cacheSharp || !PageRasterCacheManager.viewportSettled) {
+      // Keeps the raster lightweight and fast during movement. Uses vector instantly when stopping.
+      if (cacheSharp || isMoving) {
         paintPageCacheImage(
           canvas,
           size,
           entry,
           targetRes: idealRes,
-          lowQualityFilter: !PageRasterCacheManager.viewportSettled,
+          lowQualityFilter: isMoving,
         );
       } else {
         fallback.paint(canvas, size);
@@ -1472,13 +1573,19 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       params: inkParams,
     );
 
+    final isMoving = PageRasterCacheManager.viewportMoving;
+
     final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
     bool useVectorFallback = isDrawing || entry == null;
     if (entry != null && !useVectorFallback) {
       if (entry.strokeCount > committedStrokes.length) {
         useVectorFallback = true;
-      } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes) && PageRasterCacheManager.viewportSettled) {
-        useVectorFallback = true;
+      } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
+        // If the resolution is not sufficient, update with super sharp high-quality vector,
+        // but ONLY when the screen is not moving, to prevent GPU drop rate.
+        if (!isMoving) {
+          useVectorFallback = true;
+        }
       }
     }
 
@@ -1513,7 +1620,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         size,
         entry!,
         targetRes: idealRes,
-        lowQualityFilter: !PageRasterCacheManager.viewportSettled,
+        lowQualityFilter: isMoving,
       );
       
       if (entry.strokeCount < committedStrokes.length) {
@@ -2675,7 +2782,7 @@ class TiledStrokePictureCache {
     double? lineThickness,
     Color? lineColor,
   }) {
-    final mergedMeshes = _mergeSolidStrokeMeshesByColor(
+    final mergedMeshes = mergeSolidStrokeMeshesByColor(
       tileStrokes,
       currentScale,
     );
@@ -3130,5 +3237,54 @@ class _LinksCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _PdfLinkBoxesPainter extends CustomPainter {
+  final List<PdfLink> links;
+  final Size widgetSize;
+  final Size pdfNaturalSize;
+  final bool showBoxes;
+
+  _PdfLinkBoxesPainter({
+    required this.links,
+    required this.widgetSize,
+    required this.pdfNaturalSize,
+    required this.showBoxes,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Retorna imediatamente, desenhando "nada", o que limpa o Canvas e as bordas.
+    if (!showBoxes || pdfNaturalSize.isEmpty) return;
+    
+    final fillPaint = Paint()
+      ..color = Colors.blueAccent.withValues(alpha: 0.15)
+      ..style = PaintingStyle.fill;
+      
+    final borderPaint = Paint()
+      ..color = Colors.blueAccent.withValues(alpha: 0.4)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+
+    for (final link in links) {
+      for (final rect in link.rects) {
+        final wRect = PdfLinkDetector.pdfRectToWidgetRect(
+          rect,
+          widgetSize,
+          pdfNaturalSize,
+        );
+        canvas.drawRect(wRect, fillPaint);
+        canvas.drawRect(wRect, borderPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PdfLinkBoxesPainter oldDelegate) {
+    return oldDelegate.links != links ||
+           oldDelegate.widgetSize != widgetSize ||
+           oldDelegate.pdfNaturalSize != pdfNaturalSize ||
+           oldDelegate.showBoxes != showBoxes;
   }
 }

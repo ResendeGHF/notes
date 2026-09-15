@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -54,9 +57,40 @@ class FileTreeCache {
   }
 
   void preload() {
+    _loadRootCacheSync();
     unawaited(getChildren('/'));
     unawaited(getLinks('/'));
     unawaited(loadExpandedPrefs());
+  }
+
+  void _saveRootCache(DirectoryChildren children) {
+    try {
+      final file = File(p.join(FileManager.documentsDirectory, '.file_tree_cache.json'));
+      final map = {
+        'd': children.directories,
+        'f': children.files,
+        'ld': children.linkedDirectories,
+        'lf': children.linkedFiles,
+      };
+      file.writeAsString(jsonEncode(map));
+    } catch (_) {}
+  }
+
+  void _loadRootCacheSync() {
+    try {
+      final file = File(p.join(FileManager.documentsDirectory, '.file_tree_cache.json'));
+      if (file.existsSync()) {
+        final map = jsonDecode(file.readAsStringSync());
+        final children = DirectoryChildren(
+          List<String>.from(map['d'] ?? []),
+          List<String>.from(map['f'] ?? []),
+          linkedDirectories: Map<String, String>.from(map['ld'] ?? {}),
+          linkedFiles: Map<String, String>.from(map['lf'] ?? {}),
+        );
+        _live['/'] ??= children;
+        _stale['/'] ??= children;
+      }
+    } catch (_) {}
   }
 
   /// Soft invalidate: keep stale snapshots for instant remount paint.
@@ -117,6 +151,7 @@ class FileTreeCache {
         if (children != null) {
           _live[key] = children;
           _stale[key] = children;
+          if (key == '/') _saveRootCache(children);
         }
         return children;
       } finally {

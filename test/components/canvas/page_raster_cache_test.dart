@@ -3,6 +3,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
@@ -263,5 +264,143 @@ void main() {
     expect(stroke.hasCachedHighQualityPolygon, isFalse);
     stroke.lowQualityPath;
     expect(stroke.hasCachedHighQualityPolygon, isFalse);
+  });
+
+  List<Stroke> densePageStrokes() {
+    // Diverse strokes (varying position/width) so the geometry warmup spans
+    // several time slices and actually yields to the event loop.
+    return [
+      for (var i = 0; i < 80; i++)
+        testPolylineStroke(
+          toolId: ToolId.ballpointPen,
+          y: 20.0 + i * 3,
+          width: 4 + (i % 5) * 2,
+        ),
+    ];
+  }
+
+  PageRasterInkParams inkParamsFor(EditorPage page, List<Stroke> strokes) {
+    return PageRasterInkParams(
+      invert: false,
+      strokes: strokes,
+      page: page,
+      primaryColor: Colors.blue,
+      pageIndex: 0,
+      totalPages: 1,
+      currentScale: 1,
+      defaultTextStyle: const TextStyle(),
+    );
+  }
+
+  test('in-flight ink bake is preempted when viewport motion starts', () async {
+    final manager = PageRasterCacheManager();
+    final page = EditorPage();
+    page.strokes.addAll(densePageStrokes());
+    PageRasterCacheManager.viewportMoving = false;
+    PageRasterCacheManager.debugForceSyncRaster = false;
+
+    manager.inkForOrSchedule(
+      pageIndex: 0,
+      pageSize: page.size,
+      scale: 1,
+      devicePixelRatio: 1,
+      params: inkParamsFor(page, page.strokes),
+    );
+    // The job starts synchronously and suspends at its first slice yield (or
+    // at toImage); it cannot complete before we flip the flag below.
+    expect(manager.debugBuildJobCalls, 1);
+
+    // User grabs the canvas again while the bake is in flight.
+    PageRasterCacheManager.updateViewportMoving(true);
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    PageRasterCacheManager.updateViewportMoving(false);
+
+    // The aborted bake must not land a cache entry...
+    expect(manager.debugInkCacheCount, 0);
+    expect(manager.debugHasPendingInk, isFalse);
+
+    // ...and the settle flow still produces a raster afterwards.
+    manager.prepareForSettledScale(scale: 1, devicePixelRatio: 1);
+    manager.inkForOrSchedule(
+      pageIndex: 0,
+      pageSize: page.size,
+      scale: 1,
+      devicePixelRatio: 1,
+      forceSchedule: true,
+      params: inkParamsFor(page, page.strokes),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(manager.debugInkCacheCount, 1);
+    expect(manager.debugHasPendingInk, isFalse);
+    manager.dispose();
+  });
+
+  test('content invalidation preempts an in-flight bake', () async {
+    final manager = PageRasterCacheManager();
+    final page = EditorPage();
+    page.strokes.addAll(densePageStrokes());
+    PageRasterCacheManager.viewportMoving = false;
+    PageRasterCacheManager.debugForceSyncRaster = false;
+
+    manager.inkForOrSchedule(
+      pageIndex: 0,
+      pageSize: page.size,
+      scale: 1,
+      devicePixelRatio: 1,
+      params: inkParamsFor(page, page.strokes),
+    );
+    // Stroke committed mid-bake: content epoch + generation + cache epoch all
+    // move, so the in-flight job must abort instead of landing stale ink.
+    manager.invalidateInk(0);
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    expect(manager.debugInkCacheCount, 0);
+    expect(manager.debugHasPendingInk, isFalse);
+    manager.dispose();
+  });
+
+  test('queued job with stale generation is dropped before warmup', () async {
+    final manager = PageRasterCacheManager();
+    final page0 = EditorPage();
+    page0.strokes.add(testPolylineStroke(toolId: ToolId.ballpointPen));
+    final page1 = EditorPage();
+    page1.strokes.add(testPolylineStroke(toolId: ToolId.ballpointPen));
+    PageRasterCacheManager.viewportMoving = false;
+    PageRasterCacheManager.debugForceSyncRaster = false;
+
+    // Job A starts immediately; job B stays queued behind it.
+    manager.inkForOrSchedule(
+      pageIndex: 0,
+      pageSize: page0.size,
+      scale: 1,
+      devicePixelRatio: 1,
+      params: inkParamsFor(page0, page0.strokes),
+    );
+    manager.inkForOrSchedule(
+      pageIndex: 1,
+      pageSize: page1.size,
+      scale: 1,
+      devicePixelRatio: 1,
+      params: PageRasterInkParams(
+        invert: false,
+        strokes: page1.strokes,
+        page: page1,
+        primaryColor: Colors.blue,
+        pageIndex: 1,
+        totalPages: 2,
+        currentScale: 1,
+        defaultTextStyle: const TextStyle(),
+      ),
+    );
+    // Invalidate page 1 while its job is still queued.
+    manager.invalidateInk(1);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    // Only job A ever reached the build; B was dropped by the pre-checks, so
+    // no stale geometry was warmed for it and no entry landed.
+    expect(manager.debugBuildJobCalls, 1);
+    expect(manager.debugInkCacheCount, 0);
+    expect(manager.debugHasPendingInk, isFalse);
+    manager.dispose();
   });
 }

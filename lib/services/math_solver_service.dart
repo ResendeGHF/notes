@@ -38,7 +38,11 @@ class MathSolverService {
   }
 
   Future<void> dispose() async {
-    await _recognizer.close();
+    try {
+      await _recognizer.close();
+    } catch (e) {
+      log.warning('Failed to dispose Math Solver recognizer: $e');
+    }
   }
 
   ml.Ink _buildInk(List<Stroke> strokes) {

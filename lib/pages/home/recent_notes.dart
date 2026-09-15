@@ -203,12 +203,29 @@ class _RecentPageState extends State<RecentPage> {
   }
 
   void _loadInitial() {
+    // 1. INSTANT RENDER FROM STOWS
+    final recentPrefs = stows.recentFiles.value;
+    if (recentPrefs.isNotEmpty) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final instantEntries = <NoteIndexEntry>[];
+      for (int i = 0; i < recentPrefs.length; i++) {
+        instantEntries.add(NoteIndexEntry(
+          path: recentPrefs[i],
+          modifiedMillis: now - (i * 1000), // maintain relative order
+          sizeBytes: 0,
+        ));
+      }
+      _index.mergeFromDisk(instantEntries);
+      _publish(notify: false);
+    }
+
     final cached = HomeDataCache.instance.allNotesCached;
     if (cached != null) {
       _index.mergeFromDisk(cached);
       _loaded = true;
       _publish(notify: false);
       if (mounted) setState(() {});
+      return;
     }
     HomeDataCache.instance.getAllNotesOrLoad().then((list) {
       if (!mounted) return;
@@ -257,8 +274,10 @@ class _RecentPageState extends State<RecentPage> {
       child: Scaffold(
         extendBody: true,
         appBar: AppBar(
+          primary: false,
           backgroundColor: colorScheme.surface,
-          scrolledUnderElevation: 3,
+          surfaceTintColor: Colors.transparent, // Remove a alteração de cor ao rolar
+          scrolledUnderElevation: 0, // Garante que a cor/sombra nunca mude
           titleSpacing: 16,
           title: Row(
             mainAxisSize: MainAxisSize.min,
@@ -319,99 +338,96 @@ class _RecentPageState extends State<RecentPage> {
             ),
           ],
         ),
-        body: LayoutBuilder(
-          builder: (context, constraints) {
-            return ValueListenableBuilder<bool>(
-              valueListenable: stows.homeListMode,
-              builder: (context, listMode, _) {
-                final windowWidth = MediaQuery.sizeOf(context).width;
-                if (_gridColumnWindowWidth != windowWidth) {
-                  _gridColumnWindowWidth = windowWidth;
-                  // Size columns for the widest content area (collapsed rail).
-                  // Expanding the rail shrinks tiles but must not reflow rows.
-                  final columnBasis = ResponsiveNavbar.isLargeScreen
-                      ? windowWidth - VerticalNavbar.collapsedWidth
-                      : windowWidth;
-                  _gridCrossAxisCount = (columnBasis ~/ 200).clamp(1, 10);
-                }
-                final crossAxisCount = listMode ? 1 : _gridCrossAxisCount;
-
-                // Lay out at the widest content width and Transform.scale into
-                // the current slot so rail toggle only scales cards — scroll
-                // offset (and what you see mid-list) stays put.
-                final slotW = constraints.maxWidth;
-                final slotH = constraints.maxHeight;
-                final layoutW = ResponsiveNavbar.isLargeScreen
-                    ? (windowWidth - VerticalNavbar.collapsedWidth)
-                        .clamp(1.0, double.infinity)
-                    : slotW;
-                final scale = (slotW / layoutW).clamp(0.01, 1.0);
-                final viewportH = slotH / scale;
-
-                final scrollBody = RefreshIndicator(
-                  onRefresh: () => Future.wait([
-                    _reloadFromDisk(),
-                    Future.delayed(const Duration(milliseconds: 500)),
-                  ]),
-                  child: CustomScrollView(
-                    cacheExtent: 1400,
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    slivers: [
-                      if (failed) ...[
-                        const SliverSafeArea(
-                          top: false,
-                          sliver: SliverToBoxAdapter(child: Welcome()),
-                        ),
-                      ] else ...[
-                        SliverSafeArea(
-                          top: false,
-                          minimum: EdgeInsets.only(
-                            bottom: isSelecting ? 16 : 100,
+        // Envolvemos o body para cortar forçadamente o safe area top nativo do OS/DeX
+        body: MediaQuery.removePadding(
+          context: context,
+          removeTop: true,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return ValueListenableBuilder<bool>(
+                valueListenable: stows.homeListMode,
+                builder: (context, listMode, _) {
+                  final windowWidth = MediaQuery.sizeOf(context).width;
+                  if (_gridColumnWindowWidth != windowWidth) {
+                    _gridColumnWindowWidth = windowWidth;
+                    final columnBasis = ResponsiveNavbar.isLargeScreen
+                        ? windowWidth - VerticalNavbar.collapsedWidth
+                        : windowWidth;
+                    _gridCrossAxisCount = (columnBasis ~/ 200).clamp(1, 10);
+                  }
+                  final crossAxisCount = listMode ? 1 : _gridCrossAxisCount;
+  
+                  final slotW = constraints.maxWidth;
+                  final slotH = constraints.maxHeight;
+                  final layoutW = ResponsiveNavbar.isLargeScreen
+                      ? (windowWidth - VerticalNavbar.collapsedWidth)
+                          .clamp(1.0, double.infinity)
+                      : slotW;
+                  final scale = (slotW / layoutW).clamp(0.01, 1.0);
+                  final viewportH = slotH / scale;
+  
+                  final scrollBody = RefreshIndicator(
+                    onRefresh: () => Future.wait([
+                      _reloadFromDisk(),
+                      Future.delayed(const Duration(milliseconds: 500)),
+                    ]),
+                    child: CustomScrollView(
+                      primary: false,
+                      cacheExtent: 1400,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      slivers: [
+                        if (failed) ...[
+                          const SliverToBoxAdapter(child: Welcome()),
+                        ] else ...[
+                          SliverPadding(
+                            padding: EdgeInsets.only(
+                              bottom: isSelecting ? 16 : 100,
+                            ),
+                            sliver: MasonryFiles(
+                              key: const ValueKey('recent_notes_grid'),
+                              crossAxisCount: crossAxisCount,
+                              files: filePaths,
+                              selectedFiles: selectedFiles,
+                              animateMutations: false,
+                              addAutomaticKeepAlives: true,
+                              showListMetadata: listMode,
+                            ),
                           ),
-                          sliver: MasonryFiles(
-                            key: const ValueKey('recent_notes_grid'),
-                            crossAxisCount: crossAxisCount,
-                            files: filePaths,
-                            selectedFiles: selectedFiles,
-                            animateMutations: false,
-                            addAutomaticKeepAlives: true,
-                            showListMetadata: listMode,
-                          ),
-                        ),
+                        ],
                       ],
-                    ],
-                  ),
-                );
-
-                if (!ResponsiveNavbar.isLargeScreen) {
-                  return scrollBody;
-                }
-
-                return SizedBox(
-                  width: slotW,
-                  height: slotH,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.topLeft,
-                      minWidth: layoutW,
-                      maxWidth: layoutW,
-                      minHeight: viewportH,
-                      maxHeight: viewportH,
-                      child: Transform.scale(
-                        scale: scale,
+                    ),
+                  );
+  
+                  if (!ResponsiveNavbar.isLargeScreen) {
+                    return scrollBody;
+                  }
+  
+                  return SizedBox(
+                    width: slotW,
+                    height: slotH,
+                    child: ClipRect(
+                      child: OverflowBox(
                         alignment: Alignment.topLeft,
-                        child: SizedBox(
-                          width: layoutW,
-                          height: viewportH,
-                          child: scrollBody,
+                        minWidth: layoutW,
+                        maxWidth: layoutW,
+                        minHeight: viewportH,
+                        maxHeight: viewportH,
+                        child: Transform.scale(
+                          scale: scale,
+                          alignment: Alignment.topLeft,
+                          child: SizedBox(
+                            width: layoutW,
+                            height: viewportH,
+                            child: scrollBody,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                );
-              },
-            );
-          },
+                  );
+                },
+              );
+            },
+          ),
         ),
 
         bottomNavigationBar: isSelecting

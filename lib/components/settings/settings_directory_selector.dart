@@ -100,7 +100,7 @@ class _DirectorySelectorState extends State<DirectorySelector> {
     VaultAdapter.preventLock = true;
     String? directory;
     try {
-      directory = await FilePicker.platform.getDirectoryPath(
+      directory = await FilePicker.getDirectoryPath(
         dialogTitle: widget.title,
         initialDirectory: _directory,
       );

@@ -201,6 +201,9 @@ class CanvasPainter extends CustomPainter {
           .toList();
     }
 
+    final highlighters = visibleStrokes.where((s) => s.toolId == ToolId.highlighter).toList();
+    final normalStrokes = visibleStrokes.where((s) => s.toolId != ToolId.highlighter).toList();
+
     if (selectionPreview != null) {
       canvas.save();
       canvas.transform(selectionPreview!.transformMatrix.storage);
@@ -211,9 +214,14 @@ class CanvasPainter extends CustomPainter {
         !preferPathFill) {
       _drawBatchedMeshes(canvas);
     }
+    
+    if (highlighters.isNotEmpty) {
+      _drawHighlighters(canvas, highlighters);
+    }
+
     _drawNonHighlighterStrokes(
       canvas,
-      visibleStrokes,
+      normalStrokes,
       cullingRect,
       skipBatched:
           !preferPathFill &&
@@ -313,6 +321,63 @@ class CanvasPainter extends CustomPainter {
     return BlendMode.srcOver;
   }
 
+  void _drawHighlighters(Canvas canvas, List<Stroke> highlighters) {
+    final selectedStrokes = currentSelection?.strokes;
+    final bool allVisibleStrokesAreSelected =
+        selectedStrokes != null && identical(highlighters, selectedStrokes);
+    final Set<Stroke>? selectedStrokeSet =
+        allVisibleStrokesAreSelected || selectedStrokes == null
+        ? null
+        : selectedStrokes.length > 8
+        ? selectedStrokes.toSet()
+        : null;
+
+    final Map<int, Path> colorPaths = {};
+
+    // Group all strokes of the exact same color into a single complex non-zero path.
+    // This prevents the alpha from overlapping/stacking at intersections.
+    for (final stroke in highlighters) {
+      stroke.setLodScale(currentScale);
+      
+      var color = stroke.color.withInversion(invert);
+      final isSelected = allVisibleStrokesAreSelected
+          ? true
+          : selectedStrokeSet?.contains(stroke) ??
+                selectedStrokes?.contains(stroke) ??
+                false;
+      if (isSelected) {
+        color = Color.lerp(color, Colors.black.withInversion(invert), 0.5)!;
+      }
+
+      final colorVal = color.value;
+      final path = _selectPath(stroke);
+
+      if (colorPaths.containsKey(colorVal)) {
+        colorPaths[colorVal]!.addPath(path, Offset.zero);
+      } else {
+        final newPath = Path();
+        newPath.fillType = PathFillType.nonZero;
+        newPath.addPath(path, Offset.zero);
+        colorPaths[colorVal] = newPath;
+      }
+    }
+
+    // Paint each distinct color group efficiently
+    for (final entry in colorPaths.entries) {
+      final color = Color(entry.key);
+      _sharedPaint
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true
+        ..blendMode = invert ? BlendMode.plus : BlendMode.darken
+        ..color = color
+        ..shader = null
+        ..maskFilter = null
+        ..colorFilter = null;
+
+      canvas.drawPath(entry.value, _sharedPaint);
+    }
+  }
+
   void _drawNonHighlighterStrokes(
     Canvas canvas,
     List<Stroke> visibleStrokes,
@@ -357,9 +422,7 @@ class CanvasPainter extends CustomPainter {
 
       _sharedPaint
         ..color = color
-        ..blendMode = stroke.toolId == ToolId.highlighter
-            ? (invert ? BlendMode.plus : BlendMode.darken)
-            : BlendMode.srcOver
+        ..blendMode = BlendMode.srcOver
         ..shader = null
         ..maskFilter = null
         ..colorFilter = null;
@@ -533,113 +596,68 @@ class CanvasPainter extends CustomPainter {
     StrokePaint? lastCfg,
     double? lastQuality,
   }) {
-    final chunks = stroke.pencilDrawChunks;
-    final path = chunks == null || chunks.isEmpty
-        ? _selectPath(stroke)
-        : null;
-    if (path != null && path.getBounds().isEmpty) return null;
-    if (chunks != null &&
-        chunks.isNotEmpty &&
-        chunks.every((c) => c.outline.getBounds().isEmpty)) {
-      return null;
+    final path = _selectPath(stroke);
+    if (path.getBounds().isEmpty) return null;
+
+    ui.Vertices? mesh;
+    if (stroke.toolId == ToolId.advancedPencil && stroke.paint.pressureMapsToCoverage) {
+      mesh = stroke.ensureMeshVertices();
     }
 
     final shader = page.tryPencilShader();
+    final size = stroke.options.size;
+    final quality = currentScale < 0.82 ? 0.0 : 1.0;
+
     if (shader == null) {
-      final outlines = chunks != null && chunks.isNotEmpty
-          ? [for (final chunk in chunks) chunk.outline]
-          : [path!];
-      for (final outline in outlines) {
-        if (outline.getBounds().isEmpty) continue;
-        PencilShader.paintCastShadow(
-          canvas: canvas,
-          outline: outline,
-          strokeColor: color,
-          size: stroke.options.size,
-          currentScale: currentScale,
-          visibleCount: visibleCount,
-          quality: 1.0,
-          lodTier: PencilShader.lodTierForScale(currentScale),
-          enabled: stroke.paint.pencilShadow,
-        );
-        _sharedPaint
-          ..style = PaintingStyle.fill
-          ..isAntiAlias = true
-          ..shader = null
-          ..colorFilter = null
-          ..maskFilter = null
-          ..color = color.withValues(alpha: 0.55);
-        canvas.drawPath(outline, _sharedPaint);
+      PencilShader.paintCastShadow(
+        canvas: canvas,
+        outline: path,
+        strokeColor: color,
+        size: size,
+        currentScale: currentScale,
+        visibleCount: visibleCount,
+        quality: 1.0,
+        lodTier: PencilShader.lodTierForScale(currentScale),
+        enabled: stroke.paint.pencilShadow,
+      );
+      _sharedPaint
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true
+        ..shader = null
+        ..colorFilter = null
+        ..maskFilter = null
+        ..color = color.withValues(alpha: 0.55);
+      
+      if (mesh != null) {
+        canvas.drawVertices(mesh, BlendMode.modulate, _sharedPaint);
+      } else {
+        canvas.drawPath(path, _sharedPaint);
       }
       return null;
     }
 
-    final size = stroke.options.size;
-    if (chunks != null && chunks.isNotEmpty) {
-      var configured = false;
-      double quality = 1.0;
-      for (final chunk in chunks) {
-        if (chunk.outline.getBounds().isEmpty) continue;
-        quality = chunk.plan.quality;
-        PencilShader.paintPlan(
-          canvas: canvas,
-          shader: shader,
-          color: color,
-          cfg: stroke.paint,
-          outline: chunk.outline,
-          plan: chunk.plan,
-          stampWidth: PencilShader.stampWidthFor(
-            size,
-            stroke.options.maxSizeRatio,
-          ),
-          configureBaseUniforms:
-              !configured ||
-              !PencilShader.sameConfig(
-                color: color,
-                cfg: stroke.paint,
-                quality: chunk.plan.quality,
-                lastColor: lastColor,
-                lastCfg: lastCfg,
-                lastQuality: lastQuality,
-              ),
-          pressureSensitivity: stroke.options.pressureSensitivity,
-          currentScale: currentScale,
-          visibleCount: visibleCount,
-          strokeSize: size,
-        );
-        configured = true;
-      }
-      return (color, stroke.paint, quality);
-    }
-
-    // The in-progress stroke stays at writing quality; committed strokes
-    // cheapen stamps (not grain) when the viewport is crowded.
-    final plan = stroke.orientedPencilPlan(
-      currentScale,
-      visibleCount: identical(stroke, currentStroke) ? 1 : visibleCount,
-    );
-    PencilShader.paintPlan(
+    PencilShader.paintIsotropicStroke(
       canvas: canvas,
       shader: shader,
       color: color,
       cfg: stroke.paint,
-      outline: path!,
-      plan: plan,
+      outline: path,
+      mesh: mesh,
       stampWidth: PencilShader.stampWidthFor(size, stroke.options.maxSizeRatio),
       configureBaseUniforms: !PencilShader.sameConfig(
         color: color,
         cfg: stroke.paint,
-        quality: plan.quality,
+        quality: quality,
         lastColor: lastColor,
         lastCfg: lastCfg,
         lastQuality: lastQuality,
       ),
-      pressureSensitivity: stroke.options.pressureSensitivity,
       currentScale: currentScale,
       visibleCount: visibleCount,
       strokeSize: size,
     );
-    return (color, stroke.paint, plan.quality);
+
+    return (color, stroke.paint, quality);
   }
 
   void _drawCurrentStroke(Canvas canvas) {

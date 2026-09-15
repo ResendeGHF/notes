@@ -299,7 +299,9 @@ class _SettingsPageState extends State<SettingsPage> {
       await showDialog<void>(
         context: context,
         builder: (context) => AdaptiveAlertDialog(
-          title: Text(result.ok ? 'Backup looks consistent' : 'Backup check failed'),
+          title: Text(
+            result.ok ? 'Backup looks consistent' : 'Backup check failed',
+          ),
           content: SingleChildScrollView(
             child: SelectableText(
               'Archive: ${_formatBackupBytes(result.archiveBytes)}\n'
@@ -480,6 +482,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return Scaffold(
       body: CustomScrollView(
+        primary: false,
         slivers: [
           SliverAppBar.large(
             primary: false,
@@ -573,9 +576,8 @@ class _SettingsPageState extends State<SettingsPage> {
                               }
                             }
                             if (Platform.isAndroid || Platform.isIOS) {
-                              final selectedDirectory = await FilePicker
-                                  .platform
-                                  .getDirectoryPath(
+                              final selectedDirectory =
+                                  await FilePicker.getDirectoryPath(
                                     dialogTitle: t.export.defaultExportPath,
                                   );
                               if (selectedDirectory != null) {
@@ -583,14 +585,14 @@ class _SettingsPageState extends State<SettingsPage> {
                                     selectedDirectory;
                               }
                             } else {
-                              final selectedPath = await FilePicker.platform
-                                  .saveFile(
-                                    dialogTitle: t.export.defaultExportPath,
-                                    fileName: 'export',
-                                  );
+                              final selectedPath = await FilePicker.saveFile(
+                                dialogTitle: t.export.defaultExportPath,
+                                fileName: 'export',
+                                bytes: Uint8List(0),
+                              );
                               if (selectedPath != null) {
                                 stows.defaultExportPath.value = p.dirname(
-                                  selectedPath,
+                                  selectedPath.path,
                                 );
                               }
                             }
@@ -645,9 +647,8 @@ class _SettingsPageState extends State<SettingsPage> {
                             }
 
                             if (Platform.isAndroid || Platform.isIOS) {
-                              String? selectedDirectory = await FilePicker
-                                  .platform
-                                  .getDirectoryPath(
+                              String? selectedDirectory =
+                                  await FilePicker.getDirectoryPath(
                                     dialogTitle: 'Select Backup Folder',
                                   );
                               if (selectedDirectory != null) {
@@ -671,15 +672,16 @@ class _SettingsPageState extends State<SettingsPage> {
                                 }
                               }
                             } else {
-                              String? selectedPath = await FilePicker.platform
-                                  .saveFile(
-                                    dialogTitle: 'Select Backup Location',
-                                    fileName: 'notes_backup_archive.nba',
-                                  );
+                              final selectedPath = await FilePicker.saveFile(
+                                dialogTitle: 'Select Backup Location',
+                                fileName: 'notes_backup_archive.nba',
+                                bytes: Uint8List(0),
+                              );
                               if (selectedPath != null) {
+                                final filePath = selectedPath.path;
                                 try {
-                                  prepareIncrementalBackupTarget(selectedPath);
-                                  stows.backupFilePath.value = selectedPath;
+                                  prepareIncrementalBackupTarget(filePath);
+                                  stows.backupFilePath.value = filePath;
                                 } catch (e) {
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
@@ -882,15 +884,24 @@ class _SettingsPageState extends State<SettingsPage> {
                         Colors.grey,
                       ];
                       return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
                               children: [
-                                Icon(Icons.palette_outlined, color: colorScheme.onSurfaceVariant),
+                                Icon(
+                                  Icons.palette_outlined,
+                                  color: colorScheme.onSurfaceVariant,
+                                ),
                                 const SizedBox(width: 16),
-                                Text('Accent Color', style: Theme.of(context).textTheme.bodyLarge),
+                                Text(
+                                  'Accent Color',
+                                  style: Theme.of(context).textTheme.bodyLarge,
+                                ),
                               ],
                             ),
                             const SizedBox(height: 12),
@@ -898,9 +909,11 @@ class _SettingsPageState extends State<SettingsPage> {
                               scrollDirection: Axis.horizontal,
                               child: Row(
                                 children: colors.map((c) {
-                                  final isSelected = accentValue == c.toARGB32();
+                                  final isSelected =
+                                      accentValue == c.toARGB32();
                                   return GestureDetector(
-                                    onTap: () => stows.appAccentColor.value = c.toARGB32(),
+                                    onTap: () => stows.appAccentColor.value = c
+                                        .toARGB32(),
                                     child: Container(
                                       margin: const EdgeInsets.only(right: 12),
                                       width: 36,
@@ -909,11 +922,23 @@ class _SettingsPageState extends State<SettingsPage> {
                                         color: c,
                                         shape: BoxShape.circle,
                                         border: isSelected
-                                            ? Border.all(color: colorScheme.onSurface, width: 2)
-                                            : Border.all(color: Colors.transparent, width: 2),
+                                            ? Border.all(
+                                                color: colorScheme.onSurface,
+                                                width: 2,
+                                              )
+                                            : Border.all(
+                                                color: Colors.transparent,
+                                                width: 2,
+                                              ),
                                       ),
                                       child: isSelected
-                                          ? Icon(Icons.check, size: 20, color: c.computeLuminance() > 0.5 ? Colors.black : Colors.white)
+                                          ? Icon(
+                                              Icons.check,
+                                              size: 20,
+                                              color: c.computeLuminance() > 0.5
+                                                  ? Colors.black
+                                                  : Colors.white,
+                                            )
                                           : null,
                                     ),
                                   );
@@ -1936,12 +1961,14 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
 
     VaultAdapter.preventLock = true;
     try {
-      return await FilePicker.platform.saveFile(
+      final fileUri = await FilePicker.saveFile(
         dialogTitle: isVault ? 'Backup Vault' : 'Backup Data',
         fileName: isVault ? 'notes_vault_backup.nba' : 'notes_data_backup.nba',
         type: FileType.custom,
         allowedExtensions: ['nba'],
+        bytes: Uint8List(0),
       );
+      return fileUri?.path;
     } finally {
       VaultAdapter.preventLock = false;
     }
@@ -2114,11 +2141,13 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
 
       if (Platform.isAndroid || Platform.isIOS) {
         final box = context.findRenderObject() as RenderBox?;
-        await Share.shareXFiles(
-          [XFile(backupFile.path)],
-          sharePositionOrigin: box != null
-              ? box.localToGlobal(Offset.zero) & box.size
-              : null,
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [XFile(backupFile.path)],
+            sharePositionOrigin: box != null
+                ? box.localToGlobal(Offset.zero) & box.size
+                : null,
+          ),
         );
       } else {
         if (mounted) {
@@ -2153,9 +2182,9 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
 
   Future<void> _restore(BuildContext context) async {
     VaultAdapter.preventLock = true;
-    final result;
+    List<PlatformFile>? filesResult;
     try {
-      result = await FilePicker.platform.pickFiles(
+      filesResult = await FilePicker.pickFiles(
         dialogTitle: t.vault.restoreBackup,
         type: FileType.custom,
         allowedExtensions: ['nba'],
@@ -2163,8 +2192,8 @@ class _VaultBackupTileState extends State<_VaultBackupTile> {
     } finally {
       VaultAdapter.preventLock = false;
     }
-    if (result == null || result.files.isEmpty) return;
-    final backupPath = result.files.single.path!;
+    if (filesResult == null || filesResult.isEmpty) return;
+    final backupPath = filesResult.single.path!;
 
     final password = await _askForBackupPassword(context, isRestore: true);
     if (password == null) return;

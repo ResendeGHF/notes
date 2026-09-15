@@ -158,7 +158,11 @@ class RecognitionService {
 
   Future<void> dispose() async {
     for (final r in _recognizers.values) {
-      await r.close();
+      try {
+        await r.close();
+      } catch (e) {
+        log.warning('Failed to close OCR recognizer: $e');
+      }
     }
     _recognizers.clear();
   }

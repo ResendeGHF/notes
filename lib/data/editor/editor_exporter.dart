@@ -19,6 +19,7 @@ import 'package:path_drawing/path_drawing.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:pdf_combiner/models/merge_input.dart';
 import 'package:pdf_combiner/pdf_combiner.dart';
 import 'package:pdfrx/pdfrx.dart' as pdfrx;
 import 'package:saber/components/canvas/_canvas_background_painter.dart';
@@ -1372,7 +1373,7 @@ abstract class EditorExporter {
       );
     }
     await PdfCombiner.mergeMultiplePDFs(
-      inputPaths: partPaths,
+      inputs: partPaths.map((p) => MergeInput.path(p)).toList(),
       outputPath: mergedPath,
     );
     for (final pp in partPaths) {
@@ -2811,7 +2812,7 @@ abstract class EditorExporter {
         'saber_pw_merged_${const Uuid().v4()}.pdf',
       );
       await PdfCombiner.mergeMultiplePDFs(
-        inputPaths: partPaths,
+        inputs: partPaths.map((p) => MergeInput.path(p)).toList(),
         outputPath: mergedPath,
       );
       for (final pp in partPaths) {

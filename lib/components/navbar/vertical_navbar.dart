@@ -21,11 +21,15 @@ class VerticalNavbar extends StatefulWidget {
     this.onDestinationSelected,
   });
 
-  /// Width when the file-tree rail is open.
-  static const double expandedWidth = 320;
+  static const double cardCollapsedWidth = 72;
+  static const double cardExpandedWidth = 300;
+  static const double horizontalMargin = 16;
 
-  /// Width when the rail is icons-only.
-  static const double collapsedWidth = 72;
+  /// Total width when the file-tree rail is open, including margins.
+  static const double expandedWidth = cardExpandedWidth + horizontalMargin * 2;
+
+  /// Total width when the rail is icons-only, including margins.
+  static const double collapsedWidth = cardCollapsedWidth + horizontalMargin * 2;
 
   /// Extra panel beside the icon rail when expanded.
   static const double panelWidth = expandedWidth - collapsedWidth;
@@ -114,6 +118,7 @@ class _VerticalNavbarState extends State<VerticalNavbar>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SafeArea(
+            top: false,
             bottom: false,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
@@ -221,7 +226,7 @@ class _VerticalNavbarState extends State<VerticalNavbar>
       ),
     );
 
-    // Clip an always-320 layout down to the animated width. FileTree keeps
+    // Clip an always-expanded layout down to the animated width. FileTree keeps
     // stable constraints for the whole animation (no per-frame relayout).
     return AnimatedBuilder(
       animation: _expand,
@@ -230,36 +235,35 @@ class _VerticalNavbarState extends State<VerticalNavbar>
             (VerticalNavbar.expandedWidth - VerticalNavbar.collapsedWidth) *
                 _expand.value;
         return RepaintBoundary(
-          child: Material(
-            color: surfaceColor,
-            elevation: 0,
-            clipBehavior: Clip.hardEdge,
-            shape: const RoundedRectangleBorder(
-              borderRadius: BorderRadius.only(
-                bottomRight: Radius.circular(16),
-              ),
-            ),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(
-                  right: BorderSide(
-                    color: colorScheme.outlineVariant.withValues(alpha: 0.15),
+          child: SizedBox(
+            width: width,
+            height: double.infinity,
+            child: Padding(
+              padding: const EdgeInsets.all(VerticalNavbar.horizontalMargin),
+              child: Material(
+                color: colorScheme.surfaceContainerHigh,
+                elevation: 0,
+                clipBehavior: Clip.hardEdge,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  side: BorderSide(
+                    color: colorScheme.outlineVariant.withValues(alpha: 0.3),
                     width: 1,
                   ),
                 ),
-              ),
-              child: SizedBox(
-                width: width,
-                height: double.infinity,
-                child: ClipRect(
-                  child: OverflowBox(
-                    alignment: Alignment.topLeft,
-                    minWidth: VerticalNavbar.expandedWidth,
-                    maxWidth: VerticalNavbar.expandedWidth,
-                    child: SizedBox(
-                      width: VerticalNavbar.expandedWidth,
-                      height: double.infinity,
-                      child: child,
+                child: SizedBox(
+                  width: width - (VerticalNavbar.horizontalMargin * 2),
+                  height: double.infinity,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      minWidth: VerticalNavbar.cardExpandedWidth,
+                      maxWidth: VerticalNavbar.cardExpandedWidth,
+                      child: SizedBox(
+                        width: VerticalNavbar.cardExpandedWidth,
+                        height: double.infinity,
+                        child: child,
+                      ),
                     ),
                   ),
                 ),
@@ -289,8 +293,8 @@ class _DestinationRow extends StatelessWidget {
   final VoidCallback onTap;
 
   static const double _iconSlot = 48;
-  /// Full-row highlight inside the expanded rail (320 - 24 side margins).
-  static const double _expandedHighlight = 296;
+  /// Full-row highlight inside the expanded rail (300 - 24 side margins).
+  static const double _expandedHighlight = 276;
 
   @override
   Widget build(BuildContext context) {
@@ -319,7 +323,7 @@ class _DestinationRow extends StatelessWidget {
                   _iconSlot + (_expandedHighlight - _iconSlot) * t;
               // Keep the square centered on the icon; grow extra width to the
               // end (into the label) as the rail expands.
-              final iconCenterX = VerticalNavbar.collapsedWidth / 2;
+              final iconCenterX = VerticalNavbar.cardCollapsedWidth / 2;
               final highlightLeft = iconCenterX - _iconSlot / 2;
               return Stack(
                 clipBehavior: Clip.none,
@@ -344,7 +348,7 @@ class _DestinationRow extends StatelessWidget {
             child: Row(
               children: [
                 SizedBox(
-                  width: VerticalNavbar.collapsedWidth,
+                  width: VerticalNavbar.cardCollapsedWidth,
                   child: Center(
                     child: SizedBox(
                       width: _iconSlot,

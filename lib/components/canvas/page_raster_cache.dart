@@ -19,6 +19,7 @@ import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/services/display_ink_feel.dart';
+import 'package:saber/components/canvas/inner_canvas.dart' show mergeSolidStrokeMeshesByColor;
 
 /// One baked bitmap layer for a page (ink or background).
 final class PageCacheEntry {
@@ -123,6 +124,16 @@ final class PageRasterCacheManager {
   final Set<int> _pendingBg = {};
   bool _disposed = false;
   bool _jobRunning = false;
+
+  /// Bumped whenever committed content changes (ink/bg invalidation or a zoom
+  /// wipe). In-flight raster jobs check this between work slices and abort, so
+  /// a stroke commit or an undo never has to wait out a stale bake.
+  int _contentEpoch = 0;
+
+  /// Max wall-clock time the UI isolate spends on stroke-geometry warmup before
+  /// yielding to the event loop. Bakes are sliced so pan/zoom/ink input is
+  /// never blocked for more than one slice (~3 ms).
+  static const Duration _warmupSliceBudget = Duration(milliseconds: 3);
   final Queue<_RasterJob> _jobQueue = Queue();
 
   // --- Viewport / zoom LOD (shared with gesture detector) ---
@@ -158,6 +169,7 @@ final class PageRasterCacheManager {
   static Timer? _zoomSettleTimer;
   static double _zoomLod = 0;
   static double? _liveViewportScale;
+  static double? _lastObservedRawScale;
 
   @visibleForTesting
   static bool debugForceSyncRaster = false;
@@ -173,7 +185,14 @@ final class PageRasterCacheManager {
       if (started) lodEpoch.value++;
       return;
     }
+    
+    final wasMoving = viewportMoving;
     viewportMoving = false;
+    if (wasMoving) {
+      // Força um repaint instantâneo assim que o movimento para, eliminando a "piscada"
+      lodEpoch.value++; 
+    }
+    
     if (viewportSettled || _settleTimer != null) return;
     _settleTimer = Timer(viewportSettleDelay, () {
       _settleTimer = null;
@@ -206,6 +225,8 @@ final class PageRasterCacheManager {
   }
 
   static void setViewportScale(double scale) {
+    if (_lastObservedRawScale == scale) return;
+    _lastObservedRawScale = scale;
     _liveViewportScale = scale;
     _observeZoomScale(scale);
   }
@@ -270,6 +291,7 @@ final class PageRasterCacheManager {
     _layoutOcclusionDepth = 0;
     _zoomLod = 0;
     _liveViewportScale = null;
+    _lastObservedRawScale = null;
     debugForceSyncRaster = false;
   }
 
@@ -283,6 +305,10 @@ final class PageRasterCacheManager {
 
   /// Pixels-per-logical-pixel for page bitmaps (zoom × DPR), capped at
   /// [maxCachePx] on the page long edge.
+  ///
+  /// Zoom itself is capped at 1.5× for the page bitmap: above that the settled
+  /// painter switches to the sharp tiled-vector path, so the bitmap never needs
+  /// to grow unboundedly with zoom.
   static double clampedRes(
     double scale,
     Size pageSize, {
@@ -372,11 +398,9 @@ final class PageRasterCacheManager {
       res: res,
       generation: gen,
       devicePixelRatio: dpr,
-      viewportScale: scale,
-      bgParams: params,
+      viewportScale: scale,      bgParams: params,
       forceSchedule: forceSchedule,
     );
-    
 
     if (existing != null && existing.generation == gen) {
       return existing;
@@ -394,16 +418,17 @@ final class PageRasterCacheManager {
     required PageRasterInkParams inkParams,
     bool forceSchedule = false,
   }) {
-    if ((viewportMoving || inkInputBusy) && !forceSchedule) return;
+    final hasExisting = _inkCaches.containsKey(pageIndex);
+    // Permite agendar as rasters iniciais MESMO durante o zoom se for um arquivo recém-aberto
+    if ((viewportMoving || inkInputBusy) && !forceSchedule && hasExisting) return;
     _dropInferiorQueuedJobs(pageIndex: pageIndex, isInk: true, minRes: res);
     final hasQueued = _jobQueue.any(
       (j) => j.isInk && j.pageIndex == pageIndex && j.generation == generation && _resSufficient(j.res, res),
     );
-    if (hasQueued) {
-      _pendingInk.add(pageIndex);
-      return;
-    }
+    // Pending flags mark pages that still need a bake; [prepareForSettledScale]
+    // and the debug getters rely on them.
     _pendingInk.add(pageIndex);
+    if (hasQueued) return;
     _enqueue(
       _RasterJob.ink(
         pageIndex: pageIndex,
@@ -428,16 +453,14 @@ final class PageRasterCacheManager {
     required PageRasterBgParams bgParams,
     bool forceSchedule = false,
   }) {
-    if (viewportMoving && !forceSchedule) return;
+    final hasExisting = _bgCaches.containsKey(pageIndex);
+    if (viewportMoving && !forceSchedule && hasExisting) return;
     _dropInferiorQueuedJobs(pageIndex: pageIndex, isInk: false, minRes: res);
     final hasQueued = _jobQueue.any(
       (j) => !j.isInk && j.pageIndex == pageIndex && j.generation == generation && _resSufficient(j.res, res),
     );
-    if (hasQueued) {
-      _pendingBg.add(pageIndex);
-      return;
-    }
     _pendingBg.add(pageIndex);
+    if (hasQueued) return;
     _enqueue(
       _RasterJob.bg(
         pageIndex: pageIndex,
@@ -467,6 +490,11 @@ final class PageRasterCacheManager {
 
   /// After pan/zoom settles, drop stale jobs and force-schedule HQ rebuilds at
   /// the current zoom × DPR (even if [viewportMoving] is still latched).
+  ///
+  /// Rebuilds may therefore start while a fling is still coasting; that is
+  /// intentional (temporal LOD). If the user grabs the canvas again, the
+  /// in-flight bake is preempted within one [_warmupSliceBudget] slice and
+  /// this settle flow re-queues it once motion stops.
   void prepareForSettledScale({
     required double scale,
     double? devicePixelRatio,
@@ -508,6 +536,7 @@ final class PageRasterCacheManager {
   void invalidateInk(int pageIndex, {bool discardStale = false}) {
     _pageInkGeneration[pageIndex] = _inkGen(pageIndex) + 1;
     _cacheGen++;
+    _contentEpoch++;
     if (discardStale) {
       _inkCaches.remove(pageIndex)?.image.dispose();
     }
@@ -518,6 +547,7 @@ final class PageRasterCacheManager {
   void invalidateBg(int pageIndex) {
     _pageBgGeneration[pageIndex] = _bgGen(pageIndex) + 1;
     _cacheGen++;
+    _contentEpoch++;
     final old = _bgCaches.remove(pageIndex);
     old?.image.dispose();
     _pendingBg.remove(pageIndex);
@@ -531,6 +561,7 @@ final class PageRasterCacheManager {
 
   void invalidateForZoom() {
     _cacheGen++;
+    _contentEpoch++;
     for (final entry in _inkCaches.values) {
       entry.image.dispose();
     }
@@ -541,6 +572,15 @@ final class PageRasterCacheManager {
     _bgCaches.clear();
     _pendingInk.clear();
     _pendingBg.clear();
+    _jobQueue.clear(); // Esvazia a fila de backgrounds obsoletos instantaneamente
+
+    // Incrementa a geração globalmente para forçar novas renders para todas as páginas com a nova cor (se voltarem para a view)
+    for (final key in _pageInkGeneration.keys.toList()) {
+      _pageInkGeneration[key] = (_pageInkGeneration[key] ?? 0) + 1;
+    }
+    for (final key in _pageBgGeneration.keys.toList()) {
+      _pageBgGeneration[key] = (_pageBgGeneration[key] ?? 0) + 1;
+    }
     _bumpRepaint();
   }
 
@@ -553,6 +593,8 @@ final class PageRasterCacheManager {
       if (keep.contains(key)) continue;
       _bgCaches.remove(key)?.image.dispose();
     }
+    // Keep page-size bookkeeping bounded with the same keep set.
+    _pageSizes.removeWhere((key, _) => !keep.contains(key));
   }
 
   void releaseOffBandGeometry(EditorCoreInfo coreInfo, Set<int> keep) {
@@ -737,7 +779,18 @@ final class PageRasterCacheManager {
         continue;
       }
       final job = _jobQueue.removeFirst();
+
+      // Drop work that is already obsolete BEFORE building it: a superseded
+      // cache epoch, a page generation that changed since scheduling, or a
+      // resolution the live viewport no longer needs. Skipping here avoids
+      // paying the geometry warmup for a bake that would be discarded anyway.
+      // The same checks repeat after the build in case content or the viewport
+      // changed while the job was in flight.
       if (job.cacheGen != _cacheGen) {
+        _clearPending(job);
+        continue;
+      }
+      if (job.generation != (job.isInk ? _inkGen(job.pageIndex) : _bgGen(job.pageIndex))) {
         _clearPending(job);
         continue;
       }
@@ -750,19 +803,14 @@ final class PageRasterCacheManager {
         _clearPending(job);
         continue;
       }
-      if (inkInputBusy && !debugForceSyncRaster) {
-        _jobQueue.addFirst(job);
-        await Future<void>.delayed(const Duration(milliseconds: 16));
-        continue;
-      }
+
       final image = await _buildJob(job);
       if (_disposed || job.cacheGen != _cacheGen) {
         image?.dispose();
         _clearPending(job);
         continue;
       }
-      final expectedGen = job.isInk ? _inkGen(job.pageIndex) : _bgGen(job.pageIndex);
-      if (job.generation != expectedGen) {
+      if (job.generation != (job.isInk ? _inkGen(job.pageIndex) : _bgGen(job.pageIndex))) {
         image?.dispose();
         _clearPending(job);
         continue;
@@ -801,25 +849,59 @@ final class PageRasterCacheManager {
   }
 
   Future<ui.Image?> _buildJob(_RasterJob job) async {
+    debugBuildJobCalls++;
+    // Snapshot the state a bake must survive. If the viewport starts moving,
+    // stylus/eraser input starts, or content is invalidated while a slice is
+    // mid-flight, the work aborts so the next gesture/undo never waits on a
+    // stale bake. Settle-time bakes may legitimately start while viewportMoving
+    // is still latched (fling / temporal LOD), so only motion that *begins*
+    // after this job started preempts it.
+    final int contentEpochAtStart = _contentEpoch;
+    final bool movingAtStart = viewportMoving;
+    final bool inkBusyAtStart = inkInputBusy;
+
     final w = math.max(1, (job.pageSize.width * job.res).ceil());
     final h = math.max(1, (job.pageSize.height * job.res).ceil());
-    
-    // Calcula geometria assincronamente (fora da main thread) para não dar Freeze 
+
+    // Warm stroke geometry in small time slices so dense pages never block the
+    // UI isolate for more than ~[_warmupSliceBudget] at a time. Geometry that
+    // is already cached (mesh or HQ polygon) is skipped, so re-bakes after a
+    // small edit only touch the new strokes.
     if (job.isInk) {
       final params = job.inkParams!;
-      int count = 0;
+      final sliceWatch = Stopwatch()..start();
       for (final stroke in params.strokes) {
+        if (!debugForceSyncRaster &&
+            _preempted(
+              contentEpochAtStart: contentEpochAtStart,
+              movingAtStart: movingAtStart,
+              inkBusyAtStart: inkBusyAtStart,
+            )) {
+          return null;
+        }
+        if (stroke.hasCachedMesh || stroke.hasCachedHighQualityPolygon) {
+          continue;
+        }
         stroke.setLodScale(params.currentScale);
         if (stroke.canBatchSolidMesh) {
-           stroke.solidMeshChunks;
+          stroke.solidMeshChunks;
         } else {
-           stroke.highQualityPath;
+          stroke.highQualityPath;
         }
-        count++;
-        // Yield Event Loop para não travar a UI enquanto pre-aquece geometria complexa
-        if (count % 30 == 0) {
-          await Future.delayed(Duration.zero);
-          if (_disposed || job.cacheGen != _cacheGen) return null;
+        if (sliceWatch.elapsedMilliseconds >=
+            _warmupSliceBudget.inMilliseconds) {
+          // Yield the event loop so frames / pointer samples can run, then
+          // re-check preemption before the next slice.
+          await Future<void>.delayed(Duration.zero);
+          if (!debugForceSyncRaster &&
+              _preempted(
+                contentEpochAtStart: contentEpochAtStart,
+                movingAtStart: movingAtStart,
+                inkBusyAtStart: inkBusyAtStart,
+              )) {
+            return null;
+          }
+          sliceWatch.reset();
         }
       }
     }
@@ -830,6 +912,8 @@ final class PageRasterCacheManager {
     
     if (job.isInk) {
       final params = job.inkParams!;
+      final mergedMeshes = mergeSolidStrokeMeshesByColor(params.strokes, params.currentScale);
+      
       CanvasPainter(
         invert: params.invert,
         strokes: params.strokes,
@@ -847,6 +931,8 @@ final class PageRasterCacheManager {
         lineThickness: params.lineThickness,
         lineColor: params.lineColor,
         doneSelecting: true,
+        batchedStrokes: mergedMeshes.isEmpty ? null : mergedMeshes,
+        preferPathFill: false,
       ).paint(canvas, job.pageSize);
     } else {
       final params = job.bgParams!;
@@ -867,7 +953,19 @@ final class PageRasterCacheManager {
     }
     
     final picture = recorder.endRecording();
-    
+
+    // Do not start rasterization for a bake the viewport has moved past; drop
+    // the recorded picture and let the settle flow re-queue it.
+    if (!debugForceSyncRaster &&
+        _preempted(
+          contentEpochAtStart: contentEpochAtStart,
+          movingAtStart: movingAtStart,
+          inkBusyAtStart: inkBusyAtStart,
+        )) {
+      picture.dispose();
+      return null;
+    }
+
     if (debugForceSyncRaster) {
       final image = picture.toImageSync(w, h);
       picture.dispose();
@@ -881,7 +979,39 @@ final class PageRasterCacheManager {
 
     final image = await picture.toImage(w, h);
     picture.dispose();
+    // A gesture or edit may have started while the GPU was rasterizing — the
+    // result is stale by now, so throw it away instead of replacing a fresher
+    // entry or fighting the new gesture for the UI isolate.
+    if (!debugForceSyncRaster &&
+        _preempted(
+          contentEpochAtStart: contentEpochAtStart,
+          movingAtStart: movingAtStart,
+          inkBusyAtStart: inkBusyAtStart,
+        )) {
+      image.dispose();
+      return null;
+    }
     return image;
+  }
+
+  /// True when an in-flight bake must stop: the manager was disposed, content
+  /// changed, viewport motion started, or stylus/eraser input began.
+  /// [debugForceSyncRaster] (tests) bypasses the motion/input checks but still
+  /// honors disposal.
+  bool _preempted({
+    required int contentEpochAtStart,
+    required bool movingAtStart,
+    required bool inkBusyAtStart,
+  }) {
+    if (_disposed) return true;
+    if (debugForceSyncRaster) return false;
+    if (_contentEpoch != contentEpochAtStart) return true;
+    // Settle-time bakes are force-scheduled while viewportMoving may still be
+    // latched; only abort when motion *begins* after the job started, i.e. the
+    // user grabbed the canvas again.
+    if (viewportMoving && !movingAtStart) return true;
+    if (inkInputBusy && !inkBusyAtStart) return true;
+    return false;
   }
 
   void _bumpRepaint() {
@@ -903,6 +1033,11 @@ final class PageRasterCacheManager {
     _pendingInk.clear();
     _pendingBg.clear();
   }
+
+  /// Number of times [_buildJob] ran. Jobs dropped by the pre-checks in
+  /// [_processQueue] never reach it, so tests can assert stale work is skipped.
+  @visibleForTesting
+  int debugBuildJobCalls = 0;
 
   @visibleForTesting
   int get debugInkCacheCount => _inkCaches.length;

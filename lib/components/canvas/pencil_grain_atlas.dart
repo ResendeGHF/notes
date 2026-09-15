@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -34,92 +35,43 @@ class PencilGrainAtlas {
 
   Future<void> _build() async {
     try {
-      _paper = await _encode(_raster(seedX: 0, seedY: 0));
-      _bristles = await _encode(_raster(seedX: 19.1, seedY: 7.3));
+      _paper = await _createNoiseImage(42, bristles: false);
+      _bristles = await _createNoiseImage(1337, bristles: true);
     } finally {
       _loading = null;
     }
   }
 
-  static Uint8List _raster({required double seedX, required double seedY}) {
-    final bytes = Uint8List(size * size * 4);
-    final period = size.toDouble();
-    var i = 0;
-    for (var y = 0; y < size; y++) {
-      for (var x = 0; x < size; x++) {
-        final n = _valueNoise(
-          x.toDouble(),
-          y.toDouble(),
-          period,
-          seedX,
-          seedY,
-        ).clamp(0.0, 1.0);
-        final v = (n * 255.0).round().clamp(0, 255);
-        bytes[i++] = v;
-        bytes[i++] = v;
-        bytes[i++] = v;
-        bytes[i++] = 255;
+  Future<ui.Image> _createNoiseImage(int seed, {required bool bristles}) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder, ui.Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()));
+    final rand = math.Random(seed);
+    
+    // Transparent background
+    canvas.drawColor(const ui.Color(0x00000000), ui.BlendMode.src);
+    final paint = ui.Paint()..style = ui.PaintingStyle.fill;
+      
+    final numGrains = bristles ? 12000 : 40000;
+    for (int i = 0; i < numGrains; i++) {
+      final cx = rand.nextDouble() * size;
+      final cy = rand.nextDouble() * size;
+      final radius = bristles ? (0.8 + rand.nextDouble() * 1.5) : (0.5 + rand.nextDouble() * 1.2);
+      final alpha = (50 + rand.nextDouble() * 205).toInt();
+      paint.color = ui.Color.fromARGB(alpha, 255, 255, 255);
+      
+      // Draw 3x3 wrap-around pattern for perfectly seamless edge tiling
+      for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+          final x = cx + dx * size;
+          final y = cy + dy * size;
+          if (x >= -radius && x <= size + radius && y >= -radius && y <= size + radius) {
+            canvas.drawCircle(ui.Offset(x, y), radius, paint);
+          }
+        }
       }
     }
-    return bytes;
-  }
-
-  static Future<ui.Image> _encode(Uint8List pixels) {
-    final done = Completer<ui.Image>();
-    ui.decodeImageFromPixels(
-      pixels,
-      size,
-      size,
-      ui.PixelFormat.rgba8888,
-      done.complete,
-    );
-    return done.future;
-  }
-
-  static double _fract(double x) => x - x.floorToDouble();
-
-  static double _mod(double a, double period) {
-    var m = a % period;
-    if (m < 0) m += period;
-    return m;
-  }
-
-  /// Same hash as `pencil.frag` (Iq-style hash21).
-  static double _hash21(double x, double y) {
-    var p3x = _fract(x * 0.1031);
-    var p3y = _fract(y * 0.1031);
-    var p3z = _fract(x * 0.1031);
-    final d =
-        p3x * (p3y + 33.33) + p3y * (p3z + 33.33) + p3z * (p3x + 33.33);
-    p3x += d;
-    p3y += d;
-    p3z += d;
-    return _fract((p3x + p3y) * p3z);
-  }
-
-  static double _valueNoise(
-    double x,
-    double y,
-    double period,
-    double seedX,
-    double seedY,
-  ) {
-    final px = x + seedX;
-    final py = y + seedY;
-    var ix = px.floorToDouble();
-    var iy = py.floorToDouble();
-    final fx = px - ix;
-    final fy = py - iy;
-    ix = _mod(ix, period);
-    iy = _mod(iy, period);
-    final fadeX = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
-    final fadeY = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
-    final a = _hash21(ix, iy);
-    final b = _hash21(_mod(ix + 1, period), iy);
-    final c = _hash21(ix, _mod(iy + 1, period));
-    final d = _hash21(_mod(ix + 1, period), _mod(iy + 1, period));
-    final u = a + (b - a) * fadeX;
-    final v = c + (d - c) * fadeX;
-    return u + (v - u) * fadeY;
+    
+    final picture = recorder.endRecording();
+    return await picture.toImage(size, size);
   }
 }

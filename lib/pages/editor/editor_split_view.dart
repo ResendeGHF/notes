@@ -508,10 +508,8 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
 
   Widget _buildPane(
     _EditorSlot slot,
-    int index, {
-    double? viewportWidthOverride,
-    double? viewportHeightOverride,
-  }) {
+    int index,
+  ) {
     final editor = RepaintBoundary(
       child: Editor(
         key: slot.key,
@@ -519,8 +517,6 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
         pdfPath: slot.pdfPath,
         initialPageIndexOverride: slot.initialPageIndex,
         embedded: true,
-        viewportWidthOverride: viewportWidthOverride,
-        viewportHeightOverride: viewportHeightOverride,
         showToolbar: false,
         onOpenSplitView: _openSecondNote,
         onCloseSplitView: _closeSplitView,
@@ -628,7 +624,8 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
       );
     }
 
-    return activeState._buildEditorAppBar(
+    // Garante que o AppBar do split view repasse explicitamente primary: false para evitar o espaço superior extra no Dex/Android
+    final appBar = activeState._buildEditorAppBar(
       context,
       savingStateOverride: _combinedSavingState,
       triggerSaveOverride: ({bool force = false}) =>
@@ -636,6 +633,40 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
       extraActions: _buildSplitAppBarActions(),
       onBackOverride: () => _goToHome(context),
     );
+    if (appBar is AppBar) {
+      return AppBar(
+        key: appBar.key,
+        leading: appBar.leading,
+        automaticallyImplyLeading: appBar.automaticallyImplyLeading,
+        title: appBar.title,
+        actions: appBar.actions,
+        flexibleSpace: appBar.flexibleSpace,
+        bottom: appBar.bottom,
+        elevation: appBar.elevation,
+        scrolledUnderElevation: appBar.scrolledUnderElevation,
+        notificationPredicate: appBar.notificationPredicate,
+        shadowColor: appBar.shadowColor,
+        surfaceTintColor: appBar.surfaceTintColor,
+        shape: appBar.shape,
+        backgroundColor: appBar.backgroundColor,
+        foregroundColor: appBar.foregroundColor,
+        iconTheme: appBar.iconTheme,
+        actionsIconTheme: appBar.actionsIconTheme,
+        primary: false,
+        centerTitle: appBar.centerTitle,
+        excludeHeaderSemantics: appBar.excludeHeaderSemantics,
+        titleSpacing: appBar.titleSpacing,
+        toolbarOpacity: appBar.toolbarOpacity,
+        bottomOpacity: appBar.bottomOpacity,
+        toolbarHeight: appBar.toolbarHeight,
+        leadingWidth: appBar.leadingWidth,
+        toolbarTextStyle: appBar.toolbarTextStyle,
+        titleTextStyle: appBar.titleTextStyle,
+        systemOverlayStyle: appBar.systemOverlayStyle,
+        clipBehavior: appBar.clipBehavior,
+      );
+    }
+    return appBar;
   }
 
   Widget _buildSplitBody(BoxConstraints constraints) {
@@ -687,20 +718,12 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
         children: [
           SizedBox(
             width: primaryExtent,
-            child: _buildPane(
-              _primary,
-              0,
-              viewportWidthOverride: primaryExtent,
-            ),
+            child: _buildPane(_primary, 0),
           ),
           divider,
           SizedBox(
             width: secondaryExtent,
-            child: _buildPane(
-              _secondary!,
-              1,
-              viewportWidthOverride: secondaryExtent,
-            ),
+            child: _buildPane(_secondary!, 1),
           ),
         ],
       );
@@ -710,16 +733,12 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
       children: [
         SizedBox(
           height: primaryExtent,
-          child: _buildPane(_primary, 0, viewportHeightOverride: primaryExtent),
+          child: _buildPane(_primary, 0),
         ),
         divider,
         SizedBox(
           height: secondaryExtent,
-          child: _buildPane(
-            _secondary!,
-            1,
-            viewportHeightOverride: secondaryExtent,
-          ),
+          child: _buildPane(_secondary!, 1),
         ),
       ],
     );
@@ -758,13 +777,12 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
             body = canvases!;
           } else {
             final isToolbarVertical =
-                axisDir == AxisDirection.left ||
-                axisDir == AxisDirection.right;
+                axisDir == AxisDirection.left || axisDir == AxisDirection.right;
             if (isToolbarVertical) {
               body = Row(
                 textDirection: axisDir == AxisDirection.left
-                    ? TextDirection.ltr
-                    : TextDirection.rtl,
+                    ? ui.TextDirection.ltr
+                    : ui.TextDirection.rtl,
                 children: [
                   globalToolbar,
                   Expanded(child: canvases!),
@@ -777,7 +795,7 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
                     : VerticalDirection.down,
                 children: [
                   Expanded(child: canvases!),
-                  SizedBox(width: double.infinity, child: globalToolbar),
+                  globalToolbar, // Removed SizedBox to eliminate the unwanted padding/gap on DeX
                 ],
               );
             }
@@ -786,6 +804,7 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
             resizeToAvoidBottomInset: false,
             appBar: _buildAppBar(context),
             body: body,
+            primary: false, // Removes annoying top padding gap between appbar and toolbar on DeX
           );
         },
       ),
@@ -997,154 +1016,152 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
     return Dialog(
       backgroundColor: colorScheme.surfaceContainerHigh,
       elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(28),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       insetPadding: const EdgeInsets.all(24),
       child: Container(
         width: 820,
         height: maxDialogHeight,
         child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 14),
-                  child: Row(
-                    children: [
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: colorScheme.primary.withValues(alpha: .12),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: Icon(Icons.view_week_outlined),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Open Second Note',
-                              style: theme.textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.35,
-                              ),
-                            ),
-                            Text(
-                              'Browse folders, search names or tags, or create a note for split view.',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                              ),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      IconButton(
-                        tooltip: MaterialLocalizations.of(
-                          context,
-                        ).closeButtonTooltip,
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: TextField(
-                    controller: _searchController,
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.search),
-                      hintText: 'Search all notes by name, folder, or tag...',
-                      filled: true,
-                      fillColor: isDark
-                          ? Colors.white.withValues(alpha: 0.05)
-                          : colorScheme.surfaceContainerHighest.withValues(
-                              alpha: 0.5,
-                            ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
-                      ),
-                      suffixIcon: _search.isEmpty
-                          ? null
-                          : IconButton(
-                              icon: const Icon(Icons.clear),
-                              onPressed: () => _searchController.clear(),
-                            ),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 14),
+              child: Row(
+                children: [
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colorScheme.primary.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Icon(Icons.view_week_outlined),
                     ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 14, 24, 0),
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      FilledButton.icon(
-                        onPressed: _createNewNote,
-                        icon: const Icon(Icons.add),
-                        label: const Text('Create a New Note'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          final selected = await _pickNoteFromFilePicker();
-                          if (!context.mounted || selected == null) return;
-                          Navigator.pop(context, selected);
-                        },
-                        icon: const Icon(Icons.folder_open_outlined),
-                        label: const Text('Pick File'),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: _search.isEmpty
-                        ? _buildBrowser(context, theme, colorScheme, isDark)
-                        : _buildSearch(context, theme, colorScheme, isDark),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _search.isEmpty
-                              ? 'Current folder: $_currentDirectory'
-                              : 'Searching the full note library',
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Open Second Note',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.35,
+                          ),
+                        ),
+                        Text(
+                          'Browse folders, search names or tags, or create a note for split view.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: colorScheme.onSurfaceVariant,
                           ),
-                          maxLines: 1,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: Text(
-                          MaterialLocalizations.of(context).cancelButtonLabel,
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  IconButton(
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).closeButtonTooltip,
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
             ),
-          ),
-        );
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: TextField(
+                controller: _searchController,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.search),
+                  hintText: 'Search all notes by name, folder, or tag...',
+                  filled: true,
+                  fillColor: isDark
+                      ? Colors.white.withValues(alpha: 0.05)
+                      : colorScheme.surfaceContainerHighest.withValues(
+                          alpha: 0.5,
+                        ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  suffixIcon: _search.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () => _searchController.clear(),
+                        ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 14, 24, 0),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _createNewNote,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create a New Note'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final selected = await _pickNoteFromFilePicker();
+                      if (!context.mounted || selected == null) return;
+                      Navigator.pop(context, selected);
+                    },
+                    icon: const Icon(Icons.folder_open_outlined),
+                    label: const Text('Pick File'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: _search.isEmpty
+                    ? _buildBrowser(context, theme, colorScheme, isDark)
+                    : _buildSearch(context, theme, colorScheme, isDark),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _search.isEmpty
+                          ? 'Current folder: $_currentDirectory'
+                          : 'Searching the full note library',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: Text(
+                      MaterialLocalizations.of(context).cancelButtonLabel,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildBrowser(
@@ -1550,15 +1567,16 @@ class _NoteThumbnailState extends State<_NoteThumbnail> {
 
 Future<String?> _pickNoteFromFilePicker() async {
   VaultAdapter.preventLock = true;
+  List<PlatformFile>? filesResult;
   try {
-    final result = await FilePicker.platform.pickFiles(
+    filesResult = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['sbn2', 'sbn'],
       withData: false,
     );
-    if (result == null || result.files.isEmpty) return null;
-    return result.files.first.path;
   } finally {
     VaultAdapter.preventLock = false;
   }
+  if (filesResult == null || filesResult.isEmpty) return null;
+  return filesResult.first.path;
 }

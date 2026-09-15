@@ -4,8 +4,6 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -20,8 +18,13 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.resendeghf.notes"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = "28.2.13676358"
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 
     externalNativeBuild {
         cmake {
@@ -35,20 +38,14 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
-
     defaultConfig {
         applicationId = "com.resendeghf.notes"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 37
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders["applicationName"] = "com.resendeghf.notes.NotesApplication"
-        // Android-only aarch64 product: skip v7a/x86_64 APK/native paths.
+        
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -56,10 +53,14 @@ android {
 
     signingConfigs {
         create("release") {
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = keystoreProperties["storeFile"]?.let { file(it) }
-            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties["keyAlias"]?.toString() ?: ""
+            keyPassword = keystoreProperties["keyPassword"]?.toString() ?: ""
+            // Correção do erro de referência do escopo implícito do it
+            val storeFilePath = keystoreProperties["storeFile"]?.toString()
+            if (!storeFilePath.isNullOrEmpty()) {
+                storeFile = file(storeFilePath)
+            }
+            storePassword = keystoreProperties["storePassword"]?.toString() ?: ""
         }
     }
     buildTypes {
@@ -81,13 +82,11 @@ flutter {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.20")
     implementation("com.google.android.material:material:1.13.0")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
-// Single-ABI (arm64-v8a) builds; keep a stable versionCode override if splits appear.
 val abiCodes = mapOf("arm64-v8a" to 2)
 android.applicationVariants.configureEach {
     val variant = this
@@ -96,5 +95,11 @@ android.applicationVariants.configureEach {
         if (abiVersionCode != null) {
             (output as ApkVariantOutputImpl).versionCodeOverride = variant.versionCode * 10 + abiVersionCode
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }

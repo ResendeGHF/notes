@@ -746,16 +746,10 @@ void stabilizeOutlineTipRadii(
   if (doStart && n0 > 0) {
     final ref = s0 / n0;
     radii[0] = radii[0] * 0.35 + ref * 0.65;
-    if (capStart) {
-      radii[0] = math.max(radii[0], ref * 0.88);
-    }
   }
   if (doEnd && n1 > 0) {
     final ref = s1 / n1;
     radii[count - 1] = radii[count - 1] * 0.35 + ref * 0.65;
-    if (capEnd) {
-      radii[count - 1] = math.max(radii[count - 1], ref * 0.88);
-    }
   }
 }
 
@@ -975,10 +969,8 @@ List<Offset> _outlineFromRadii(
     }
   }
 
-  final startCapR = startCap
-      ? _stemCapRadius(radii, atStart: true)
-      : radii.first;
-  final endCapR = endCap ? _stemCapRadius(radii, atStart: false) : radii.last;
+  final startCapR = radii.first;
+  final endCapR = radii.last;
 
   if (meshStyleCaps && startCap) {
     _appendHemispherePairs(

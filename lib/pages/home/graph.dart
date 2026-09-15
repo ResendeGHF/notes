@@ -14,6 +14,8 @@ import 'package:saber/data/note_links_database.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/i18n/strings.g.dart';
+import 'package:saber/data/prefs.dart';
+import 'package:saber/services/vault_adapter.dart';
 
 class GraphPage extends StatefulWidget {
   const GraphPage({super.key});
@@ -492,62 +494,86 @@ class _GraphPageState extends State<GraphPage> {
                           ),
                           const SizedBox(width: 8),
                           Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                color: _showFullGraph && _rootPath == null
-                                    ? colorScheme.primary
-                                    : colorScheme.onSurfaceVariant,
-                                tooltip: 'Show All Notes',
-                                icon: Icon(
-                                  _showFullGraph && _rootPath == null
-                                      ? Icons.blur_on
-                                      : Icons.blur_circular,
-                                ),
-                                onPressed: () {
-                                  setState(() {
-                                    if (_showFullGraph && _rootPath == null) {
-                                      _showFullGraph = false;
-                                    } else {
-                                      _showFullGraph = true;
-                                      _rootPath = null;
-                                    }
-                                    _rebuildGraph();
-                                  });
-                                },
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    color: _showFullGraph && _rootPath == null
+                                        ? colorScheme.primary
+                                        : colorScheme.onSurfaceVariant,
+                                    tooltip: 'Show All Notes',
+                                    icon: Icon(
+                                      _showFullGraph && _rootPath == null
+                                          ? Icons.blur_on
+                                          : Icons.blur_circular,
+                                    ),
+                                    onPressed: () {
+                                      setState(() {
+                                        if (_showFullGraph && _rootPath == null) {
+                                          _showFullGraph = false;
+                                        } else {
+                                          _showFullGraph = true;
+                                          _rootPath = null;
+                                        }
+                                        _rebuildGraph();
+                                      });
+                                    },
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    color: _useTreeView
+                                        ? colorScheme.primary
+                                        : colorScheme.onSurfaceVariant,
+                                    tooltip: t.home.tooltips.treeView,
+                                    icon: Icon(
+                                      _useTreeView ? Icons.account_tree : Icons.hub,
+                                    ),
+                                    onPressed: _rootPath == null
+                                        ? null
+                                        : () {
+                                            setState(() {
+                                              _useTreeView = !_useTreeView;
+                                              _rebuildGraph();
+                                            });
+                                          },
+                                  ),
+                                  const SizedBox(width: 4),
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: stows.localEncryptionEnabled,
+                                    builder: (context, encryptionOn, _) {
+                                      return ValueListenableBuilder<bool>(
+                                        valueListenable: VaultAdapter.unlockListenable,
+                                        builder: (context, vaultUnlocked, _) {
+                                          if (encryptionOn && vaultUnlocked) {
+                                            return Padding(
+                                              padding: const EdgeInsets.only(right: 4),
+                                              child: IconButton(
+                                                color: colorScheme.primary,
+                                                tooltip: 'Lock Vault',
+                                                onPressed: () {
+                                                  unawaited(VaultAdapter.lockAndGoToLogin());
+                                                },
+                                                icon: const Icon(Icons.power_settings_new),
+                                              ),
+                                            );
+                                          }
+                                          return const SizedBox.shrink();
+                                        },
+                                      );
+                                    },
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Zoom to fit',
+                                    onPressed: () => _graphController.zoomToFit(),
+                                    icon: const Icon(Icons.fit_screen),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    tooltip: 'Refresh',
+                                    onPressed: _loadGraph,
+                                    icon: const Icon(Icons.refresh),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(width: 4),
-                              IconButton(
-                                color: _useTreeView
-                                    ? colorScheme.primary
-                                    : colorScheme.onSurfaceVariant,
-                                tooltip: t.home.tooltips.treeView,
-                                icon: Icon(
-                                  _useTreeView ? Icons.account_tree : Icons.hub,
-                                ),
-                                onPressed: _rootPath == null
-                                    ? null
-                                    : () {
-                                        setState(() {
-                                          _useTreeView = !_useTreeView;
-                                          _rebuildGraph();
-                                        });
-                                      },
-                              ),
-                              const SizedBox(width: 4),
-                              IconButton(
-                                tooltip: 'Zoom to fit',
-                                onPressed: () => _graphController.zoomToFit(),
-                                icon: const Icon(Icons.fit_screen),
-                              ),
-                              const SizedBox(width: 4),
-                              IconButton(
-                                tooltip: 'Refresh',
-                                onPressed: _loadGraph,
-                                icon: const Icon(Icons.refresh),
-                              ),
-                            ],
-                          ),
                         ],
                       ),
                     ),

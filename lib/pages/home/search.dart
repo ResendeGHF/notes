@@ -234,6 +234,7 @@ class _SearchPageState extends State<SearchPage> {
                             Future.delayed(const Duration(milliseconds: 500)),
                           ]),
                           child: CustomScrollView(
+                            primary: false,
                             physics: const AlwaysScrollableScrollPhysics(),
                             slivers: [
                               SliverAppBar(
@@ -326,6 +327,7 @@ class _SearchPageState extends State<SearchPage> {
                               ),
                               if (failed) ...[
                                 SliverSafeArea(
+                                  top: false,
                                   sliver: SliverToBoxAdapter(
                                     child: Center(
                                       child: Padding(
@@ -337,6 +339,7 @@ class _SearchPageState extends State<SearchPage> {
                                 ),
                               ] else ...[
                                 SliverSafeArea(
+                                  top: false,
                                   minimum: EdgeInsets.only(
                                     bottom: isSelecting ? 16 : 100,
                                   ),

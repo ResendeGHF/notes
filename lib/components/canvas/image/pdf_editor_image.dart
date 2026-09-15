@@ -492,19 +492,6 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
           ),
         ),
 
-        if (_links.isNotEmpty)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: _PdfLinkHighlightPainter(
-                  links: _links,
-                  pdfNaturalSize: widget.naturalSize,
-                  outlineColor: outlineColor,
-                ),
-              ),
-            ),
-          ),
-
         if (widget.onPdfTap != null)
           Positioned.fill(
             child: GestureDetector(
@@ -524,52 +511,4 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   }
 }
 
-class _PdfLinkHighlightPainter extends CustomPainter {
-  _PdfLinkHighlightPainter({
-    required this.links,
-    required this.pdfNaturalSize,
-    required this.outlineColor,
-  });
 
-  final List<PdfLink> links;
-  final Size pdfNaturalSize;
-  final Color outlineColor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (links.isEmpty || size.isEmpty || pdfNaturalSize.isEmpty) return;
-
-    final stroke = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.25
-      ..color = outlineColor.withValues(alpha: 0.9);
-
-    final fill = Paint()
-      ..style = PaintingStyle.fill
-      ..color = outlineColor.withValues(alpha: 0.06);
-
-    for (final link in links) {
-      final pdfRects = link.rects.isNotEmpty ? link.rects : [link.rect];
-      for (final pdfRect in pdfRects) {
-        if (pdfRect == Rect.zero || pdfRect.isEmpty) continue;
-        final widgetRect = PdfLinkDetector.pdfRectToWidgetRect(
-          pdfRect,
-          size,
-          pdfNaturalSize,
-        );
-        if (widgetRect.isEmpty) continue;
-        // Slight inset so the stroke sits clearly around the text.
-        final drawRect = widgetRect.inflate(1.0);
-        canvas.drawRect(drawRect, fill);
-        canvas.drawRect(drawRect, stroke);
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _PdfLinkHighlightPainter oldDelegate) {
-    return !identical(oldDelegate.links, links) ||
-        oldDelegate.pdfNaturalSize != pdfNaturalSize ||
-        oldDelegate.outlineColor != outlineColor;
-  }
-}

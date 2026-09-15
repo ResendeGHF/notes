@@ -739,12 +739,11 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
           local - localDelta,
         );
 
-        PageRasterCacheManager.updateViewportMoving(true);
+        _markWheelZoomActive();
         _transformer.value = _matrixTranslate(
           _transformer.value,
           newFocalPointScene - focalPointScene,
         );
-        PageRasterCacheManager.updateViewportMoving(false);
 
         return;
       }

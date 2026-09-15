@@ -546,6 +546,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
         buildSectionTitle('Background pattern'),
         subtleCard(
           child: DropdownButtonFormField<CanvasBackgroundPattern>(
+            dropdownColor: colorScheme.surfaceContainerHighest,
             isExpanded: true,
             value: _pattern,
             decoration: InputDecoration(

@@ -52,8 +52,10 @@ class Canvas extends StatelessWidget {
     this.imageCropState,
     this.onCropRectChanged,
     this.pageRasterCache,
+    this.showPdfLinkBoxes,
   });
 
+  final ValueListenable<bool>? showPdfLinkBoxes;
   final int? lineHeight;
   final int? lineThickness;
   final Color? lineColor;
@@ -156,6 +158,7 @@ class Canvas extends StatelessWidget {
                             : null,
                         onCropRectChanged: onCropRectChanged,
                         pageRasterCache: pageRasterCache,
+                        showPdfLinkBoxes: showPdfLinkBoxes,
                       ),
                     ),
                   ),

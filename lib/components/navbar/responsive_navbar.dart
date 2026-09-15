@@ -58,6 +58,7 @@ class _ResponsiveNavbarState extends State<ResponsiveNavbar> {
     if (ResponsiveNavbar.isLargeScreen) {
       // All home tabs follow expandT so content scales with the rail.
       return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         body: Stack(
           clipBehavior: Clip.hardEdge,
           children: [

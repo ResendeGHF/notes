@@ -1158,136 +1158,161 @@ class _BrowsePageState extends State<BrowsePage> {
                           Future.delayed(const Duration(milliseconds: 500)),
                         ]),
                         child: CustomScrollView(
+                          primary: false,
                           physics: const AlwaysScrollableScrollPhysics(),
                           cacheExtent: 1000,
                           slivers: [
                             SliverAppBar(
                               primary: false,
                               pinned: true,
-                              toolbarHeight: kBrowseAppBarToolbarHeight,
-                              collapsedHeight: kBrowseAppBarToolbarHeight,
-                              expandedHeight: kBrowseAppBarToolbarHeight,
+                              toolbarHeight: 72,
+                              collapsedHeight: 72,
+                              expandedHeight: 72,
                               scrolledUnderElevation: 2,
                               surfaceTintColor: Colors.transparent,
                               shadowColor: Colors.transparent,
                               leading: null,
-                              titleSpacing: 16,
-                              backgroundColor: homeAppBarBackgroundColor(
-                                context,
-                              ),
-                              title: ValueListenableBuilder<String>(
-                                valueListenable: _searchText,
-                                builder: (context, currentSearchText, _) {
-                                  return TextField(
-                                    controller: _searchController,
-                                    style: theme.textTheme.bodyLarge?.copyWith(
-                                      color: colorScheme.onSurface,
-                                    ),
-                                    decoration: InputDecoration(
-                                      hintText: t.home.titles.browse,
-                                      hintStyle: theme.textTheme.bodyLarge
-                                          ?.copyWith(
-                                            color: colorScheme.onSurfaceVariant,
-                                          ),
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                            vertical: 12,
-                                          ),
-                                      prefixIcon: Icon(
-                                        Icons.search,
-                                        color: colorScheme.onSurfaceVariant,
-                                        size: 22,
-                                      ),
-                                      suffixIcon: currentSearchText.isNotEmpty
-                                          ? IconButton(
-                                              style:
-                                                  homeToolbarCompactIconStyle(
-                                                    context,
-                                                  ),
-                                              icon: const Icon(Icons.clear),
-                                              onPressed: () {
-                                                _searchController.clear();
-                                                _filterFiles('');
-                                              },
-                                            )
-                                          : null,
-                                    ),
-                                  );
-                                },
-                              ),
-                              actions: [
-                                Padding(
-                                  padding: const EdgeInsetsDirectional.only(
-                                    end: 12,
+                              automaticallyImplyLeading: false,
+                              titleSpacing: 0,
+                              backgroundColor: homeAppBarBackgroundColor(context),
+                              title: Padding(
+                                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: colorScheme.surfaceContainerHigh,
+                                    borderRadius: BorderRadius.circular(28),
                                   ),
-                                  child: ValueListenableBuilder<bool>(
-                                    valueListenable:
-                                        stows.localEncryptionEnabled,
-                                    builder: (context, encryptionOn, _) {
-                                      return ValueListenableBuilder<bool>(
-                                        valueListenable:
-                                            VaultAdapter.unlockListenable,
-                                        builder: (context, vaultUnlocked, _) {
-                                          return _BrowseToolbarActionsStrip(
-                                            listMode: listMode,
-                                            glassStripHeight: 54,
-                                            showVaultLock:
-                                                encryptionOn && vaultUnlocked,
-                                            onToggleViewMode: () {
-                                              stows.homeListMode.value =
-                                                  !listMode;
-                                            },
-                                            onNewFolder: () => showDialog(
-                                              context: context,
-                                              builder: (context) =>
-                                                  NewFolderDialog(
-                                                    createFolder: createFolder,
-                                                    doesFolderExist:
-                                                        (String folderName) {
-                                                          return children
-                                                                  ?.directories
-                                                                  .contains(
-                                                                    folderName,
-                                                                  ) ??
-                                                              false;
-                                                        },
+                                  child: Padding(
+                                    padding: const EdgeInsetsDirectional.fromSTEB(16, 4, 8, 4),
+                                    child: Row(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
+                                        Expanded(
+                                          child: ValueListenableBuilder<String>(
+                                            valueListenable: _searchText,
+                                            builder: (context, currentSearchText, _) {
+                                              return TextField(
+                                                controller: _searchController,
+                                                style: theme.textTheme.bodyLarge?.copyWith(
+                                                  color: colorScheme.onSurface,
+                                                  fontSize: 15,
+                                                ),
+                                                decoration: InputDecoration(
+                                                  hintText: t.home.titles.browse,
+                                                  hintStyle: theme.textTheme.bodyLarge?.copyWith(
+                                                    color: colorScheme.onSurfaceVariant,
+                                                    fontSize: 15,
                                                   ),
-                                            ),
-                                            onAddLink: _showAddLinkDialog,
-                                            onLockVault: () {
-                                              unawaited(
-                                                VaultAdapter.lockAndGoToLogin(),
+                                                  border: InputBorder.none,
+                                                  isDense: true,
+                                                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                                                  prefixIcon: Icon(
+                                                    Icons.search,
+                                                    color: colorScheme.onSurfaceVariant,
+                                                    size: 22,
+                                                  ),
+                                                  suffixIcon: currentSearchText.isNotEmpty
+                                                      ? IconButton(
+                                                          style: homeToolbarCompactIconStyle(context),
+                                                          icon: const Icon(Icons.clear, size: 22),
+                                                          onPressed: () {
+                                                            _searchController.clear();
+                                                            _filterFiles('');
+                                                          },
+                                                        )
+                                                      : null,
+                                                ),
                                               );
                                             },
-                                            sortButton: SortButton(
-                                              sortContext: SortContext.browse,
-                                              callback: () async {
-                                                if (SortNotes.isNeeded) {
-                                                  if (_isSearching) {
-                                                    await SortNotes.sortNotes(
-                                                      _filteredSearchFiles,
-                                                      context:
-                                                          SortContext.browse,
-                                                      forced: true,
-                                                    );
-                                                  } else {
-                                                    await findChildrenOfPath(
-                                                      fromSort: true,
-                                                    );
-                                                  }
-                                                  setState(() {});
-                                                }
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              color: colorScheme.onSurfaceVariant,
+                                              tooltip: t.home.tooltips.viewMode,
+                                              onPressed: () {
+                                                stows.homeListMode.value = !listMode;
+                                              },
+                                              icon: Icon(listMode ? Icons.grid_view_rounded : Icons.view_list_rounded),
+                                            ),
+                                            const SizedBox(width: 4),
+                                            IconButton(
+                                              color: colorScheme.onSurfaceVariant,
+                                              icon: const Icon(Icons.create_new_folder_outlined),
+                                              tooltip: 'New Folder',
+                                              onPressed: () => showDialog(
+                                                context: context,
+                                                builder: (context) => NewFolderDialog(
+                                                  createFolder: createFolder,
+                                                  doesFolderExist: (String folderName) {
+                                                    return children?.directories.contains(folderName) ?? false;
+                                                  },
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 4),
+                                            IconButton(
+                                              color: colorScheme.onSurfaceVariant,
+                                              icon: const Icon(Icons.add_link),
+                                              tooltip: 'Create Shortcut Link',
+                                              onPressed: _showAddLinkDialog,
+                                            ),
+                                            ValueListenableBuilder<bool>(
+                                              valueListenable: stows.localEncryptionEnabled,
+                                              builder: (context, encryptionOn, _) {
+                                                return ValueListenableBuilder<bool>(
+                                                  valueListenable: VaultAdapter.unlockListenable,
+                                                  builder: (context, vaultUnlocked, _) {
+                                                    if (encryptionOn && vaultUnlocked) {
+                                                      return Padding(
+                                                        padding: const EdgeInsets.only(left: 4),
+                                                        child: IconButton(
+                                                          color: colorScheme.primary,
+                                                          tooltip: 'Lock Vault',
+                                                          onPressed: () {
+                                                            unawaited(VaultAdapter.lockAndGoToLogin());
+                                                          },
+                                                          icon: const Icon(Icons.power_settings_new),
+                                                        ),
+                                                      );
+                                                    }
+                                                    return const SizedBox.shrink();
+                                                  },
+                                                );
                                               },
                                             ),
-                                          );
-                                        },
-                                      );
-                                    },
+                                            const SizedBox(width: 4),
+                                            IconTheme.merge(
+                                              data: IconThemeData(color: colorScheme.onSurfaceVariant),
+                                              child: SortButton(
+                                                sortContext: SortContext.browse,
+                                                callback: () async {
+                                                  if (SortNotes.isNeeded) {
+                                                    if (_isSearching) {
+                                                      await SortNotes.sortNotes(
+                                                        _filteredSearchFiles,
+                                                        context: SortContext.browse,
+                                                        forced: true,
+                                                      );
+                                                    } else {
+                                                      await findChildrenOfPath(fromSort: true);
+                                                    }
+                                                    setState(() {});
+                                                  }
+                                                },
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                              ],
+                              ),
+                              actions: const [SizedBox.shrink()],
                             ),
 
                             if (_isSearching) ...[
@@ -2290,85 +2315,6 @@ class _AddLinkDialogState extends State<AddLinkDialog> {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _BrowseToolbarActionsStrip extends StatelessWidget {
-  const _BrowseToolbarActionsStrip({
-    required this.listMode,
-    this.glassStripHeight = 48,
-    required this.showVaultLock,
-    required this.onToggleViewMode,
-    required this.onNewFolder,
-    required this.onAddLink,
-    required this.onLockVault,
-    required this.sortButton,
-  });
-
-  final bool listMode;
-  final double glassStripHeight;
-  final bool showVaultLock;
-  final VoidCallback onToggleViewMode;
-  final VoidCallback onNewFolder;
-  final VoidCallback onAddLink;
-  final VoidCallback onLockVault;
-  final Widget sortButton;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final actionStyle = homeToolbarCompactIconStyle(context);
-
-    return HomeGlassIconStrip(
-      height: glassStripHeight,
-      children: [
-        IconButton(
-          style: actionStyle,
-          tooltip: t.home.tooltips.viewMode,
-          onPressed: onToggleViewMode,
-          icon: Icon(
-            listMode ? Icons.grid_view_rounded : Icons.view_list_rounded,
-            size: 22,
-          ),
-        ),
-        const HomeToolbarDivider(),
-        IconButton(
-          style: actionStyle,
-          icon: const Icon(Icons.create_new_folder_outlined, size: 22),
-          tooltip: 'New Folder',
-          onPressed: onNewFolder,
-        ),
-        const HomeToolbarDivider(),
-        IconButton(
-          style: actionStyle,
-          icon: const Icon(Icons.add_link, size: 22),
-          tooltip: 'Create Shortcut Link',
-          onPressed: onAddLink,
-        ),
-        if (showVaultLock) ...[
-          const HomeToolbarDivider(),
-          IconButton(
-            style: actionStyle.copyWith(
-              foregroundColor: WidgetStatePropertyAll(colorScheme.primary),
-            ),
-            tooltip: 'Lock Vault',
-            onPressed: onLockVault,
-            icon: const Icon(Icons.power_settings_new, size: 22),
-          ),
-        ],
-        const HomeToolbarDivider(),
-        IconTheme.merge(
-          data: IconThemeData(size: 22, color: colorScheme.onSurfaceVariant),
-          child: Theme(
-            data: theme.copyWith(
-              iconButtonTheme: IconButtonThemeData(style: actionStyle),
-            ),
-            child: sortButton,
-          ),
-        ),
-      ],
     );
   }
 }

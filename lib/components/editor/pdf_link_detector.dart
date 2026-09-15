@@ -64,13 +64,16 @@ class PdfLinkDetector {
 
             if (destTop != null) {
               const double contextHeight = 150.0;
-              const double contextAbove = 50.0;
+              const double contextAbove = 200.0;
+
+              final convertedDestRect = PdfRect(0, destTop, 0, destTop).toRect(page: page);
+              final double flutterY = convertedDestRect.top;
 
               targetRect = Rect.fromLTRB(
                 0,
-                destTop - contextHeight,
+                flutterY - contextAbove,
                 pageWidth,
-                destTop + contextAbove,
+                flutterY + contextHeight,
               );
             }
           }
@@ -80,14 +83,7 @@ class PdfLinkDetector {
 
         final normalizedRects = <Rect>[];
         for (final r in link.rects) {
-          normalizedRects.add(
-            Rect.fromLTRB(
-              r.left < r.right ? r.left : r.right,
-              r.top < r.bottom ? r.top : r.bottom,
-              r.left < r.right ? r.right : r.left,
-              r.top < r.bottom ? r.bottom : r.top,
-            ),
-          );
+          normalizedRects.add(r.toRect(page: page));
         }
 
         final linkRect = normalizedRects.isNotEmpty
@@ -129,8 +125,8 @@ class PdfLinkDetector {
     return null;
   }
 
-  /// Maps a PDF-space rect (origin bottom-left) into widget/local space
-  /// (origin top-left) for the rendered page.
+  /// Maps a PDF-space rect (already in Flutter top-left coordinates via toRect)
+  /// into widget/local space for the rendered page.
   static Rect pdfRectToWidgetRect(
     Rect pdfRect,
     Size widgetSize,
@@ -139,13 +135,12 @@ class PdfLinkDetector {
     if (widgetSize.isEmpty || pdfNaturalSize.isEmpty) return Rect.zero;
     final scaleX = widgetSize.width / pdfNaturalSize.width;
     final scaleY = widgetSize.height / pdfNaturalSize.height;
-    final top = (pdfNaturalSize.height - pdfRect.bottom) * scaleY;
-    final bottom = (pdfNaturalSize.height - pdfRect.top) * scaleY;
+    
     return Rect.fromLTRB(
       pdfRect.left * scaleX,
-      top,
+      pdfRect.top * scaleY,
       pdfRect.right * scaleX,
-      bottom,
+      pdfRect.bottom * scaleY,
     );
   }
 
@@ -159,11 +154,6 @@ class PdfLinkDetector {
     final scaleX = pdfNaturalSize.width / widgetSize.width;
     final scaleY = pdfNaturalSize.height / widgetSize.height;
 
-    final pdfX = widgetPosition.dx * scaleX;
-
-    final scaledTouchY = widgetPosition.dy * scaleY;
-    final pdfY = pdfNaturalSize.height - scaledTouchY;
-
-    return Offset(pdfX, pdfY);
+    return Offset(widgetPosition.dx * scaleX, widgetPosition.dy * scaleY);
   }
 }

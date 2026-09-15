@@ -54,7 +54,7 @@ class ShapeControlPointsOverlay extends StatelessWidget {
     required bool stylus,
   }) {
     if (!shape.isVertexEditable) return null;
-    if (stylus) return null;
+    
     final pts = shape.controlPoints;
     if (pts.isEmpty) return null;
     final r = hitRadius(viewportScale, stylus: stylus);

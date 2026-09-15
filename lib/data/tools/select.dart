@@ -32,7 +32,13 @@ class Select extends Tool {
 
   void unselect() {
     doneSelecting = false;
-    selectResult.pageIndex = -1;
+    selectResult = SelectResult(
+      pageIndex: -1,
+      strokes: const [],
+      images: const [],
+      path: Path(),
+      pageIndexStart: -1,
+    );
   }
 
   Color? getDominantStrokeColor() {

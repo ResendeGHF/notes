@@ -3,13 +3,15 @@
 
 part of 'editor.dart';
 
-enum _MenuPage { main, backgroundSettings, layers, pageSettings, inkDefaults }
+enum _MenuPage { main, backgroundSettings, layers, pageSettings, inkDefaults, tagsAndLinks, properties }
 
 
 class ModernEditorMenu extends StatefulWidget {
   final EditorCoreInfo coreInfo;
   final int currentPageIndex;
   final bool invert;
+  final bool hasPdfLinks;
+  final ValueNotifier<bool> showPdfLinkBoxes;
   final VoidCallback onClose;
 
   final bool hasBackground;
@@ -37,7 +39,11 @@ class ModernEditorMenu extends StatefulWidget {
   final Future<bool> Function() onImportPdf;
   final Future<void> Function(Uint8List imageBytes)? onInsertMatrixImage;
   final VoidCallback onToggleCalculator;
-  final VoidCallback onManageTagsAndLinks;
+  
+  final void Function(int) onGoToLocation;
+  final void Function(NoteLink) onOpenLinkedNote;
+  final Future<List<_LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
+  final VoidCallback onSaveTagsAndLinks;
 
   /// Runs ML Kit on all handwritten strokes in the note (per page) for copyable LaTeX.
   final Future<void> Function()? onNoteHandwritingToLatex;
@@ -49,7 +55,7 @@ class ModernEditorMenu extends StatefulWidget {
   final Future<void> Function()? onSetCustomThumbnail;
 
   final Future<void> Function() onDeleteNote;
-  final Future<void> Function()? onShowProperties;
+  final Future<void> Function()? onSaveBeforeProperties;
   final VoidCallback? onOpenSplitView;
   final VoidCallback? onCloseSplitView;
   final VoidCallback? onReopenSplitView;
@@ -71,6 +77,8 @@ class ModernEditorMenu extends StatefulWidget {
     required this.coreInfo,
     required this.currentPageIndex,
     required this.invert,
+    required this.hasPdfLinks,
+    required this.showPdfLinkBoxes,
     required this.onClose,
 
     this.hasBackground = false,
@@ -95,14 +103,17 @@ class ModernEditorMenu extends StatefulWidget {
     required this.onImportPdf,
     this.onInsertMatrixImage,
     required this.onToggleCalculator,
-    required this.onManageTagsAndLinks,
+    required this.onGoToLocation,
+    required this.onOpenLinkedNote,
+    required this.onLoadLinkTargetCandidates,
+    required this.onSaveTagsAndLinks,
     this.onNoteHandwritingToLatex,
     required this.onExportSba,
     required this.onExportPdf,
     required this.onExportPng,
     this.onSetCustomThumbnail,
     required this.onDeleteNote,
-    this.onShowProperties,
+    this.onSaveBeforeProperties,
     this.onOpenSplitView,
     this.onCloseSplitView,
     this.onReopenSplitView,
@@ -190,6 +201,22 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             key: const ValueKey('inkDefaults'),
             noteSessionBackup: _inkSessionBackup,
             onChanged: widget.onInkDefaultsChanged,
+            onBack: () => setState(() => _page = _MenuPage.main),
+          ),
+          _MenuPage.tagsAndLinks => _TagsAndLinksSidebarView(
+            key: const ValueKey('tagsAndLinks'),
+            coreInfo: widget.coreInfo,
+            currentPageIndex: widget.currentPageIndex,
+            onBack: () => setState(() => _page = _MenuPage.main),
+            onGoToLocation: widget.onGoToLocation,
+            onOpenLinkedNote: widget.onOpenLinkedNote,
+            onLoadLinkTargetCandidates: widget.onLoadLinkTargetCandidates,
+            onSaveTagsAndLinks: widget.onSaveTagsAndLinks,
+            onClose: widget.onClose,
+          ),
+          _MenuPage.properties => _PropertiesSidebarView(
+            key: const ValueKey('properties'),
+            coreInfo: widget.coreInfo,
             onBack: () => setState(() => _page = _MenuPage.main),
           ),
         },
@@ -360,10 +387,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
           contentPadding: const EdgeInsets.symmetric(horizontal: 24),
           leading: const Icon(Icons.link_rounded),
           title: const Text('Tags & links'),
-          onTap: () {
-            widget.onClose();
-            widget.onManageTagsAndLinks();
-          },
+          onTap: () => setState(() => _page = _MenuPage.tagsAndLinks),
         ),
         if (widget.onNoteHandwritingToLatex != null)
           ListTile(
@@ -387,6 +411,19 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             );
           },
         ),
+        if (widget.hasPdfLinks)
+          ValueListenableBuilder<bool>(
+            valueListenable: widget.showPdfLinkBoxes,
+            builder: (context, enabled, _) {
+              return SwitchListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+                secondary: const Icon(Icons.picture_in_picture_alt_outlined),
+                title: const Text('Link boxes'),
+                value: enabled,
+                onChanged: (val) => widget.showPdfLinkBoxes.value = val,
+              );
+            },
+          ),
 
         const Divider(height: 16),
         subHeader('Share & export'),
@@ -415,18 +452,58 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
           contentPadding: const EdgeInsets.symmetric(horizontal: 24),
           leading: Icon(Icons.layers_clear_outlined, color: colors.error),
           title: Text('Clear current page', style: TextStyle(color: colors.error)),
-          onTap: () {
-            widget.onClose();
-            widget.onClearPage();
+          onTap: () async {
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AdaptiveAlertDialog(
+                title: const Text('Clear current page'),
+                content: const Text('Are you sure you want to clear the current page? This action cannot be undone.'),
+                actions: [
+                  CupertinoDialogAction(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text(MaterialLocalizations.of(ctx).cancelButtonLabel),
+                  ),
+                  CupertinoDialogAction(
+                    isDestructiveAction: true,
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Clear'),
+                  ),
+                ],
+              ),
+            );
+            if (confirmed == true) {
+              widget.onClose();
+              widget.onClearPage();
+            }
           },
         ),
         ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 24),
           leading: Icon(Icons.delete_sweep_outlined, color: colors.error),
           title: Text('Clear all pages', style: TextStyle(color: colors.error)),
-          onTap: () {
-            widget.onClose();
-            widget.onClearAll();
+          onTap: () async {
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AdaptiveAlertDialog(
+                title: const Text('Clear all pages'),
+                content: const Text('Are you sure you want to clear all pages? This action cannot be undone.'),
+                actions: [
+                  CupertinoDialogAction(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text(MaterialLocalizations.of(ctx).cancelButtonLabel),
+                  ),
+                  CupertinoDialogAction(
+                    isDestructiveAction: true,
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Clear All'),
+                  ),
+                ],
+              ),
+            );
+            if (confirmed == true) {
+              widget.onClose();
+              widget.onClearAll();
+            }
           },
         ),
         ListTile(
@@ -445,15 +522,709 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
           leading: const Icon(Icons.info_outline),
           title: const Text('Properties'),
           onTap: () async {
-            widget.onClose();
-            if (widget.onShowProperties != null) {
-              await widget.onShowProperties!();
-            } else {
-              showNotePropertiesDialog(context, widget.coreInfo);
+            if (widget.onSaveBeforeProperties != null) {
+              await widget.onSaveBeforeProperties!();
             }
+            setState(() => _page = _MenuPage.properties);
           },
         ),
       ],
+    );
+  }
+}
+
+class _TagsAndLinksSidebarView extends StatefulWidget {
+  final EditorCoreInfo coreInfo;
+  final int currentPageIndex;
+  final VoidCallback onBack;
+  final void Function(int) onGoToLocation;
+  final void Function(NoteLink) onOpenLinkedNote;
+  final Future<List<_LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
+  final VoidCallback onSaveTagsAndLinks;
+  final VoidCallback onClose;
+
+  const _TagsAndLinksSidebarView({
+    super.key,
+    required this.coreInfo,
+    required this.currentPageIndex,
+    required this.onBack,
+    required this.onGoToLocation,
+    required this.onOpenLinkedNote,
+    required this.onLoadLinkTargetCandidates,
+    required this.onSaveTagsAndLinks,
+    required this.onClose,
+  });
+
+  @override
+  State<_TagsAndLinksSidebarView> createState() => _TagsAndLinksSidebarViewState();
+}
+
+class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
+  final TextEditingController _tagInputController = TextEditingController();
+
+  @override
+  void dispose() {
+    _tagInputController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _addLink() async {
+    final candidates = await widget.onLoadLinkTargetCandidates();
+    if (!mounted) return;
+    _LinkTargetCandidate? selectedCandidate;
+    final pageController = TextEditingController(text: '1');
+    final labelController = TextEditingController();
+    final searchController = TextEditingController();
+    String search = '';
+
+    final created = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocalState) => Dialog(
+          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 500, maxHeight: 600),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    t.editor.addInternalLink,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.4,
+                        ),
+                  ),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: searchController,
+                    onChanged: (value) {
+                      setLocalState(() {
+                        search = value.trim().toLowerCase();
+                      });
+                    },
+                    decoration: InputDecoration(
+                      labelText: 'Search note by name or tag',
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.withOpacity(0.1),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Flexible(
+                    child: Builder(
+                      builder: (context) {
+                        final filtered = candidates.where((candidate) {
+                          if (search.isEmpty) return true;
+                          final name = candidate.displayName.toLowerCase();
+                          if (name.contains(search)) return true;
+                          return candidate.tags.any((tag) => tag.contains(search));
+                        }).toList();
+                        if (filtered.isEmpty) {
+                          return Center(
+                            child: Text(t.editor.noNotesMatchQuery),
+                          );
+                        }
+                        return ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: filtered.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 8),
+                          itemBuilder: (context, index) {
+                            final candidate = filtered[index];
+                            final selected = selectedCandidate?.path == candidate.path;
+                            return ListTile(
+                              dense: true,
+                              selected: selected,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              selectedTileColor: Colors.grey.withOpacity(0.2),
+                              title: Text(
+                                candidate.displayName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: candidate.tags.isEmpty
+                                  ? null
+                                  : Text(
+                                      candidate.tags.take(4).join(', '),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                              onTap: () {
+                                setLocalState(() {
+                                  selectedCandidate = candidate;
+                                });
+                              },
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: pageController,
+                    decoration: InputDecoration(
+                      labelText: 'Page or range (e.g. 1 or 1-5)',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.withOpacity(0.1),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: labelController,
+                    decoration: InputDecoration(
+                      labelText: 'Label (optional)',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.withOpacity(0.1),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: () => Navigator.pop(context, false),
+                        child: const Text('Cancel'),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: selectedCandidate == null
+                            ? null
+                            : () => Navigator.pop(context, true),
+                        child: const Text('Add'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (created != true || selectedCandidate == null) {
+      searchController.dispose();
+      pageController.dispose();
+      labelController.dispose();
+      return;
+    }
+    
+    final pageText = pageController.text.trim();
+    int pageStart = 1;
+    int? pageEnd;
+    if (pageText.contains('-')) {
+      final parts = pageText.split('-');
+      if (parts.length == 2) {
+        pageStart = int.tryParse(parts[0].trim()) ?? 1;
+        final endParsed = int.tryParse(parts[1].trim());
+        if (endParsed != null && endParsed >= pageStart) {
+          pageEnd = endParsed;
+        }
+      }
+    } else {
+      pageStart = int.tryParse(pageText) ?? 1;
+    }
+    
+    try {
+      final targetInfo = await EditorCoreInfo.loadFromFilePath(
+        selectedCandidate!.path,
+        readOnly: true,
+        onlyFirstPage: false,
+      );
+      final pageCount = targetInfo.pages.length;
+      if (pageCount <= 0) {
+        pageStart = 1;
+        pageEnd = null;
+      } else {
+        pageStart = pageStart.clamp(1, pageCount);
+        pageEnd = pageEnd != null ? pageEnd.clamp(pageStart, pageCount) : null;
+      }
+    } catch (_) {
+      pageStart = pageStart.clamp(1, 9999);
+      pageEnd = pageEnd != null ? pageEnd.clamp(pageStart, 9999) : null;
+    }
+    
+    final currentPage = widget.coreInfo.pages[widget.currentPageIndex];
+    final link = NoteLink(
+      sourcePageId: currentPage.id,
+      sourcePageIndex: widget.currentPageIndex,
+      targetPath: selectedCandidate!.path,
+      targetPageIndex: pageStart - 1,
+      targetPageIndexEnd: pageEnd != null ? pageEnd - 1 : null,
+      label: labelController.text.trim().isEmpty ? null : labelController.text.trim(),
+    );
+    
+    widget.coreInfo.links = [...widget.coreInfo.links, link];
+    widget.onSaveTagsAndLinks();
+    if (mounted) setState(() {});
+    
+    try {
+      unawaited(
+        NoteLinksDatabase.instance.setLinksForPath(
+          widget.coreInfo.filePath,
+          widget.coreInfo.links,
+          rootDirectory: FileManager.documentsDirectory,
+        ),
+      );
+    } catch (e) {
+      // ignore
+    }
+    
+    searchController.dispose();
+    pageController.dispose();
+    labelController.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final currentPage = widget.coreInfo.pages[widget.currentPageIndex];
+    final linksForPage = widget.coreInfo.linksForPage(currentPage, widget.currentPageIndex);
+
+    return Column(
+      key: const ValueKey('tagsAndLinksSidebar'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            children: [
+              IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Tags & links', style: theme.textTheme.titleMedium),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            children: [
+              TextField(
+                controller: _tagInputController,
+                decoration: InputDecoration(
+                  labelText: 'Add tag',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.withOpacity(0.1),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: () {
+                      final tag = _tagInputController.text.trim().toLowerCase();
+                      if (tag.isEmpty) return;
+                      final updated = {
+                        ...widget.coreInfo.tags,
+                        tag,
+                      }.toList()..sort();
+                      widget.coreInfo.tags = updated;
+                      _tagInputController.clear();
+                      TagDatabase.instance.setTagsForPath(
+                        widget.coreInfo.filePath,
+                        widget.coreInfo.tags,
+                      );
+                      widget.onSaveTagsAndLinks();
+                      setState(() {});
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final tag in widget.coreInfo.tags)
+                    Chip(
+                      label: Text(tag),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      onDeleted: () {
+                        widget.coreInfo.tags = widget.coreInfo.tags
+                            .where((t) => t != tag)
+                            .toList();
+                        TagDatabase.instance.setTagsForPath(
+                          widget.coreInfo.filePath,
+                          widget.coreInfo.tags,
+                        );
+                        widget.onSaveTagsAndLinks();
+                        setState(() {});
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 32),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Page links',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _addLink,
+                    icon: const Icon(Icons.add_link),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (linksForPage.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: Text(
+                    t.editor.noLinksOnPage,
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                )
+              else
+                ...linksForPage.map(
+                  (link) => ListTile(
+                    dense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    leading: const Icon(Icons.link),
+                    title: Text(
+                      link.label ??
+                          (link.targetPath.isEmpty
+                              ? 'Current Note'
+                              : link.targetPath.split('/').last),
+                    ),
+                    subtitle: Text(
+                      link.isRange
+                          ? '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (pages ${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1})'
+                          : '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (page ${link.targetPageIndex + 1})',
+                    ),
+                    onTap: () {
+                      widget.onClose();
+                      if (link.targetPath.isEmpty) {
+                        widget.onGoToLocation(link.targetPageIndex);
+                      } else {
+                        widget.onOpenLinkedNote(link);
+                      }
+                    },
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () {
+                        widget.coreInfo.links = widget.coreInfo.links
+                            .where((item) => item != link)
+                            .toList();
+                        widget.onSaveTagsAndLinks();
+                        setState(() {});
+                        try {
+                          unawaited(
+                            NoteLinksDatabase.instance.setLinksForPath(
+                              widget.coreInfo.filePath,
+                              widget.coreInfo.links,
+                              rootDirectory: FileManager.documentsDirectory,
+                            ),
+                          );
+                        } catch (e) {
+                          // ignore
+                        }
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PropertiesSidebarView extends StatefulWidget {
+  final EditorCoreInfo coreInfo;
+  final VoidCallback onBack;
+
+  const _PropertiesSidebarView({
+    super.key,
+    required this.coreInfo,
+    required this.onBack,
+  });
+
+  @override
+  State<_PropertiesSidebarView> createState() => _PropertiesSidebarViewState();
+}
+
+class _PropertiesSidebarViewState extends State<_PropertiesSidebarView> {
+  String? _basePath;
+  int? _fileSize;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAsync();
+  }
+
+  Future<void> _loadAsync() async {
+    final ext = await FileManager.doesFileExist(
+          widget.coreInfo.filePath + Editor.extensionOldJson,
+        )
+        ? Editor.extensionOldJson
+        : Editor.extension;
+    final basePath = widget.coreInfo.filePath + ext;
+
+    if (!mounted) return;
+    setState(() => _basePath = basePath);
+
+    final fileSize = await FileManager.getNoteBundleSizeBytes(
+      widget.coreInfo.filePath,
+    );
+
+    if (mounted) setState(() => _fileSize = fileSize);
+  }
+
+  String _formatDuration(int milliseconds) {
+    final duration = Duration(milliseconds: milliseconds);
+    return duration.inHours > 0
+        ? '${duration.inHours}h ${duration.inMinutes.remainder(60)}m'
+        : '${duration.inMinutes}m ${duration.inSeconds.remainder(60)}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    
+    final dateFormat = DateFormat('MMM dd, yyyy - HH:mm');
+    final creation = widget.coreInfo.creationDate > 0
+        ? dateFormat.format(
+            DateTime.fromMillisecondsSinceEpoch(widget.coreInfo.creationDate),
+          )
+        : 'Unknown';
+    final modified = widget.coreInfo.lastModification > 0
+        ? dateFormat.format(
+            DateTime.fromMillisecondsSinceEpoch(widget.coreInfo.lastModification),
+          )
+        : 'Unknown';
+    final accessed = widget.coreInfo.lastAccess > 0
+        ? dateFormat.format(
+            DateTime.fromMillisecondsSinceEpoch(widget.coreInfo.lastAccess),
+          )
+        : 'Unknown';
+    final timeSpentStr = _formatDuration(widget.coreInfo.totalTimeSpent);
+    final timeSpentEditingStr = _formatDuration(widget.coreInfo.totalTimeSpentEditing);
+    final locationStr = widget.coreInfo.location ?? 'Unknown';
+
+    final sizeStr = _fileSize != null
+        ? (_fileSize! > 1024 * 1024
+            ? '${(_fileSize! / (1024 * 1024)).toStringAsFixed(2)} MB'
+            : '${(_fileSize! / 1024).toStringAsFixed(2)} KB')
+        : '...';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            children: [
+              IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Properties', style: theme.textTheme.titleMedium),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            children: [
+              _PropRow(icon: Icons.calendar_today, label: 'Created', value: creation),
+              _PropRow(icon: Icons.edit_note, label: 'Modified', value: modified),
+              _PropRow(icon: Icons.visibility, label: 'Accessed', value: accessed),
+              _PropRow(icon: Icons.location_on_outlined, label: 'Location', value: locationStr),
+              _PropRow(icon: Icons.menu_book_outlined, label: 'Type', value: 'Paged note'),
+              _PropRow(icon: Icons.schedule, label: 'Time Spent', value: timeSpentStr),
+              _PropRow(icon: Icons.timer_outlined, label: 'Time Editing', value: timeSpentEditingStr),
+              _PropRow(icon: Icons.sd_storage, label: 'Total Size', value: sizeStr),
+              if (stows.localEncryptionEnabled.value && _basePath != null)
+                _PdfLoadModeRow(basePath: _basePath!),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PropRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _PropRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: colorScheme.onSurfaceVariant,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            flex: 2,
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PdfLoadModeRow extends StatefulWidget {
+  final String basePath;
+
+  const _PdfLoadModeRow({required this.basePath});
+
+  @override
+  State<_PdfLoadModeRow> createState() => _PdfLoadModeRowState();
+}
+
+class _PdfLoadModeRowState extends State<_PdfLoadModeRow> {
+  String? _localModeOverride;
+
+  @override
+  void initState() {
+    super.initState();
+    stows.vaultPdfLoadOverrides.addListener(_onOverridesChanged);
+    _syncFromStow();
+  }
+
+  @override
+  void dispose() {
+    stows.vaultPdfLoadOverrides.removeListener(_onOverridesChanged);
+    super.dispose();
+  }
+
+  void _onOverridesChanged() {
+    if (mounted) _syncFromStow();
+  }
+
+  void _syncFromStow() {
+    final mode = getStoredVaultPdfLoadOverrideForPath(widget.basePath);
+    if (mounted && _localModeOverride != mode) {
+      setState(() => _localModeOverride = mode);
+    }
+  }
+
+  String get _effectiveMode =>
+      _localModeOverride ?? getStoredVaultPdfLoadOverrideForPath(widget.basePath);
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final currentMode = _effectiveMode;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        children: [
+          Icon(Icons.picture_as_pdf, size: 20, color: colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'PDF loading',
+              style: TextStyle(
+                color: colorScheme.onSurfaceVariant,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SegmentedButton<String>(
+            key: ValueKey(currentMode),
+            segments: const [
+              ButtonSegment(
+                value: 'ram_only',
+                icon: Icon(Icons.memory, size: 16),
+                label: Text('RAM'),
+              ),
+              ButtonSegment(
+                value: 'temp_file',
+                icon: Icon(Icons.speed, size: 16),
+                label: Text('Temp'),
+              ),
+              ButtonSegment(
+                value: 'default',
+                icon: Icon(Icons.settings, size: 16),
+                label: Text('Default'),
+              ),
+            ],
+            selected: {currentMode},
+            onSelectionChanged: (selection) {
+              final mode = selection.first;
+
+              setState(() => _localModeOverride = mode);
+              setVaultPdfLoadOverrideForFile(
+                widget.basePath,
+                mode == 'default' ? null : mode,
+              );
+            },
+          ),
+        ],
+      ),
     );
   }
 }

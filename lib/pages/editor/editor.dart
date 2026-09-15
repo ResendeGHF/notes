@@ -26,6 +26,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart' as flutter_quill;
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:keybinder/keybinder.dart';
 import 'package:logging/logging.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
@@ -262,10 +263,13 @@ class EditorState extends State<Editor>
   double? _pendingResizeAnchorWidthOverride;
   double? _pendingResizeAnchorHeightOverride;
   bool _applyingResizeAnchor = false;
+
   /// True while [didChangeMetrics] owns the active resize-anchor session.
   bool _metricsOwnsResizeSession = false;
+
   /// Coalesces [didChangeMetrics] settle callbacks (orientation / window size).
   int _metricsSettleEpoch = 0;
+
   /// Last logical window size — ignore keyboard-only [didChangeMetrics].
   Size? _lastMetricsLogicalSize;
 
@@ -273,6 +277,12 @@ class EditorState extends State<Editor>
   /// open/close starts (prevents panel state getting stuck mid-animation).
   int _dockedSidePanelAnimEpoch = 0;
   bool _canvasGestureActive = false;
+
+  /// Isolates live ink / lasso UI per [EditorState] (split view shares globals).
+  final Object _canvasInteractionScope = Object();
+  Object? _activeCanvasDrawScope;
+  String? _drawSessionNotePath;
+  String? _selectSessionNotePath;
 
   final _scrollPhysicsStopNotifier = ValueNotifier<int>(0);
   late final PageRasterCacheManager _pageRasterCache = PageRasterCacheManager(
@@ -298,7 +308,10 @@ class EditorState extends State<Editor>
     final scale =
         PageRasterCacheManager.liveViewportScale ?? _quantizedCanvasScale;
     final dpr = _canvasDevicePixelRatio();
-    _pageRasterCache.prepareForSettledScale(scale: scale, devicePixelRatio: dpr);
+    _pageRasterCache.prepareForSettledScale(
+      scale: scale,
+      devicePixelRatio: dpr,
+    );
     final center = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
     final radius = 2;
     final bandStart =
@@ -464,6 +477,31 @@ class EditorState extends State<Editor>
   bool _isDisposed = false;
   String _lastWrittenThumbnailHash = '';
 
+  bool _hasPdfLinks = false;
+  final ValueNotifier<bool> _showPdfLinkBoxes = ValueNotifier(true);
+
+  void _checkForPdfLinks() async {
+    bool found = false;
+    for (final page in coreInfo.pages) {
+      if (page.backgroundImage is PdfEditorImage) {
+        final pdfImg = page.backgroundImage as PdfEditorImage;
+        final pdfDoc = await _waitForPdfDocument(pdfImg.assetId);
+        if (pdfDoc != null) {
+          final links = await PdfLinkDetector.detectLinksOnPage(pdfDoc, pdfImg.pdfPage);
+          if (links.isNotEmpty) {
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (mounted && _hasPdfLinks != found) {
+      setState(() {
+        _hasPdfLinks = found;
+      });
+    }
+  }
+
   Future<void>? _pendingSaveFuture;
 
   static final Map<String, Future<void>> _pendingSavesByPath = {};
@@ -511,6 +549,8 @@ class EditorState extends State<Editor>
 
   _ImageCropState? _imageCropState;
   _CropHandle? _activeCropHandle;
+
+  bool _lastInvertBool = false;
 
   void _appendRecoveryStroke(Stroke stroke) {
     if (coreInfo.readOnly || _isDeleted) return;
@@ -788,26 +828,29 @@ class EditorState extends State<Editor>
     _longPressStartPosition = globalPos;
 
     // Match canvas long-press. Flutter's 500ms default feels sluggish.
-    _selectionLongPressTimer = Timer(CanvasContextMenuFeel.longPressDuration, () {
-      if (mounted) {
-        _selectionLongPressTimer = null;
+    _selectionLongPressTimer = Timer(
+      CanvasContextMenuFeel.longPressDuration,
+      () {
+        if (mounted) {
+          _selectionLongPressTimer = null;
 
-        _ignoreDragForMenu = true;
-        HapticFeedback.selectionClick();
-        unawaited(
-          _showCanvasMenu(globalPos).whenComplete(() {
-            if (!mounted) return;
-            _ignoreDragForMenu = false;
-          }),
-        );
+          _ignoreDragForMenu = true;
+          HapticFeedback.selectionClick();
+          unawaited(
+            _showCanvasMenu(globalPos).whenComplete(() {
+              if (!mounted) return;
+              _ignoreDragForMenu = false;
+            }),
+          );
 
-        setState(() {
-          _isScaling = false;
-          _isRotating = false;
-          _isDraggingVertex = false;
-        });
-      }
-    });
+          setState(() {
+            _isScaling = false;
+            _isRotating = false;
+            _isDraggingVertex = false;
+          });
+        }
+      },
+    );
   }
 
   Future<void> _copySelectionToClipboard() async {
@@ -1145,6 +1188,7 @@ class EditorState extends State<Editor>
       }
 
       if (lock) {
+        _clearSelectionPreview();
         Select.currentSelect.unselect();
       }
     });
@@ -1175,6 +1219,9 @@ class EditorState extends State<Editor>
       page.images.remove(image);
 
       page.backgroundImage = image;
+
+      _selectionPreview = null;
+      _selectionStrokesDetachedFromPage = false;
 
       select.unselect();
 
@@ -1348,9 +1395,82 @@ class EditorState extends State<Editor>
     }
   }
 
+  bool get _ownsCanvasDrawSession =>
+      _activeCanvasDrawScope == _canvasInteractionScope &&
+      _drawSessionNotePath == coreInfo.filePath;
+
+  bool get _ownsSelectSession => _selectSessionNotePath == coreInfo.filePath;
+
+  Tool _toolToRestoreAfterSelect() {
+    return _toolBeforeSelect ?? _lastPenTool ?? _resolveToolForPenSizePresetFallback();
+  }
+
+  void _resetSelectInteractionFlags() {
+    _isScaling = false;
+    _isRotating = false;
+    _isDraggingVertex = false;
+    _draggedVertexIndex = null;
+    _draggedTriangle = null;
+    _scaleHandle = null;
+    _initialScaleRadius = 0.0;
+    _rotationStartPosition = null;
+    _rotationStartAngle = 0.0;
+    totalRotation = 0.0;
+    totalScale = 1.0;
+    moveOffset = Offset.zero;
+  }
+
+  void _resetSelectToolState() {
+    _clearSelectionPreview();
+    _resetSelectInteractionFlags();
+    Select.currentSelect.unselect();
+    _selectSessionNotePath = null;
+  }
+
+  void _exitSelectTool({required bool restoreTool}) {
+    _resetSelectToolState();
+    if (restoreTool && currentTool is Select) {
+      currentTool = _toolToRestoreAfterSelect();
+    }
+    _autoSwitchBackToShapeTool = false;
+  }
+
+  void _exitSelectToolAfterAction() {
+    if (_autoSwitchBackToShapeTool) {
+      _autoSwitchBackToShapeTool = false;
+      _resetSelectToolState();
+      currentTool = ShapeTool.currentShapeTool;
+      return;
+    }
+    _exitSelectTool(restoreTool: true);
+  }
+
+  void _markSelectSessionForThisNote() {
+    _selectSessionNotePath = coreInfo.filePath;
+  }
+
+  void _beginCanvasDrawSessionForThisNote() {
+    _activeCanvasDrawScope = _canvasInteractionScope;
+    _drawSessionNotePath = coreInfo.filePath;
+  }
+
+  void _endCanvasDrawSession() {
+    if (_activeCanvasDrawScope != _canvasInteractionScope) return;
+    _activeCanvasDrawScope = null;
+    _drawSessionNotePath = null;
+  }
+
+  Stroke? _liveStrokeForPage(int pageIndex) {
+    if (!_ownsCanvasDrawSession || dragPageIndex != pageIndex) {
+      return null;
+    }
+    return Pen.currentStroke;
+  }
+
   void deleteSelection() {
     final select = Select.currentSelect;
     if (!select.doneSelecting || select.selectResult.isEmpty) return;
+    if (!_ownsSelectSession) return;
     final pageIndex = select.selectResult.pageIndex;
     final page = coreInfo.pages[pageIndex];
 
@@ -1371,13 +1491,12 @@ class EditorState extends State<Editor>
       for (final image in select.selectResult.images) {
         page.images.remove(image);
       }
-      select.unselect();
-      if (_autoSwitchBackToShapeTool) {
-        _autoSwitchBackToShapeTool = false;
-        currentTool = ShapeTool.currentShapeTool;
-      }
 
       page.redrawStrokes();
+      // Dropping the stale bitmap prevents the deleted stroke/selection from
+      // ghosting back in the cached live-preview frame.
+      _pageRasterCache.invalidateInk(pageIndex, discardStale: true);
+      _exitSelectToolAfterAction();
     });
     if (coreInfo.isInfinite) {
       _trimInfiniteCanvasWhitespace(page);
@@ -1447,6 +1566,7 @@ class EditorState extends State<Editor>
   Tool? tmpTool;
 
   Tool? _lastPenTool;
+  Tool? _toolBeforeSelect;
   bool _autoSwitchBackToShapeTool = false;
 
   var stylusButtonPressed = false;
@@ -1462,6 +1582,10 @@ class EditorState extends State<Editor>
   void initState() {
     WidgetsBinding.instance.addObserver(this);
 
+    // Evita o memory leak/ghosting de seleções antigas ao entrar em uma nova nota
+    Select.currentSelect.unselect();
+    ShapeTool.currentShapeTool.cancel();
+
     _keepAliveController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
@@ -1474,6 +1598,8 @@ class EditorState extends State<Editor>
 
     _initAsync();
     _assignKeybindings();
+
+    stows.noteInvertInDarkModeOverrides.addListener(_onGlobalInvertChanged);
 
     NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
 
@@ -1491,7 +1617,14 @@ class EditorState extends State<Editor>
 
     try {
       final newTheme = Theme.of(context);
-      if (_cachedTheme != null && _cachedTheme!.brightness != newTheme.brightness) {
+      if (_cachedTheme != null &&
+          _cachedTheme!.brightness != newTheme.brightness) {
+        for (int i = 0; i < coreInfo.pages.length; i++) {
+          final page = coreInfo.pages[i];
+          page.strokePictureCache.invalidateAll(eagerRefill: true);
+          _pageRasterCache.invalidateInk(i, discardStale: true);
+          _pageRasterCache.invalidatePage(i, ink: true, bg: true);
+        }
         _pageRasterCache.invalidateForZoom();
         _bumpInteractionRepaint();
       }
@@ -1499,8 +1632,7 @@ class EditorState extends State<Editor>
       _cachedMediaQuery = MediaQuery.of(context);
       final view = View.maybeOf(context);
       if (view != null) {
-        _lastMetricsLogicalSize =
-            view.physicalSize / view.devicePixelRatio;
+        _lastMetricsLogicalSize = view.physicalSize / view.devicePixelRatio;
         DisplayInkFeel.instance.updateFromView(view);
       }
     } catch (e) {
@@ -1510,6 +1642,7 @@ class EditorState extends State<Editor>
 
   void _initAsync() async {
     coreInfo.filePath = await widget.initialPath;
+    _lastInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     filenameTextEditingController.text = coreInfo.fileName;
 
     if (needsNaming) {
@@ -1528,6 +1661,8 @@ class EditorState extends State<Editor>
     _mathSolver.init().then((_) {});
 
     await _initStrokes();
+
+    _checkForPdfLinks();
 
     if (widget.pdfPath != null) {
       importPdfFromFilePath(widget.pdfPath!)
@@ -1661,20 +1796,22 @@ class EditorState extends State<Editor>
     if (!mounted) return;
     final width = _currentViewportWidth();
     if (width < 10) {
-      Future.delayed(const Duration(milliseconds: 200), () => _scheduleSmoothScroll(targetPage));
+      Future.delayed(
+        const Duration(milliseconds: 200),
+        () => _scheduleSmoothScroll(targetPage),
+      );
       return;
     }
-    
+
     Future.delayed(const Duration(milliseconds: 400), () {
       if (!mounted) return;
       _animateScrollToPage(targetPage);
     });
   }
 
-
   void _animateScrollToPage(int targetPage) {
     if (!mounted || coreInfo.pages.isEmpty) return;
-    
+
     final safeTargetPage = targetPage.clamp(0, coreInfo.pages.length - 1);
     final screenWidth = _currentViewportWidth();
     final targetOffsets = _generatePageOffsets(coreInfo.pages, screenWidth);
@@ -1696,7 +1833,8 @@ class EditorState extends State<Editor>
 
     _isSmoothScrolling = true;
     _suppressTransformClamp.value = true;
-    InteractiveCanvasViewer.isAutoPanningEnabled = false; 
+    InteractiveCanvasViewer.isAutoPanningEnabled = false;
+    PageRasterCacheManager.updateViewportMoving(true);
 
     _smoothScrollController?.dispose();
     _smoothScrollController = AnimationController(
@@ -1705,10 +1843,18 @@ class EditorState extends State<Editor>
     );
 
     final startMatrix = currentMatrix.clone();
-    final endMatrix = startMatrix.clone()..setTranslationRaw(startMatrix.getTranslation().x, targetY, startMatrix.getTranslation().z);
+    final endMatrix = startMatrix.clone()
+      ..setTranslationRaw(
+        startMatrix.getTranslation().x,
+        targetY,
+        startMatrix.getTranslation().z,
+      );
 
     final anim = Matrix4Tween(begin: startMatrix, end: endMatrix).animate(
-      CurvedAnimation(parent: _smoothScrollController!, curve: Curves.easeInOutCubic),
+      CurvedAnimation(
+        parent: _smoothScrollController!,
+        curve: Curves.easeInOutCubic,
+      ),
     );
 
     anim.addListener(() {
@@ -1721,6 +1867,7 @@ class EditorState extends State<Editor>
         _isSmoothScrolling = false;
         _suppressTransformClamp.value = false;
         InteractiveCanvasViewer.isAutoPanningEnabled = true;
+        PageRasterCacheManager.updateViewportMoving(false);
         _maintainPageRasterBand(safeTargetPage, safeTargetPage);
         _lastCurrentPageIndex = safeTargetPage;
         setState(() {});
@@ -1731,10 +1878,10 @@ class EditorState extends State<Editor>
       final from = (safeTargetPage - 1).clamp(0, coreInfo.pages.length - 1);
       final to = (safeTargetPage + 1).clamp(0, coreInfo.pages.length - 1);
       for (var i = from; i <= to; i++) {
-         if (coreInfo.isLazyShellPage(i)) {
-           await coreInfo.hydratePageAtIndexAsync(i);
-           _wirePageImageCallbacks(i);
-         }
+        if (coreInfo.isLazyShellPage(i)) {
+          await coreInfo.hydratePageAtIndexAsync(i);
+          _wirePageImageCallbacks(i);
+        }
       }
     });
   }
@@ -2430,6 +2577,8 @@ class EditorState extends State<Editor>
     _releaseAreaEraserQueueAndSessions();
 
     setState(() {
+      _clearSelectionPreview();
+
       switch (item!.type) {
         case .draw:
           final affectedPageIndices = <int>{};
@@ -2727,6 +2876,8 @@ class EditorState extends State<Editor>
     _releaseAreaEraserQueueAndSessions();
 
     setState(() {
+      _clearSelectionPreview();
+
       switch (item.type) {
         case .draw:
           final affectedPageIndices = <int>{};
@@ -3295,7 +3446,8 @@ class EditorState extends State<Editor>
 
     _lastSeenPointerCountTimer?.cancel();
 
-    final isStylus = currentPointerKind == PointerDeviceKind.stylus ||
+    final isStylus =
+        currentPointerKind == PointerDeviceKind.stylus ||
         currentPointerKind == PointerDeviceKind.invertedStylus;
 
     if (isStylus || (currentPressure != null && currentPressure! > 0)) {
@@ -3313,7 +3465,10 @@ class EditorState extends State<Editor>
     }
 
     dragPageIndex = onWhichPageIsFocalPoint(details.focalPoint);
-    if (dragPageIndex == null || dragPageIndex! < 0 || dragPageIndex! >= coreInfo.pages.length) return false;
+    if (dragPageIndex == null ||
+        dragPageIndex! < 0 ||
+        dragPageIndex! >= coreInfo.pages.length)
+      return false;
 
     if (coreInfo.isLazyShellPage(dragPageIndex!)) {
       coreInfo.ensurePageHydrated(dragPageIndex!);
@@ -3353,20 +3508,37 @@ class EditorState extends State<Editor>
     }
 
     // --- INTERAÇÕES COM SELEÇÃO ATIVA ---
-    if (currentTool is Select && localPosition != null && select.doneSelecting && select.selectResult.pageIndex == dragPageIndex!) {
+    if (currentTool is Select &&
+        localPosition != null &&
+        select.doneSelecting &&
+        select.selectResult.pageIndex == dragPageIndex!) {
       final isCroppingThisSelection =
           _imageCropState != null &&
           select.selectResult.images.length == 1 &&
           identical(select.selectResult.images.first, _imageCropState!.image);
-      
+
       if (!isCroppingThisSelection) {
         final bounds = select.selectResult.getBounds();
         if (!bounds.isEmpty) {
           final currentScale = _quantizedCanvasScale;
 
-          if (_hitRotationHandle(localPosition, select.selectResult, currentScale) ||
-              _hitSelectionVertexIndex(localPosition, select.selectResult, currentScale) != null ||
-              _hitSelectionCornerIndex(localPosition, select.selectResult, currentScale) != null) {
+          if (_hitRotationHandle(
+                localPosition,
+                select.selectResult,
+                currentScale,
+              ) ||
+              _hitSelectionVertexIndex(
+                    localPosition,
+                    select.selectResult,
+                    currentScale,
+                  ) !=
+                  null ||
+              _hitSelectionCornerIndex(
+                    localPosition,
+                    select.selectResult,
+                    currentScale,
+                  ) !=
+                  null) {
             return true;
           }
 
@@ -3375,6 +3547,13 @@ class EditorState extends State<Editor>
           }
         }
       }
+    }
+
+    // Impede que o dedo inicie uma NOVA seleção com a Select Tool (permite apenas panning),
+    // mas a verificação ocorre APÓS validarmos se o usuário tocou em um manipulador (vértice, redimensionamento)
+    // ou no corpo da seleção atual.
+    if (currentTool is Select && !isStylus) {
+      return false;
     }
 
     // --- CANETA (STYLUS) SEMPRE DESENHA/SELECIONA ---
@@ -3389,7 +3568,8 @@ class EditorState extends State<Editor>
       for (final image in page.images.reversed) {
         if (image.contains(localPosition)) {
           if (image.locked) continue;
-          if (_imageCropState != null && identical(image, _imageCropState!.image)) {
+          if (_imageCropState != null &&
+              identical(image, _imageCropState!.image)) {
             return false;
           }
           return true;
@@ -3403,7 +3583,9 @@ class EditorState extends State<Editor>
     }
 
     // --- CASO CONTRÁRIO (DEDO COM OPÇÃO DESATIVADA), FAZ PANNING ---
-    log.fine('Non-stylus input rejected - panning instead of drawing/selecting');
+    log.fine(
+      'Non-stylus input rejected - panning instead of drawing/selecting',
+    );
     return false;
   }
 
@@ -3586,7 +3768,8 @@ class EditorState extends State<Editor>
       _scheduleAreaEraserBackgroundDrain();
     }
 
-    if (result.removed.isNotEmpty || result.added.isNotEmpty) {
+    // Force redraw even if removed/added is empty, because in-place point mutations might occur in area mode
+    if (isAreaMode || result.removed.isNotEmpty || result.added.isNotEmpty) {
       page.redrawStrokes();
       if (!isAreaMode) removeExcessPages();
     }
@@ -3600,6 +3783,8 @@ class EditorState extends State<Editor>
     InteractiveCanvasViewer.isAutoPanningEnabled = false;
 
     _toolbarKey.currentState?.hideAllCards();
+
+    _beginCanvasDrawSessionForThisNote();
 
     final page = coreInfo.pages[dragPageIndex!];
 
@@ -3680,11 +3865,7 @@ class EditorState extends State<Editor>
         } else {
           final currentScale = _quantizedCanvasScale;
 
-          if (_hitRotationHandle(
-                position,
-                select.selectResult,
-                currentScale,
-              )) {
+          if (_hitRotationHandle(position, select.selectResult, currentScale)) {
             _isRotating = true;
             _rotationStartPosition = position;
             _rotationStartAngle = select.selectResult.rotationDeg;
@@ -3707,6 +3888,8 @@ class EditorState extends State<Editor>
               _draggedTriangle = editableShape;
               _isScaling = false;
               _isRotating = false;
+              // Detaches the shape from the base layer to prevent ghosting during live edit
+              _beginSelectionPreview(select.selectResult);
               return;
             }
           }
@@ -3796,10 +3979,11 @@ class EditorState extends State<Editor>
           if (clickedImage != null) {
             select.selectResult = SelectResult(
               pageIndex: dragPageIndex!,
+              pageIndexStart: dragPageIndex!,
               strokes: [],
               images: [clickedImage],
               path: Path()..addRect(clickedImage.dstRect),
-              pageIndexStart: dragPageIndex!,
+              displayBounds: clickedImage.dstRect, // Adicionado displayBounds para consistência
               rotationDeg: clickedImage.rotationDeg,
             );
             select.doneSelecting = true;
@@ -3807,15 +3991,18 @@ class EditorState extends State<Editor>
             _isRotating = false;
             _isDraggingVertex = false;
             InteractiveCanvasViewer.isAutoPanningEnabled = true;
+            _markSelectSessionForThisNote();
             setState(() {});
             return;
           } else if (clickedStroke != null) {
+            final strokeBounds = clickedStroke.bounds; // Calcula o bounds da stroke tocada
             select.selectResult = SelectResult(
               pageIndex: dragPageIndex!,
+              pageIndexStart: dragPageIndex!,
               strokes: [clickedStroke].toList(growable: true),
               images: <EditorImage>[].toList(growable: true),
-              path: Path(),
-              pageIndexStart: dragPageIndex!,
+              path: Path()..addRect(strokeBounds), // Atribui o path corretamente
+              displayBounds: strokeBounds, // Atribui o bounds para a interface visual responder
               rotationDeg: clickedStroke.rotationDeg,
             );
             select.doneSelecting = true;
@@ -3823,6 +4010,7 @@ class EditorState extends State<Editor>
             _isRotating = false;
             _isDraggingVertex = false;
             InteractiveCanvasViewer.isAutoPanningEnabled = true;
+            _markSelectSessionForThisNote();
             setState(() {});
             return;
           } else {
@@ -3873,7 +4061,10 @@ class EditorState extends State<Editor>
 
     if (_ignoreDragForMenu) return;
 
-    if (dragPageIndex == null || dragPageIndex! < 0 || dragPageIndex! >= coreInfo.pages.length) return;
+    if (dragPageIndex == null ||
+        dragPageIndex! < 0 ||
+        dragPageIndex! >= coreInfo.pages.length)
+      return;
 
     final page = coreInfo.pages[dragPageIndex!];
 
@@ -4033,28 +4224,30 @@ class EditorState extends State<Editor>
             );
           }
 
-          final triangleIndex = page.strokes.indexOf(triangle);
-          if (triangleIndex >= 0) {
-            _markSelectionPageDirty(select.selectResult.pageIndex);
-            final newTriangle = ShapeStroke(
-              color: triangle.color,
-              pressureEnabled: triangle.pressureEnabled,
-              options: triangle.options,
-              pageIndex: triangle.pageIndex,
-              page: triangle.page,
-              toolId: triangle.toolId,
-              config: newConfig,
-              fill: triangle.fill,
-              fillColor: triangle.fillColor,
-              shapeVertices: newConfig.vertices,
-            );
-            page.strokes[triangleIndex] = newTriangle;
-            select.selectResult.strokes[0] = newTriangle;
-            select.selectResult.displayBounds = null;
-            _draggedTriangle = newTriangle;
-            newTriangle.markPolygonNeedsUpdating();
-            page.redrawStrokes();
-          }
+          _markSelectionPageDirty(select.selectResult.pageIndex);
+          final newTriangle = ShapeStroke(
+            color: triangle.color,
+            pressureEnabled: triangle.pressureEnabled,
+            options: triangle.options,
+            pageIndex: triangle.pageIndex,
+            page: triangle.page,
+            toolId: triangle.toolId,
+            config: newConfig,
+            fill: triangle.fill,
+            fillColor: triangle.fillColor,
+            shapeVertices: newConfig.vertices,
+          );
+          
+          // Apply changes directly to the detached preview selection
+          select.selectResult.strokes[0] = newTriangle;
+          select.selectResult.displayBounds = null;
+          _draggedTriangle = newTriangle;
+          newTriangle.markPolygonNeedsUpdating();
+
+          // Sync the selection box visually to the new bounds in real time
+          _selectionPreview = SelectionTransformPreview.fromSelection(select.selectResult);
+
+          page.redrawStrokes();
         } else if (_isScaling &&
             _scaleHandle != null &&
             _initialScaleRadius > 0) {
@@ -4369,6 +4562,7 @@ class EditorState extends State<Editor>
       eraserPosition = null;
       _eraserPositionRepaint.value = null;
       Eraser.isDragging = false;
+      _endCanvasDrawSession();
     }
 
     _selectionLongPressTimer?.cancel();
@@ -4378,7 +4572,9 @@ class EditorState extends State<Editor>
     Select.currentSelect.selectResult.clearAlignmentGuides();
     _activeRotationSnapAnchor = null;
 
-    if (dragPageIndex == null || dragPageIndex! < 0 || dragPageIndex! >= coreInfo.pages.length) {
+    if (dragPageIndex == null ||
+        dragPageIndex! < 0 ||
+        dragPageIndex! >= coreInfo.pages.length) {
       resetDrawSessionState();
       return;
     }
@@ -4536,6 +4732,7 @@ class EditorState extends State<Editor>
           );
 
           Select.currentSelect.selectResult.displayBounds = null;
+          _markSelectSessionForThisNote();
 
           shouldFitInfiniteCanvas = true;
         }
@@ -4618,23 +4815,25 @@ class EditorState extends State<Editor>
             return;
           }
           if (_isDraggingVertex &&
-              _draggedTriangle != null &&
-              _draggedVertexIndex != null) {
-            history.recordChange(
-              EditorHistoryItem(
-                type: .move,
-                pageIndex: dragPageIndex!,
-                strokes: [_draggedTriangle!],
-                images: [],
-                offset: .zero,
-              ),
-            );
+            _draggedTriangle != null &&
+            _draggedVertexIndex != null) {
+          history.recordChange(
+            EditorHistoryItem(
+              type: .move,
+              pageIndex: dragPageIndex!,
+              strokes: [_draggedTriangle!],
+              images: [],
+              offset: .zero,
+            ),
+          );
 
-            _isDraggingVertex = false;
-            _draggedVertexIndex = null;
-            _draggedTriangle = null;
-            shouldFitInfiniteCanvas = true;
-          } else if (_isScaling) {
+          _isDraggingVertex = false;
+          _draggedVertexIndex = null;
+          _draggedTriangle = null;
+          shouldFitInfiniteCanvas = true;
+          // Re-attach the shape back to the main base layer
+          _clearSelectionPreview();
+        } else if (_isScaling) {
             final centroid =
                 committedPreview?.pivot ??
                 select.selectResult.displayBounds?.center ??
@@ -4711,6 +4910,7 @@ class EditorState extends State<Editor>
             }
           } else {
             select.selectResult.displayBounds = select.selectResult.getBounds();
+            _markSelectSessionForThisNote();
           }
         }
       } else if (currentTool is LaserPointer) {
@@ -4745,7 +4945,11 @@ class EditorState extends State<Editor>
           dragPageIndex!,
           discardStale: discardStale,
         );
-        _maintainPageRasterBand(dragPageIndex!, dragPageIndex!, forceSchedule: true);
+        _maintainPageRasterBand(
+          dragPageIndex!,
+          dragPageIndex!,
+          forceSchedule: true,
+        );
       }
       autosaveAfterDelay();
     }
@@ -4886,7 +5090,7 @@ class EditorState extends State<Editor>
     return preview.visualBounds;
   }
 
-double _selectionRotationDegForInteractions(SelectResult selection) {
+  double _selectionRotationDegForInteractions(SelectResult selection) {
     final preview =
         _selectionPreview ?? SelectionTransformPreview.fromSelection(selection);
     return preview.effectiveRotationDeg;
@@ -4899,8 +5103,16 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
   ) {
     final rect = _selectionRectForInteractions(selection);
     final rot = _selectionRotationDegForInteractions(selection);
-    final unrotatedCenter = SelectionHandlesLayout.rotationHandleCenterUnrotated(rect, viewportScale);
-    final center = SelectionHandlesLayout.rotateAround(unrotatedCenter, rect.center, rot * math.pi / 180.0);
+    final unrotatedCenter =
+        SelectionHandlesLayout.rotationHandleCenterUnrotated(
+          rect,
+          viewportScale,
+        );
+    final center = SelectionHandlesLayout.rotateAround(
+      unrotatedCenter,
+      rect.center,
+      rot * math.pi / 180.0,
+    );
     return (pagePosition - center).distance <=
         SelectionHandlesLayout.rotationHandleHitRadius(viewportScale);
   }
@@ -4973,7 +5185,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     final preview = _selectionPreview;
     if (preview == null || currentTool is! Select) return null;
     final select = currentTool as Select;
-    if (!select.doneSelecting || select.selectResult.pageIndex != pageIndex) {
+    if (!select.doneSelecting ||
+        select.selectResult.pageIndex != pageIndex ||
+        !_ownsSelectSession) {
       return null;
     }
     return preview;
@@ -5150,6 +5364,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
   void onInteractionEnd(ScaleEndDetails details) {
     _canvasGestureActive = false;
+    _endCanvasDrawSession();
     _lastSeenPointerCountTimer?.cancel();
     _lastSeenPointerCountTimer = Timer(const Duration(milliseconds: 10), () {
       lastSeenPointerCount = 0;
@@ -6235,6 +6450,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           displayBounds: selectionBounds,
         );
         Select.currentSelect.doneSelecting = true;
+        _markSelectSessionForThisNote();
       });
 
       history.recordChange(
@@ -6647,488 +6863,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     _openLinkedNote(link);
   }
 
-  Future<void> _showTagsAndLinksDialog() async {
-    if (!mounted) return;
-    final tagInputController = TextEditingController();
-    final currentPage = coreInfo.pages[currentPageIndex];
-    final linksForPage = coreInfo.linksForPage(currentPage, currentPageIndex);
-
-    await showDialog<void>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setStateDialog) {
-          Future<void> addLink() async {
-            final candidates = await _loadLinkTargetCandidates();
-            if (!mounted) return;
-            _LinkTargetCandidate? selectedCandidate;
-            final pageController = TextEditingController(text: '1');
-            final labelController = TextEditingController();
-            final searchController = TextEditingController();
-            String search = '';
-
-            final created = await showDialog<bool>(
-              context: context,
-              barrierColor: Colors.black.withOpacity(0.4),
-              builder: (context) => StatefulBuilder(
-                builder: (context, setLocalState) => Dialog(
-                  backgroundColor: Colors.transparent,
-                  elevation: 0,
-                  insetPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 24,
-                  ),
-                  child: RuggedDialogShell(
-                    maxWidth: 500,
-                    child: Material(
-                      color: Colors.transparent,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          t.editor.addInternalLink,
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: -0.4,
-                              ),
-                        ),
-                        const SizedBox(height: 24),
-                        TextField(
-                          controller: searchController,
-                          onChanged: (value) {
-                            setLocalState(() {
-                              search = value.trim().toLowerCase();
-                            });
-                          },
-                          decoration: InputDecoration(
-                            labelText: 'Search note by name or tag',
-                            prefixIcon: const Icon(Icons.search),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          height: 180,
-                          child: Builder(
-                            builder: (context) {
-                              final filtered = candidates.where((candidate) {
-                                if (search.isEmpty) return true;
-                                final name = candidate.displayName
-                                    .toLowerCase();
-                                if (name.contains(search)) return true;
-                                return candidate.tags.any(
-                                  (tag) => tag.contains(search),
-                                );
-                              }).toList();
-                              if (filtered.isEmpty) {
-                                return Center(
-                                  child: Text(t.editor.noNotesMatchQuery),
-                                );
-                              }
-                              return ListView.separated(
-                                itemCount: filtered.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 8),
-                                itemBuilder: (context, index) {
-                                  final candidate = filtered[index];
-                                  final selected =
-                                      selectedCandidate?.path == candidate.path;
-                                  return ListTile(
-                                    dense: true,
-                                    selected: selected,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    selectedTileColor: Colors.grey.withOpacity(
-                                      0.2,
-                                    ),
-                                    title: Text(
-                                      candidate.displayName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    subtitle: candidate.tags.isEmpty
-                                        ? null
-                                        : Text(
-                                            candidate.tags.take(4).join(', '),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                    onTap: () {
-                                      setLocalState(() {
-                                        selectedCandidate = candidate;
-                                      });
-                                    },
-                                  );
-                                },
-                              );
-                            },
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: pageController,
-                          decoration: InputDecoration(
-                            labelText: 'Page or range (e.g. 1 or 1-5)',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: labelController,
-                          decoration: InputDecoration(
-                            labelText: 'Label (optional)',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.withOpacity(0.1),
-                          ),
-                        ),
-                        const SizedBox(height: 32),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            TextButton(
-                              style: TextButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 24,
-                                  vertical: 16,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              onPressed: () => Navigator.pop(context, false),
-                              child: const Text('Cancel'),
-                            ),
-                            const SizedBox(width: 12),
-                            FilledButton(
-                              style: FilledButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 24,
-                                  vertical: 16,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              onPressed: selectedCandidate == null
-                                  ? null
-                                  : () => Navigator.pop(context, true),
-                              child: const Text('Add'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              ),
-            );
-
-            if (created != true || selectedCandidate == null) {
-              searchController.dispose();
-              pageController.dispose();
-              labelController.dispose();
-              return;
-            }
-            final pageText = pageController.text.trim();
-            int pageStart = 1;
-            int? pageEnd;
-            if (pageText.contains('-')) {
-              final parts = pageText.split('-');
-              if (parts.length == 2) {
-                pageStart = int.tryParse(parts[0].trim()) ?? 1;
-                final endParsed = int.tryParse(parts[1].trim());
-                if (endParsed != null && endParsed >= pageStart) {
-                  pageEnd = endParsed;
-                }
-              }
-            } else {
-              pageStart = int.tryParse(pageText) ?? 1;
-            }
-            try {
-              final targetInfo = await EditorCoreInfo.loadFromFilePath(
-                selectedCandidate!.path,
-                readOnly: true,
-                onlyFirstPage: false,
-              );
-              final pageCount = targetInfo.pages.length;
-              if (pageCount <= 0) {
-                pageStart = 1;
-                pageEnd = null;
-              } else {
-                pageStart = pageStart.clamp(1, pageCount);
-                pageEnd = pageEnd != null
-                    ? pageEnd.clamp(pageStart, pageCount)
-                    : null;
-              }
-            } catch (_) {
-              pageStart = pageStart.clamp(1, 9999);
-              pageEnd = pageEnd != null ? pageEnd.clamp(pageStart, 9999) : null;
-            }
-            final currentPage = coreInfo.pages[currentPageIndex];
-            final link = NoteLink(
-              sourcePageId: currentPage.id,
-              sourcePageIndex: currentPageIndex,
-              targetPath: selectedCandidate!.path,
-              targetPageIndex: pageStart - 1,
-              targetPageIndexEnd: pageEnd != null ? pageEnd - 1 : null,
-              label: labelController.text.trim().isEmpty
-                  ? null
-                  : labelController.text.trim(),
-            );
-            coreInfo.links = [...coreInfo.links, link];
-            linksForPage.add(link);
-            autosaveAfterDelay();
-            setStateDialog(() {});
-            if (mounted) setState(() {});
-            try {
-              unawaited(
-                NoteLinksDatabase.instance.setLinksForPath(
-                  coreInfo.filePath,
-                  coreInfo.links,
-                  rootDirectory: FileManager.documentsDirectory,
-                ),
-              );
-            } catch (e) {
-              log.warning('Failed to update note links metadata: $e');
-            }
-            searchController.dispose();
-            pageController.dispose();
-            labelController.dispose();
-          }
-
-          return Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            insetPadding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 24,
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 620, maxHeight: 720),
-              child: DecoratedBox(
-                decoration: homeRuggedPanelDecoration(context),
-                child: Material(
-                  color: Colors.transparent,
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          t.editor.tagsAndLinks,
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.4,
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      Flexible(
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              TextField(
-                                controller: tagInputController,
-                                decoration: InputDecoration(
-                                  labelText: 'Add tag',
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  filled: true,
-                                  fillColor: Colors.grey.withOpacity(0.1),
-                                  suffixIcon: IconButton(
-                                    icon: const Icon(Icons.add),
-                                    onPressed: () {
-                                      final tag = tagInputController.text
-                                          .trim()
-                                          .toLowerCase();
-                                      if (tag.isEmpty) return;
-                                      final updated = {
-                                        ...coreInfo.tags,
-                                        tag,
-                                      }.toList()..sort();
-                                      coreInfo.tags = updated;
-                                      tagInputController.clear();
-                                      TagDatabase.instance.setTagsForPath(
-                                        coreInfo.filePath,
-                                        coreInfo.tags,
-                                      );
-                                      autosaveAfterDelay();
-                                      setStateDialog(() {});
-                                    },
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: [
-                                  for (final tag in coreInfo.tags)
-                                    Chip(
-                                      label: Text(tag),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      onDeleted: () {
-                                        coreInfo.tags = coreInfo.tags
-                                            .where((t) => t != tag)
-                                            .toList();
-                                        TagDatabase.instance.setTagsForPath(
-                                          coreInfo.filePath,
-                                          coreInfo.tags,
-                                        );
-                                        autosaveAfterDelay();
-                                        setStateDialog(() {});
-                                      },
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 32),
-                              Row(
-                                children: [
-                                  const Expanded(
-                                    child: Text(
-                                      'Page links',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 16,
-                                      ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    onPressed: addLink,
-                                    icon: const Icon(Icons.add_link),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              if (linksForPage.isEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 8.0,
-                                  ),
-                                  child: Text(
-                                    t.editor.noLinksOnPage,
-                                    style: TextStyle(
-                                      color: Colors.grey.shade600,
-                                    ),
-                                  ),
-                                )
-                              else
-                                ...linksForPage.map(
-                                  (link) => ListTile(
-                                    dense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 4,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    leading: const Icon(Icons.link),
-                                    title: Text(
-                                      link.label ??
-                                          (link.targetPath.isEmpty
-                                              ? 'Current Note'
-                                              : link.targetPath
-                                                    .split('/')
-                                                    .last),
-                                    ),
-                                    subtitle: Text(
-                                      link.isRange
-                                          ? '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (pages ${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1})'
-                                          : '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (page ${link.targetPageIndex + 1})',
-                                    ),
-                                    onTap: () {
-                                      if (link.targetPath.isEmpty) {
-                                        Navigator.pop(
-                                          context,
-                                        ); // Close the dialog
-                                        _onGoToLocation(link.targetPageIndex);
-                                      } else {
-                                        Navigator.pop(context);
-                                        _openLinkedNote(link);
-                                      }
-                                    },
-                                    trailing: IconButton(
-                                      icon: const Icon(Icons.delete_outline),
-                                      onPressed: () {
-                                        coreInfo.links = coreInfo.links
-                                            .where((item) => item != link)
-                                            .toList();
-                                        linksForPage.remove(link);
-                                        autosaveAfterDelay();
-                                        setStateDialog(() {});
-                                        if (mounted) setState(() {});
-                                        try {
-                                          unawaited(
-                                            NoteLinksDatabase.instance
-                                                .setLinksForPath(
-                                                  coreInfo.filePath,
-                                                  coreInfo.links,
-                                                  rootDirectory: FileManager
-                                                      .documentsDirectory,
-                                                ),
-                                          );
-                                        } catch (e) {
-                                          log.warning(
-                                            'Failed to update note links metadata: $e',
-                                          );
-                                        }
-                                      },
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton(
-                            style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 24,
-                                vertical: 16,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('Close'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          );
-        },
-      ),
-    );
-    tagInputController.dispose();
+  // Opens the sidebar settings so the user can select the Tags & Links menu
+  void _showTagsAndLinksDialog() {
+    _toggleDockedSidePanel(_EditorDockedSidePanel.settings);
   }
 
   Future<void> _insertImageBytes(
@@ -7173,11 +6910,10 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
   Future<List<_PhotoInfo>> _pickPhotosWithFilePicker() async {
     VaultAdapter.preventLock = true;
-    final FilePickerResult? result;
+    List<PlatformFile>? filesResult;
     try {
-      result = await FilePicker.platform.pickFiles(
+      filesResult = await FilePicker.pickFiles(
         type: FileType.custom,
-
         allowedExtensions: [
           'jpg',
           'jpeg',
@@ -7200,19 +6936,24 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       VaultAdapter.preventLock = false;
     }
 
-    if (result == null) return const [];
+    if (filesResult == null) return const [];
 
-    return [
-      for (final PlatformFile file in result.files)
-        if (file.bytes != null && file.extension != null)
-          (
-            bytes: file.bytes!,
+    final photoInfos = <_PhotoInfo>[];
+    for (final PlatformFile file in filesResult) {
+      if (file.extension != null) {
+        Uint8List? bytes = await file.xFile.readAsBytes();
+        if (bytes != null) {
+          photoInfos.add((
+            bytes: bytes,
             extension: '.${file.extension!}',
-            path: file.path!,
+            path: file.path ?? '',
             fileInfo: null,
             invertible: false,
-          ),
-    ];
+          ));
+        }
+      }
+    }
+    return photoInfos;
   }
 
   Future<bool> importPdf() async {
@@ -7220,9 +6961,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     if (!Editor.canRasterPdf) return false;
 
     VaultAdapter.preventLock = true;
-    final FilePickerResult? result;
+    List<PlatformFile>? filesResult;
     try {
-      result = await FilePicker.platform.pickFiles(
+      filesResult = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
         allowMultiple: false,
@@ -7232,9 +6973,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       VaultAdapter.preventLock = false;
     }
 
-    if (result == null) return false;
+    if (filesResult == null || filesResult.isEmpty) return false;
 
-    final PlatformFile file = result.files.single;
+    final PlatformFile file = filesResult.single;
     final path = file.path!;
 
     if (coreInfo.isInfinite) {
@@ -7266,7 +7007,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     if (!mounted) return false;
     if (pdfDocument.pages.isEmpty) return false;
 
-    final invert = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
+    final invert =
+        stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     final selected = await PdfPagePickerDialog.show(
       context,
       pdfDocument: pdfDocument,
@@ -7363,6 +7105,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
     _fitInfiniteCanvasToContent(page);
     if (mounted) setState(() {});
+    _checkForPdfLinks();
     currentTool = Select.currentSelect;
     autosaveAfterDelay();
     return true;
@@ -7485,6 +7228,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
     coreInfo.pages.add(emptyPage);
     if (mounted) setState(() {});
+    _checkForPdfLinks();
 
     if (mounted) {
       try {
@@ -7774,6 +7518,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               Select.currentSelect.selectResult = newSelectResult;
               Select.currentSelect.doneSelecting = true;
               currentTool = Select.currentSelect;
+              _markSelectSessionForThisNote();
             });
             if (coreInfo.isInfinite) {
               _fitInfiniteCanvasToContent(page);
@@ -8068,6 +7813,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
         );
         select.doneSelecting = true;
         tempSelection = true;
+        _markSelectSessionForThisNote();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) setState(() {});
         });
@@ -8088,8 +7834,16 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           final size = MediaQuery.sizeOf(context);
           final scheme = Theme.of(context).colorScheme;
 
-          Widget buildQuickAction(IconData icon, String label, String value, {bool isDestructive = false, bool isPrimary = false}) {
-            final color = isDestructive ? scheme.error : (isPrimary ? scheme.primary : scheme.onSurface);
+          Widget buildQuickAction(
+            IconData icon,
+            String label,
+            String value, {
+            bool isDestructive = false,
+            bool isPrimary = false,
+          }) {
+            final color = isDestructive
+                ? scheme.error
+                : (isPrimary ? scheme.primary : scheme.onSurface);
             return Expanded(
               child: InkWell(
                 borderRadius: BorderRadius.circular(12),
@@ -8101,7 +7855,14 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                     children: [
                       Icon(icon, color: color, size: 22),
                       const SizedBox(height: 6),
-                      Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: color)),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: color,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -8113,12 +7874,24 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
             return InkWell(
               onTap: () => Navigator.pop(context, value),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 14,
+                ),
                 child: Row(
                   children: [
                     Icon(icon, size: 22, color: scheme.onSurfaceVariant),
                     const SizedBox(width: 16),
-                    Expanded(child: Text(label, style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w500, color: scheme.onSurface))),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w500,
+                          color: scheme.onSurface,
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -8130,12 +7903,16 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           if (hasSelection) {
             if (select.selectResult.strokes.isNotEmpty) {
               listCount += 4;
-              if (select.selectResult.strokes.any((s) => s.canConvertStrokeType)) listCount += 1;
+              if (select.selectResult.strokes.any(
+                (s) => s.canConvertStrokeType,
+              ))
+                listCount += 1;
               listCount += 1; // Share SVG
             }
             if (select.selectResult.images.isNotEmpty) {
               listCount += 2; // Lock + Share
-              if (select.selectResult.images.length == 1 && select.selectResult.strokes.isEmpty) {
+              if (select.selectResult.images.length == 1 &&
+                  select.selectResult.strokes.isEmpty) {
                 final image = select.selectResult.images.first;
                 if (image is PngEditorImage) listCount += 1; // Crop
                 listCount += 1; // background
@@ -8144,8 +7921,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
             }
           }
 
-          final double estHeight = 84 + (hasSelection ? 17 : 0) + (listCount * 50) + 16;
-          
+          final double estHeight =
+              84 + (hasSelection ? 17 : 0) + (listCount * 50) + 16;
+
           double left = globalPos.dx;
           double top = globalPos.dy;
 
@@ -8169,7 +7947,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                     decoration: BoxDecoration(
                       color: scheme.surfaceContainerHigh,
                       borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+                      border: Border.all(
+                        color: scheme.outlineVariant.withValues(alpha: 0.3),
+                      ),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withValues(alpha: 0.15),
@@ -8188,48 +7968,139 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
                               if (hasSelection) ...[
-                                buildQuickAction(Icons.copy_rounded, t.editor.selectionBar.copy, 'copy'),
-                                buildQuickAction(Icons.cut_rounded, t.editor.selectionBar.cut, 'cut'),
-                                buildQuickAction(Icons.control_point_duplicate_rounded, t.editor.selectionBar.duplicate, 'duplicate'),
+                                buildQuickAction(
+                                  Icons.copy_rounded,
+                                  t.editor.selectionBar.copy,
+                                  'copy',
+                                ),
+                                buildQuickAction(
+                                  Icons.cut_rounded,
+                                  t.editor.selectionBar.cut,
+                                  'cut',
+                                ),
+                                buildQuickAction(
+                                  Icons.control_point_duplicate_rounded,
+                                  t.editor.selectionBar.duplicate,
+                                  'duplicate',
+                                ),
                               ],
-                              buildQuickAction(Icons.paste_rounded, t.editor.selectionBar.paste, 'paste', isPrimary: !hasSelection),
+                              buildQuickAction(
+                                Icons.paste_rounded,
+                                t.editor.selectionBar.paste,
+                                'paste',
+                                isPrimary: !hasSelection,
+                              ),
                               if (hasSelection)
-                                buildQuickAction(Icons.delete_outline_rounded, t.editor.selectionBar.delete, 'delete', isDestructive: true),
+                                buildQuickAction(
+                                  Icons.delete_outline_rounded,
+                                  t.editor.selectionBar.delete,
+                                  'delete',
+                                  isDestructive: true,
+                                ),
                             ],
                           ),
                         ),
                         if (hasSelection && listCount > 0)
-                          Divider(height: 1, color: scheme.outlineVariant.withValues(alpha: 0.3)),
+                          Divider(
+                            height: 1,
+                            color: scheme.outlineVariant.withValues(alpha: 0.3),
+                          ),
                         // Full Actions List
                         if (hasSelection && listCount > 0)
                           Flexible(
                             child: SingleChildScrollView(
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    if (select.selectResult.strokes.isNotEmpty) ...[
-                                      buildListItem(Icons.text_fields_rounded, 'Convert Handwriting to Text', 'to_text'),
-                                      buildListItem(Icons.functions_rounded, 'Convert to Math (LaTeX)', 'selection_to_latex'),
-                                      buildListItem(Icons.calculate_outlined, 'Solve Math Equation', 'calculate'),
-                                      buildListItem(Icons.palette_outlined, t.editor.selectionBar.changeColor, 'change_color'),
-                                      if (select.selectResult.strokes.any((s) => s.canConvertStrokeType))
-                                        buildListItem(Icons.gesture_rounded, 'Change Pen Style', 'change_stroke_type'),
-                                      buildListItem(Icons.share_rounded, t.editor.selectionBar.shareAsSvg, 'share_as_svg'),
+                                    if (select
+                                        .selectResult
+                                        .strokes
+                                        .isNotEmpty) ...[
+                                      buildListItem(
+                                        Icons.text_fields_rounded,
+                                        'Convert Handwriting to Text',
+                                        'to_text',
+                                      ),
+                                      buildListItem(
+                                        Icons.functions_rounded,
+                                        'Convert to Math (LaTeX)',
+                                        'selection_to_latex',
+                                      ),
+                                      buildListItem(
+                                        Icons.calculate_outlined,
+                                        'Solve Math Equation',
+                                        'calculate',
+                                      ),
+                                      buildListItem(
+                                        Icons.palette_outlined,
+                                        t.editor.selectionBar.changeColor,
+                                        'change_color',
+                                      ),
+                                      if (select.selectResult.strokes.any(
+                                        (s) => s.canConvertStrokeType,
+                                      ))
+                                        buildListItem(
+                                          Icons.gesture_rounded,
+                                          'Change Pen Style',
+                                          'change_stroke_type',
+                                        ),
+                                      buildListItem(
+                                        Icons.share_rounded,
+                                        t.editor.selectionBar.shareAsSvg,
+                                        'share_as_svg',
+                                      ),
                                     ],
-                                    if (select.selectResult.images.isNotEmpty) ...[
-                                      if (select.selectResult.images.any((img) => !img.locked))
-                                        buildListItem(Icons.lock_outline_rounded, 'Lock Image', 'lock')
+                                    if (select
+                                        .selectResult
+                                        .images
+                                        .isNotEmpty) ...[
+                                      if (select.selectResult.images.any(
+                                        (img) => !img.locked,
+                                      ))
+                                        buildListItem(
+                                          Icons.lock_outline_rounded,
+                                          'Lock Image',
+                                          'lock',
+                                        )
                                       else
-                                        buildListItem(Icons.lock_open_rounded, 'Unlock Image', 'unlock'),
-                                      if (select.selectResult.images.length == 1 && select.selectResult.strokes.isEmpty) ...[
-                                        if (select.selectResult.images.first is PngEditorImage)
-                                          buildListItem(Icons.crop_rounded, 'Crop image', 'crop_image'),
-                                        buildListItem(Icons.wallpaper_rounded, 'Set as background', 'set_background'),
+                                        buildListItem(
+                                          Icons.lock_open_rounded,
+                                          'Unlock Image',
+                                          'unlock',
+                                        ),
+                                      if (select.selectResult.images.length ==
+                                              1 &&
+                                          select
+                                              .selectResult
+                                              .strokes
+                                              .isEmpty) ...[
+                                        if (select.selectResult.images.first
+                                            is PngEditorImage)
+                                          buildListItem(
+                                            Icons.crop_rounded,
+                                            'Crop image',
+                                            'crop_image',
+                                          ),
+                                        buildListItem(
+                                          Icons.wallpaper_rounded,
+                                          'Set as background',
+                                          'set_background',
+                                        ),
                                       ],
-                                      buildListItem(Icons.invert_colors_rounded, t.editor.imageOptions.invertible, 'invert'),
-                                      buildListItem(Icons.share_rounded, t.editor.selectionBar.share, 'share'),
+                                      buildListItem(
+                                        Icons.invert_colors_rounded,
+                                        t.editor.imageOptions.invertible,
+                                        'invert',
+                                      ),
+                                      buildListItem(
+                                        Icons.share_rounded,
+                                        t.editor.selectionBar.share,
+                                        'share',
+                                      ),
                                     ],
                                   ],
                                 ),
@@ -8245,7 +8116,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           );
         },
         transitionBuilder: (context, animation, secondaryAnimation, child) {
-          final flipY = (globalPos.dy + 150) > MediaQuery.sizeOf(context).height - 16;
+          final flipY =
+              (globalPos.dy + 150) > MediaQuery.sizeOf(context).height - 16;
           return CanvasContextMenuFeel.buildOpenTransition(
             animation: animation,
             alignment: flipY ? Alignment.bottomLeft : Alignment.topLeft,
@@ -8298,6 +8170,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
     if (menuSelected == null && tempSelection) {
       setState(() {
+        _clearSelectionPreview();
         Select.currentSelect.unselect();
       });
     }
@@ -8553,7 +8426,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
         tooltip: _noteLinkBackStack.length == 1
             ? 'Back to previous note'
             : 'Back (${_noteLinkBackStack.length})',
-        onPressed: _noteLinkNavBusy ? null : () => unawaited(_popNoteLinkHistory()),
+        onPressed: _noteLinkNavBusy
+            ? null
+            : () => unawaited(_popNoteLinkHistory()),
       ),
     ];
   }
@@ -8572,12 +8447,14 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
     final actions = <Widget>[
       ..._buildNoteLinkBackActions(),
-      
+
       if (!coreInfo.isInfinite)
         PopupMenuButton<String>(
           icon: const Icon(Icons.add_outlined),
           tooltip: "Insert page",
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
           offset: const Offset(0, 48),
           onSelected: (value) {
             final currentIdx = currentPageIndex;
@@ -8585,14 +8462,20 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               insertPageBefore(currentIdx);
               CanvasGestureDetector.scrollToPage(
                 pageIndex: currentIdx,
-                pageOffsets: _generatePageOffsets(coreInfo.pages, _currentViewportWidth()),
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
                 transformationController: _transformationController,
               );
             } else if (value == 'below') {
               insertPageAfter(currentIdx);
               CanvasGestureDetector.scrollToPage(
                 pageIndex: currentIdx + 1,
-                pageOffsets: _generatePageOffsets(coreInfo.pages, _currentViewportWidth()),
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
                 transformationController: _transformationController,
               );
             }
@@ -8602,7 +8485,10 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               value: 'above',
               child: Row(
                 children: [
-                  Icon(CupertinoIcons.arrow_up_circle, color: colorScheme.onSurface),
+                  Icon(
+                    CupertinoIcons.arrow_up_circle,
+                    color: colorScheme.onSurface,
+                  ),
                   const SizedBox(width: 12),
                   const Text('Page above'),
                 ],
@@ -8612,7 +8498,10 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               value: 'below',
               child: Row(
                 children: [
-                  Icon(CupertinoIcons.arrow_down_circle, color: colorScheme.onSurface),
+                  Icon(
+                    CupertinoIcons.arrow_down_circle,
+                    color: colorScheme.onSurface,
+                  ),
                   const SizedBox(width: 12),
                   const Text('Page below'),
                 ],
@@ -8624,7 +8513,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       // Botão Pages na AppBar visível APENAS no modo Split View (embedded == true)
       if (!coreInfo.isInfinite && widget.embedded)
         IconButton(
-          icon: const Icon(Icons.article_outlined), 
+          icon: const Icon(Icons.article_outlined),
           tooltip: 'Pages',
           isSelected: _dockedSidePanel == _EditorDockedSidePanel.pages,
           onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
@@ -8634,7 +8523,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
         icon: const Icon(Icons.more_vert_rounded),
         tooltip: t.home.tabs.settings,
         isSelected: _dockedSidePanel == _EditorDockedSidePanel.settings,
-        onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.settings),
+        onPressed: () =>
+            _toggleDockedSidePanel(_EditorDockedSidePanel.settings),
       ),
     ];
 
@@ -8643,7 +8533,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     }
 
     return AppBar(
-      primary: true,
+      primary: false,
       backgroundColor: isDark ? const Color(0xFF1E1E1E) : colorScheme.surface,
       elevation: 0,
       scrolledUnderElevation: 0,
@@ -8651,9 +8541,11 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       centerTitle: true,
       leading: IconButton(
         icon: const Icon(Icons.arrow_back),
-        onPressed: onBackOverride ?? () {
-          if (mounted) _goToHome(this.context);
-        },
+        onPressed:
+            onBackOverride ??
+            () {
+              if (mounted) _goToHome(this.context);
+            },
       ),
       titleSpacing: 0,
       title: Column(
@@ -8710,7 +8602,11 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               return Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(statusIcon, size: 12, color: colorScheme.onSurfaceVariant),
+                  Icon(
+                    statusIcon,
+                    size: 12,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                   const SizedBox(width: 4),
                   Text(
                     statusText,
@@ -8748,8 +8644,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     if (isToolbarVertical) {
       return Row(
         textDirection: stows.editorToolbarAlignment.value == AxisDirection.left
-            ? TextDirection.ltr
-            : TextDirection.rtl,
+            ? ui.TextDirection.ltr
+            : ui.TextDirection.rtl,
         children: [
           toolbar,
           Expanded(
@@ -8798,6 +8694,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       collapsed: false,
       maintainState: true,
       child: SafeArea(
+        top: false,
         bottom: stows.editorToolbarAlignment.value != AxisDirection.up,
         child: EnhancedToolbar(
           key: _toolbarKey,
@@ -8810,6 +8707,11 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                 }
               } else if (tool is Select && currentTool is Pen) {
                 _lastPenTool = currentTool;
+              }
+
+              // Re-entering the lasso must always start from an empty selection.
+              if (tool is Select && currentTool is! Select) {
+                _resetSelectToolState();
               }
 
               currentTool = tool;
@@ -9091,7 +8993,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               }
 
               final select = Select.currentSelect;
-              if (select.doneSelecting && !select.selectResult.isEmpty) {
+              if (select.doneSelecting &&
+                  !select.selectResult.isEmpty &&
+                  _ownsSelectSession) {
                 final pageIndex = dragPageIndex ?? currentPageIndex;
                 if (select.selectResult.pageIndex == pageIndex) {
                   final page = coreInfo.pages[pageIndex];
@@ -9101,7 +9005,14 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                     if (select.selectResult.contains(localPos)) {
                       return;
                     } else {
-                      Select.currentSelect.unselect();
+                      // Tapping outside the selection ends the lasso session and
+                      // returns to the previously active tool.
+                      if (currentTool is Select) {
+                        _exitSelectToolAfterAction();
+                      } else {
+                        _clearSelectionPreview();
+                        Select.currentSelect.unselect();
+                      }
                       setState(() {});
                       if (currentTool is Select ||
                           currentTool is LaserPointer ||
@@ -9229,7 +9140,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                   onGoToLocation: _onGoToLocation,
                   maxWidth: maxWidth,
                   invert: Theme.of(context).brightness == Brightness.dark
-                      ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+                      ? (stows.noteInvertInDarkModeOverrides.value[coreInfo
+                                .filePath] ==
+                            1)
                       : false,
                 );
               },
@@ -9310,77 +9223,109 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
             );
           },
           child: widget.embedded
-                  ? body
-                  : Builder(
-                      builder: (context) {
+              ? body
+              : Builder(
+                  builder: (context) {
                     return Hero(
-                      tag: widget.path != null ? 'note_hero_${widget.path}' : 'note_hero_new_note',
-                      flightShuttleBuilder: (flightContext, animation, flightDirection, fromHeroContext, toHeroContext) {
-                        final size = MediaQuery.sizeOf(flightContext);
-                        final isPush = flightDirection == HeroFlightDirection.push;
-                        final cardWidget = isPush ? fromHeroContext.widget : toHeroContext.widget;
-                        final editorWidget = isPush ? toHeroContext.widget : fromHeroContext.widget;
-                        final cardSize = isPush ? fromHeroContext.size : toHeroContext.size;
+                      tag: widget.path != null
+                          ? 'note_hero_${widget.path}'
+                          : 'note_hero_new_note',
+                      flightShuttleBuilder:
+                          (
+                            flightContext,
+                            animation,
+                            flightDirection,
+                            fromHeroContext,
+                            toHeroContext,
+                          ) {
+                            final size = MediaQuery.sizeOf(flightContext);
+                            final isPush =
+                                flightDirection == HeroFlightDirection.push;
+                            final cardWidget = isPush
+                                ? fromHeroContext.widget
+                                : toHeroContext.widget;
+                            final editorWidget = isPush
+                                ? toHeroContext.widget
+                                : fromHeroContext.widget;
+                            final cardSize = isPush
+                                ? fromHeroContext.size
+                                : toHeroContext.size;
 
-                        return AnimatedBuilder(
-                          animation: animation,
-                          builder: (context, child) {
-                            return Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                Opacity(
-                                  opacity: (1.0 - animation.value).clamp(0.0, 1.0),
-                                  child: FittedBox(
-                                    fit: BoxFit.cover,
-                                    alignment: Alignment.topCenter,
-                                    child: SizedBox(
-                                      width: cardSize?.width,
-                                      height: cardSize?.height,
-                                      child: cardWidget,
+                            return AnimatedBuilder(
+                              animation: animation,
+                              builder: (context, child) {
+                                return Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    Opacity(
+                                      opacity: (1.0 - animation.value).clamp(
+                                        0.0,
+                                        1.0,
+                                      ),
+                                      child: FittedBox(
+                                        fit: BoxFit.cover,
+                                        alignment: Alignment.topCenter,
+                                        child: SizedBox(
+                                          width: cardSize?.width,
+                                          height: cardSize?.height,
+                                          child: cardWidget,
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                ),
-                                Opacity(
-                                  opacity: animation.value.clamp(0.0, 1.0),
-                                  child: ClipRect(
-                                    child: OverflowBox(
-                                      alignment: Alignment.topCenter,
-                                      minWidth: size.width,
-                                      minHeight: size.height,
-                                      maxWidth: size.width,
-                                      maxHeight: size.height,
-                                      child: editorWidget,
+                                    Opacity(
+                                      opacity: animation.value.clamp(0.0, 1.0),
+                                      child: ClipRect(
+                                        child: OverflowBox(
+                                          alignment: Alignment.topCenter,
+                                          minWidth: size.width,
+                                          minHeight: size.height,
+                                          maxWidth: size.width,
+                                          maxHeight: size.height,
+                                          child: editorWidget,
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                ),
-                              ],
+                                  ],
+                                );
+                              },
                             );
                           },
-                        );
-                      },
                       child: Scaffold(
                         backgroundColor:
                             Theme.of(context).brightness == Brightness.dark
                             ? const Color(0xFF1E1E1E)
-                            : Theme.of(
-                                context,
-                              ).colorScheme.surfaceContainerLow,
+                            : Theme.of(context).colorScheme.surfaceContainerLow,
                         resizeToAvoidBottomInset: false,
                         // Oculta o FAB se o painel de Pages estiver aberto OU se for tela infinita OU se estiver no SplitView (embedded)
-                        floatingActionButton: ((_dockedSidePanel != _EditorDockedSidePanel.pages) && !coreInfo.isInfinite && !widget.embedded)
+                        floatingActionButton:
+                            ((_dockedSidePanel !=
+                                    _EditorDockedSidePanel.pages) &&
+                                !coreInfo.isInfinite &&
+                                !widget.embedded)
                             ? FloatingActionButton.extended(
                                 elevation: 4,
-                                backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-                                foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
-                                onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
+                                backgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.secondaryContainer,
+                                foregroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSecondaryContainer,
+                                onPressed: () => _toggleDockedSidePanel(
+                                  _EditorDockedSidePanel.pages,
+                                ),
                                 icon: const Icon(Icons.article_outlined),
                                 label: const Text('Pages'),
                               )
                             : null,
-                        floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
+                        floatingActionButtonLocation:
+                            FloatingActionButtonLocation.startFloat,
                         // AppBar só é oculta quando a ABA PAGES está aberta. Settings e Split View a mantêm visível!
-                        appBar: (_dockedSidePanel == _EditorDockedSidePanel.pages) ? null : _buildEditorAppBar(context),
+                        appBar:
+                            (_dockedSidePanel == _EditorDockedSidePanel.pages)
+                            ? null
+                            : _buildEditorAppBar(context),
                         body: body,
+                        primary: false,
                       ),
                     );
                   },
@@ -9399,9 +9344,9 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
 
   Future<void> _setCustomThumbnail() async {
     VaultAdapter.preventLock = true;
-    FilePickerResult? result;
+    List<PlatformFile>? filesResult;
     try {
-      result = await FilePicker.platform.pickFiles(
+      filesResult = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp'],
         withData: true,
@@ -9410,13 +9355,15 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       VaultAdapter.preventLock = false;
     }
 
-    if (result == null || result.files.isEmpty) return;
+    if (filesResult == null || filesResult.isEmpty) return;
 
-    Uint8List? bytes = result.files.first.bytes;
-    if (bytes == null && result.files.first.path != null) {
-      bytes = await File(result.files.first.path!).readAsBytes();
+    final file = filesResult.first;
+    Uint8List? bytes;
+    if (file.path != null) {
+      bytes = await File(file.path!).readAsBytes();
     }
-    if (bytes == null) return;
+    bytes ??= await file.xFile.readAsBytes();
+    if (bytes.isEmpty) return;
 
     if (!mounted) return;
 
@@ -9449,15 +9396,20 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
   Future<void> _deleteNote() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => GlassmorphicConfirmDialog(
-        title: t.editor.selectionBar.delete,
-        subtitle:
-            'Are you sure you want to delete this note? This action cannot be undone.',
-        confirmText: t.common.delete,
-        cancelText: t.common.cancel,
-        isDestructive: true,
-        onCancel: () => Navigator.pop(context, false),
-        onConfirm: () => Navigator.pop(context, true),
+      builder: (context) => AdaptiveAlertDialog(
+        title: Text(t.editor.selectionBar.delete),
+        content: const Text('Are you sure you want to delete this note? This action cannot be undone.'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(t.common.cancel),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(t.common.delete),
+          ),
+        ],
       ),
     );
 
@@ -9507,37 +9459,55 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     page.redrawStrokes();
   }
 
+  void _onGlobalInvertChanged() {
+    if (!mounted) return;
+    final currentInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
+    if (currentInvertBool != _lastInvertBool) {
+      _lastInvertBool = currentInvertBool;
+
+      setState(() {
+        for (int i = 0; i < coreInfo.pages.length; i++) {
+          final page = coreInfo.pages[i];
+          
+          if (page.backgroundImage != null) {
+            page.backgroundImage!.invertible = currentInvertBool;
+          }
+          for (final image in page.images) {
+            image.invertible = currentInvertBool;
+          }
+          
+          _forceRefreshPageStrokes(page);
+          page.strokePictureCache.invalidateAll(eagerRefill: true);
+          _pageRasterCache.invalidateInk(i, discardStale: true);
+          _pageRasterCache.invalidatePage(i, ink: true, bg: true);
+        }
+
+        _pageRasterCache.invalidateForZoom();
+        
+        final center = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
+        final radius = 2;
+        final bandStart = (center - radius).clamp(0, coreInfo.pages.length - 1);
+        final bandEnd = (center + radius).clamp(0, coreInfo.pages.length - 1);
+        _maintainPageRasterBand(
+          bandStart,
+          bandEnd,
+          forceSchedule: true,
+          scale: _quantizedCanvasScale,
+        );
+
+        _bumpInteractionRepaint();
+      });
+      autosaveAfterDelay();
+    }
+  }
+
   void _toggleGlobalBackgroundInversion(bool invert) {
     // Update the stows override so the setting persists across canvas interactions
-    final currentOverrides = Map<String, int>.from(stows.noteInvertInDarkModeOverrides.value);
+    final currentOverrides = Map<String, int>.from(
+      stows.noteInvertInDarkModeOverrides.value,
+    );
     currentOverrides[coreInfo.filePath] = invert ? 1 : 0;
     stows.noteInvertInDarkModeOverrides.value = currentOverrides;
-
-    setState(() {
-      for (int i = 0; i < coreInfo.pages.length; i++) {
-        final page = coreInfo.pages[i];
-        if (page.backgroundImage != null) {
-          page.backgroundImage!.invertible = invert;
-          page.backgroundImage!.onMiscChange?.call();
-        }
-        _forceRefreshPageStrokes(page);
-        _pageRasterCache.invalidatePage(i);
-      }
-      
-      final center = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
-      final radius = 2;
-      final bandStart = (center - radius).clamp(0, coreInfo.pages.length - 1);
-      final bandEnd = (center + radius).clamp(0, coreInfo.pages.length - 1);
-      _maintainPageRasterBand(
-        bandStart,
-        bandEnd,
-        forceSchedule: true,
-        scale: _quantizedCanvasScale,
-      );
-      
-      _bumpInteractionRepaint();
-    });
-    autosaveAfterDelay();
   }
 
   Widget bottomSheet(BuildContext context) {
@@ -9587,6 +9557,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       coreInfo: coreInfo,
       currentPageIndex: currentPageIndex,
       invert: invert,
+      hasPdfLinks: _hasPdfLinks,
+      showPdfLinkBoxes: _showPdfLinkBoxes,
       onClose: _closeDockedSidePanel,
       onOpenSplitView: widget.onOpenSplitView ?? _openSplitView,
       onCloseSplitView: widget.onCloseSplitView,
@@ -9750,6 +9722,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           path: Path()..addRect(floatImg.dstRect),
         );
         Select.currentSelect.doneSelecting = true;
+        _markSelectSessionForThisNote();
 
         _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
@@ -9955,7 +9928,13 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           : () async {
               await _exportNoteHandwritingToLatex();
             },
-      onManageTagsAndLinks: _showTagsAndLinksDialog,
+      onGoToLocation: _onGoToLocation,
+      onOpenLinkedNote: _openLinkedNote,
+      onLoadLinkTargetCandidates: _loadLinkTargetCandidates,
+      onSaveTagsAndLinks: () {
+        autosaveAfterDelay();
+        if (mounted) setState(() {});
+      },
 
       onExportSba: (ctx) {
         if (mounted) {
@@ -9977,11 +9956,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       },
       onSetCustomThumbnail: _setCustomThumbnail,
       onDeleteNote: _deleteNote,
-      onShowProperties: () async {
+      onSaveBeforeProperties: () async {
         await saveToFile(force: true);
-        if (mounted) {
-          showNotePropertiesDialog(context, coreInfo);
-        }
       },
       onToggleGlobalBackgroundInversion: _toggleGlobalBackgroundInversion,
     );
@@ -10025,9 +10001,10 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
               ? page.lineHeight
               : coreInfo.lineHeight,
           lineThickness: page.hasLocalLineThickness
-          ? page.lineThickness.toInt()
-          : coreInfo.lineThickness.toInt(),
-      lineColor: page.lineColor,
+              ? page.lineThickness.toInt()
+              : coreInfo.lineThickness.toInt(),
+          lineColor: page.lineColor,
+          showPdfLinkBoxes: _showPdfLinkBoxes,
         );
       },
     );
@@ -10077,7 +10054,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
             : false;
 
         final isCroppingThisPage =
-            _imageCropState != null && page.images.contains(_imageCropState!.image);
+            _imageCropState != null &&
+            page.images.contains(_imageCropState!.image);
         final Widget? cropOverlay = isCroppingThisPage
             ? Positioned(
                 left: _imageCropState!.image.dstRect.left,
@@ -10093,7 +10071,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                     child: CustomPaint(
                       painter: _CropOverlayPainter(
                         cropRect: _imageCropState!.normalizedCrop,
-                        scale: _transformationController.value.getMaxScaleOnAxis(),
+                        scale: _transformationController.value
+                            .getMaxScaleOnAxis(),
                         accentColor: Theme.of(context).colorScheme.primary,
                       ),
                     ),
@@ -10105,11 +10084,12 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
         return ValueListenableBuilder<int>(
           valueListenable: _interactionRepaint,
           builder: (context, _, __) {
-            Stroke? currentStroke = Pen.currentStroke?.pageIndex == pageIndex
-                ? Pen.currentStroke
+            // Isolates the real-time feedback stroke to only render in the correct document
+            Stroke? currentStroke = _liveStrokeForPage(pageIndex);
+            final shapePreview = _ownsCanvasDrawSession
+                ? ShapeTool.currentShapeTool.preview
                 : null;
-            final shapePreview = ShapeTool.currentShapeTool.preview;
-            if (shapePreview != null && shapePreview.pageIndex == pageIndex) {
+            if (shapePreview != null && dragPageIndex == pageIndex) {
               currentStroke = shapePreview;
             }
 
@@ -10121,97 +10101,112 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                   ),
                   overrideInvert: invert,
                   path: coreInfo.filePath,
-              page: page,
-              pageIndex: pageIndex,
+                  page: page,
+                  pageIndex: pageIndex,
 
-              lineHeight: page.hasLocalLineHeight
-                  ? page.lineHeight
-                  : coreInfo.lineHeight,
+                  lineHeight: page.hasLocalLineHeight
+                      ? page.lineHeight
+                      : coreInfo.lineHeight,
 
-              lineThickness: page.hasLocalLineThickness
-                  ? page.lineThickness.toInt()
-                  : coreInfo.lineThickness.toInt(),
-              lineColor: page.lineColor,
-              textEditing: currentTool == Tool.textEditing,
-              coreInfo: coreInfo,
-              currentStroke: currentStroke,
-              currentStrokeDetectedShape:
-                  currentStroke != null &&
-                      currentTool is Pen &&
-                      currentTool is! Highlighter
-                  ? _penHoldDetectedShape
-                  : null,
-              currentSelection: () {
-                if (currentTool is! Select) return null;
-                final selectResult = (currentTool as Select).selectResult;
-                if (selectResult.pageIndex != pageIndex) return null;
-                if (_imageCropState != null &&
-                    selectResult.images.length == 1 &&
-                    identical(
-                      selectResult.images.first,
-                      _imageCropState!.image,
-                    )) {
-                  return null;
-                }
-                return selectResult;
-              }(),
-              selectionPreview: _selectionPreviewForPage(pageIndex),
-              setAsBackground: (EditorImage image) {
-                final rect = image.dstRect;
-                final natSize = image.naturalSize;
+                  lineThickness: page.hasLocalLineThickness
+                      ? page.lineThickness.toInt()
+                      : coreInfo.lineThickness.toInt(),
+                  lineColor: page.lineColor,
+                  textEditing: currentTool == Tool.textEditing,
+                  coreInfo: coreInfo,
+                  currentStroke: currentStroke,
+                  currentStrokeDetectedShape:
+                      currentStroke != null &&
+                          currentTool is Pen &&
+                          currentTool is! Highlighter
+                      ? _penHoldDetectedShape
+                      : null,
+                  currentSelection: () {
+                    if (currentTool is! Select) return null;
+                    final select = currentTool as Select;
+                    final selectResult = select.selectResult;
+                    
+                    if (!select.doneSelecting) {
+                      // Actively drawing the lasso: check if this editor instance is the one receiving gestures
+                      if (dragPageIndex != pageIndex) return null;
+                    } else {
+                      // Lasso finished: render only where this editor owns the selection
+                      if (selectResult.pageIndex != pageIndex) return null;
+                      if (!_ownsSelectSession) return null;
+                    }
 
-                if (page.backgroundImage != null) {
-                  page.images.add(page.backgroundImage!);
-                }
-                page.images.remove(image);
+                    if (_imageCropState != null &&
+                        selectResult.images.length == 1 &&
+                        identical(
+                          selectResult.images.first,
+                          _imageCropState!.image,
+                        )) {
+                      return null;
+                    }
+                    return selectResult;
+                  }(),
+                  selectionPreview: _selectionPreviewForPage(pageIndex),
+                  setAsBackground: (EditorImage image) {
+                    final rect = image.dstRect;
+                    final natSize = image.naturalSize;
 
-                page.backgroundImage = image;
+                    if (page.backgroundImage != null) {
+                      page.images.add(page.backgroundImage!);
+                    }
+                    page.images.remove(image);
 
-                page.backgroundImage!.dstRect = rect;
-                page.backgroundImage!.naturalSize = natSize;
+                    page.backgroundImage = image;
 
-                _pageRasterCache.invalidatePage(pageIndex, ink: true, bg: true);
+                    page.backgroundImage!.dstRect = rect;
+                    page.backgroundImage!.naturalSize = natSize;
 
-                CanvasImage.activeListener.notifyListenersPlease();
+                    _pageRasterCache.invalidatePage(
+                      pageIndex,
+                      ink: true,
+                      bg: true,
+                    );
 
-                autosaveAfterDelay();
-                setState(() {});
-              },
-              onNoteLinkTap: _onCanvasNoteLinkTap,
-              currentTool: currentTool,
-              interactionRepaintListenable: _interactionRepaint,
-              currentScale: _quantizedCanvasScale,
-              eraserPositionListenable: pageIndex == dragPageIndex
-                  ? _eraserPositionRepaint
-                  : null,
-              eraserPosition:
-                  currentTool is Eraser &&
-                      eraserPosition != null &&
-                      pageIndex == dragPageIndex
-                  ? eraserPosition
-                  : null,
-              eraserSize: currentTool is Eraser
-                  ? (currentTool as Eraser).size
-                  : null,
-              eraserDeltaRemoved: pageIndex == dragPageIndex
-                  ? _eraserDeltaRemoved
-                  : null,
-              eraserDeltaAdded: pageIndex == dragPageIndex
-                  ? _eraserDeltaAdded
-                  : null,
-              doneSelecting: currentTool is Select
-                  ? (currentTool as Select).doneSelecting
-                  : true,
+                    CanvasImage.activeListener.notifyListenersPlease();
 
-              pageRasterCache: _pageRasterCache,
-              imageCropState: null,
-              onCropRectChanged: null,
-            ),
-            if (cropOverlay != null) cropOverlay,
-          ],
+                    autosaveAfterDelay();
+                    setState(() {});
+                  },
+                  onNoteLinkTap: _onCanvasNoteLinkTap,
+                  currentTool: currentTool,
+                  interactionRepaintListenable: _interactionRepaint,
+                  currentScale: _quantizedCanvasScale,
+                  eraserPositionListenable: pageIndex == dragPageIndex
+                      ? _eraserPositionRepaint
+                      : null,
+                  eraserPosition:
+                      currentTool is Eraser &&
+                          eraserPosition != null &&
+                          pageIndex == dragPageIndex
+                      ? eraserPosition
+                      : null,
+                  eraserSize: currentTool is Eraser
+                      ? (currentTool as Eraser).size
+                      : null,
+                  eraserDeltaRemoved: pageIndex == dragPageIndex
+                      ? _eraserDeltaRemoved
+                      : null,
+                  eraserDeltaAdded: pageIndex == dragPageIndex
+                      ? _eraserDeltaAdded
+                      : null,
+                  doneSelecting: currentTool is Select
+                      ? (currentTool as Select).doneSelecting
+                      : true,
+
+                  pageRasterCache: _pageRasterCache,
+                  imageCropState: null,
+                  onCropRectChanged: null,
+                  showPdfLinkBoxes: _showPdfLinkBoxes,
+                ),
+                if (cropOverlay != null) cropOverlay,
+              ],
+            );
+          },
         );
-      },
-    );
       },
     );
   }
@@ -10249,7 +10244,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
   }
 
   void _onCanvasContainerBoundsChanged(Size size) {
-    if (_isSmoothScrolling) return; // Evita que a âncora de resize interrompa a animação de scroll
+    if (_isSmoothScrolling)
+      return; // Evita que a âncora de resize interrompa a animação de scroll
     if (_resizeViewportAnchor == null) return;
     // Never write the transform synchronously from LayoutBuilder — that races
     // with canvas gestures and can freeze the docked-panel animation mid-way.
@@ -10269,12 +10265,12 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     if (available <= 0) return null;
     final ideal = editorSidePanelDesktopWidth(context);
     final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
-    final panelWidth = isPages 
-        ? ideal.clamp(280.0, 360.0).toDouble() 
+    final panelWidth = isPages
+        ? ideal.clamp(280.0, 360.0).toDouble()
         : ideal.clamp(340.0, 460.0).toDouble();
     const spacing = 16.0;
     final totalPanelSpace = panelWidth + spacing * 2;
-    
+
     final tAnim = Curves.easeOutCubic.transform(
       _dockedSidePanelController.value,
     );
@@ -10492,21 +10488,25 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
   Widget _buildDockedSidePanelBody() {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    
+
     // Cor pura e minimalista, perfeitamente adaptada a luz/escuro.
     final uniformColor = colorScheme.surface;
 
-    // Override rígido: força os fundos rebeldes do 'pageManager' e 'outlines' 
+    // Override rígido: força os fundos rebeldes do 'pageManager' e 'outlines'
     // a ficarem invisíveis, mostrando apenas o uniformColor do painel base.
     final unifiedTheme = theme.copyWith(
       scaffoldBackgroundColor: Colors.transparent,
       canvasColor: Colors.transparent,
-      dialogBackgroundColor: Colors.transparent,
       cardColor: Colors.transparent,
+      dialogTheme: theme.dialogTheme.copyWith(
+        backgroundColor: colorScheme.surfaceContainerHigh,
+      ),
+      popupMenuTheme: theme.popupMenuTheme.copyWith(
+        color: colorScheme.surfaceContainer,
+      ),
       colorScheme: colorScheme.copyWith(
         surfaceContainer: Colors.transparent,
         surfaceContainerLow: Colors.transparent,
-        surfaceContainerHigh: Colors.transparent,
       ),
       cardTheme: CardThemeData(
         color: Colors.transparent,
@@ -10523,9 +10523,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
         selectedTileColor: colorScheme.secondaryContainer,
         iconColor: colorScheme.onSurfaceVariant,
         selectedColor: colorScheme.onSecondaryContainer,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
       appBarTheme: theme.appBarTheme.copyWith(
         backgroundColor: Colors.transparent,
@@ -10558,10 +10556,7 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           title: t.home.tabs.settings,
           onClose: _closeDockedSidePanel,
           backgroundColor: uniformColor,
-          body: Theme(
-            data: unifiedTheme,
-            child: bottomSheet(context),
-          ),
+          body: Theme(data: unifiedTheme, child: bottomSheet(context)),
         );
       case _EditorDockedSidePanel.none:
         return const SizedBox.shrink();
@@ -10581,8 +10576,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
           builder: (context, constraints) {
             final ideal = editorSidePanelDesktopWidth(context);
             final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
-            final panelWidth = isPages 
-                ? ideal.clamp(280.0, 360.0).toDouble() 
+            final panelWidth = isPages
+                ? ideal.clamp(280.0, 360.0).toDouble()
                 : ideal.clamp(340.0, 460.0).toDouble();
             final tAnim = Curves.easeOutCubic.transform(
               _dockedSidePanelController.value,
@@ -10596,17 +10591,23 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
                 // O canvas é empurrado de acordo com a aba selecionada. A Toolbar se mantém fixa.
                 Positioned.fill(
                   left: isPages ? visibleSpace : 0,
-                  right: (!isPages && _dockedSidePanel == _EditorDockedSidePanel.settings) ? visibleSpace : 0,
+                  right:
+                      (!isPages &&
+                          _dockedSidePanel == _EditorDockedSidePanel.settings)
+                      ? visibleSpace
+                      : 0,
                   child: cachedChild!,
                 ),
-                
+
                 // Sidebar Card do Material 3 Flutuante (porém fixada ao lado)
                 if (panelBody != null && tAnim > 0)
                   Positioned(
                     top: spacing,
                     bottom: spacing,
                     left: isPages ? -panelWidth * (1 - tAnim) + spacing : null,
-                    right: !isPages ? -panelWidth * (1 - tAnim) + spacing : null,
+                    right: !isPages
+                        ? -panelWidth * (1 - tAnim) + spacing
+                        : null,
                     width: panelWidth,
                     child: Opacity(
                       opacity: tAnim.clamp(0.0, 1.0),
@@ -10620,7 +10621,6 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
       },
     );
   }
-
 
   Widget pageManager(BuildContext context, {int? pageIndexAtOpen}) {
     return EditorPageManager(
@@ -11281,6 +11281,8 @@ double _selectionRotationDegForInteractions(SelectResult selection) {
     )) {
       NotesEyedropperTarget.canvasRepaintKey = null;
     }
+
+    stows.noteInvertInDarkModeOverrides.removeListener(_onGlobalInvertChanged);
 
     if (_dockedSidePanelOcclusionActive) {
       TiledStrokePictureCache.popLayoutOcclusion();
@@ -11990,7 +11992,7 @@ class EditorFlatSidePanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    
+
     final panelColor = backgroundColor ?? colorScheme.surface;
 
     return Material(
@@ -12032,7 +12034,9 @@ class EditorFlatSidePanel extends StatelessWidget {
           ),
           Expanded(
             child: ClipRRect(
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(16)),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(16),
+              ),
               child: body,
             ),
           ),

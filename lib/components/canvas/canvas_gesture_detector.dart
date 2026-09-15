@@ -263,6 +263,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     });
   }
 
+  Timer? _arrowKeySettleTimer;
+
   void _arrowKeyPanNow(AxisDirection direction) {
     final transformation = widget._transformationController.value;
     const panAmount = 50.0;
@@ -284,6 +286,13 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
       0,
       1,
     );
+    
+    PageRasterCacheManager.updateViewportMoving(true);
+    _arrowKeySettleTimer?.cancel();
+    _arrowKeySettleTimer = Timer(PageRasterCacheManager.viewportSettleDelay, () {
+      PageRasterCacheManager.updateViewportMoving(false);
+    });
+
     widget._transformationController.value = next;
   }
 
@@ -831,9 +840,6 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   double _totalHeight = 0;
   bool _idleWorkScheduled = false;
   bool _hasPdfBackedPages = false;
-  double _viewportBoxTop = 0;
-  double _viewportBoxLeft = 0;
-  bool _viewportBoxReady = false;
   int _viewportMovingBlockedFrames = 0;
 
   @override
@@ -995,29 +1001,9 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     return max >= 0 ? max : 0;
   }
 
-  void _syncViewportMoving() {
-    final box = widget.boundingBox;
-    if (!_viewportBoxReady) {
-      _viewportBoxTop = box.top;
-      _viewportBoxLeft = box.left;
-      _viewportBoxReady = true;
-      return;
-    }
-    final dy = (box.top - _viewportBoxTop).abs();
-    final dx = (box.left - _viewportBoxLeft).abs();
-    // Only promote on translation. Zoom changes the viewport quad size (dSize)
-    // but must not latch viewportMoving — zoom settle handles HQ raster rebuilds.
-    if (dy > 8 || dx > 8) {
-      PageRasterCacheManager.updateViewportMoving(true);
-    }
-    _viewportBoxTop = box.top;
-    _viewportBoxLeft = box.left;
-  }
-
   @override
   Widget build(BuildContext context) {
     if (widget.pages.isEmpty) return const SizedBox();
-    _syncViewportMoving();
 
     final visibleWidgets = <Widget>[];
 
@@ -1044,6 +1030,7 @@ class _PagesBuilderState extends State<_PagesBuilder> {
 
       visibleWidgets.add(
         Positioned(
+          key: ValueKey('page_pos_$i'),
           top: offset,
           left: leftOffset,
           width: width,
