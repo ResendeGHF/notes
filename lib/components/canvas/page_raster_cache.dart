@@ -154,8 +154,21 @@ final class PageRasterCacheManager {
     if (_layoutOcclusionDepth <= 0) return;
     _layoutOcclusionDepth--;
     if (_layoutOcclusionDepth == 0 && !layoutResizeSession) {
-      updateViewportMoving(false);
+      // Layout paths clear immediately (a reclamp notifies motion again if
+      // the viewport actually moved), matching long-standing test semantics.
+      _clearMovingImmediate();
     }
+  }
+
+  /// Immediate clear used by layout/programmatic paths. Gesture ends use the
+  /// delayed [_ensureSettleScheduled] instead to keep blitting through the
+  /// settle window.
+  static void _clearMovingImmediate() {
+    final wasMoving = viewportMoving;
+    viewportMoving = false;
+    if (wasMoving) lodEpoch.value++;
+    if (viewportSettled || _settleTimer != null) return;
+    _restartSettleTimer();
   }
 
   static bool viewportSettled = true;
@@ -174,28 +187,32 @@ final class PageRasterCacheManager {
   @visibleForTesting
   static bool debugForceSyncRaster = false;
 
-  static void updateViewportMoving(bool moving) {
-    if (layoutOccluded && !moving) return;
-    if (moving) {
-      _settleTimer?.cancel();
-      _settleTimer = null;
-      final started = !viewportMoving;
-      viewportMoving = true;
-      viewportSettled = false;
-      if (started) lodEpoch.value++;
-      return;
+  /// Authoritative motion signal. Call on every transform change (pan or zoom)
+  /// and on gesture start. Uses debounce semantics: each call marks the
+  /// viewport as moving and (re)starts the settle timer, so a missed gesture
+  /// end can never leave the flag stuck. The timer clears the flag after
+  /// [viewportSettleDelay] of inactivity.
+  static void notifyViewportMotion({double? scale}) {
+    if (scale != null) {
+      setViewportScale(scale);
     }
-    
-    final wasMoving = viewportMoving;
-    viewportMoving = false;
-    if (wasMoving) {
-      // Força um repaint instantâneo assim que o movimento para, eliminando a "piscada"
-      lodEpoch.value++; 
-    }
-    
-    if (viewportSettled || _settleTimer != null) return;
+    final started = !viewportMoving;
+    viewportMoving = true;
+    viewportSettled = false;
+    if (started) lodEpoch.value++;
+    _restartSettleTimer();
+  }
+
+  static void _restartSettleTimer() {
+    _settleTimer?.cancel();
     _settleTimer = Timer(viewportSettleDelay, () {
       _settleTimer = null;
+      // Layout occlusion holds the LOD open until the resize session ends.
+      if (layoutOccluded) {
+        _restartSettleTimer();
+        return;
+      }
+      viewportMoving = false;
       viewportSettled = true;
       lodEpoch.value++;
       _notifyLodSettled();
@@ -203,14 +220,37 @@ final class PageRasterCacheManager {
     });
   }
 
+  /// Schedules a delayed settle without clearing [viewportMoving] immediately.
+  /// Keeping the cheap blit path open through the settle window avoids the
+  /// one-frame vector fallback that caused post-pan/zoom jank.
+  static void _ensureSettleScheduled() {
+    if (layoutOccluded) return;
+    if (_settleTimer != null) return;
+    if (viewportSettled && !viewportMoving) return;
+    _restartSettleTimer();
+  }
+
+  static void updateViewportMoving(bool moving) {
+    if (layoutOccluded && !moving) return;
+    if (moving) {
+      notifyViewportMotion();
+      return;
+    }
+
+    _ensureSettleScheduled();
+  }
+
   static void endProgrammaticViewportJump() {
     _settleTimer?.cancel();
     _settleTimer = null;
+    _zoomSettleTimer?.cancel();
+    _zoomSettleTimer = null;
     if (viewportMoving) {
       viewportMoving = false;
       lodEpoch.value++;
     }
     viewportSettled = true;
+    zoomLodSettled = true;
   }
 
   static void beginLayoutResizeSession() {
@@ -221,7 +261,9 @@ final class PageRasterCacheManager {
   static void endLayoutResizeSession() {
     if (!layoutResizeSession) return;
     layoutResizeSession = false;
-    updateViewportMoving(false);
+    if (_layoutOcclusionDepth == 0) {
+      _clearMovingImmediate();
+    }
   }
 
   static void setViewportScale(double scale) {
@@ -234,7 +276,24 @@ final class PageRasterCacheManager {
   static double effectiveScale(double fallback) =>
       liveViewportScale ?? fallback;
 
+  /// Above this scale tiles stay as vectors (no bitmap LOD).
+  /// Mirrors [RasterLodTuning.vectorLodMinScale] without importing UI code.
+  static const double vectorLodMinScale = 1.5;
+
+  static bool usesVectorLod(double scale) => scale >= vectorLodMinScale;
+
   static void _observeZoomScale(double scale) {
+    // Crossing into vector LOD settles immediately so painters switch to
+    // sharp vectors without waiting for the debounce timer.
+    if (usesVectorLod(scale)) {
+      _zoomSettleTimer?.cancel();
+      _zoomSettleTimer = null;
+      final crossedIntoVector = _zoomLod > 0 && _zoomLod < vectorLodMinScale;
+      _zoomLod = rasterLodScale(scale);
+      zoomLodSettled = true;
+      if (crossedIntoVector) lodEpoch.value++;
+      return;
+    }
     final lod = rasterLodScale(scale);
     if (_zoomLod <= 0) {
       _zoomLod = lod;
@@ -293,6 +352,7 @@ final class PageRasterCacheManager {
     _liveViewportScale = null;
     _lastObservedRawScale = null;
     debugForceSyncRaster = false;
+    deferBakesUntil = null;
   }
 
   // --- Resolution ---
@@ -769,12 +829,23 @@ final class PageRasterCacheManager {
     }
   }
 
+  /// When set, full-page bakes wait until this time passes. Used once per
+  /// note open so tile recording and first frames win the UI isolate over
+  /// full-page toImage work.
+  static DateTime? deferBakesUntil;
+
   Future<void> _processQueue() async {
     _jobRunning = true;
     while (_jobQueue.isNotEmpty && !_disposed) {
       // Never run CanvasPainter + toImage on the UI isolate mid-stroke —
       // that is the classic cause of dropped pointer samples / square ink.
-      if (inkInputBusy && !debugForceSyncRaster) {
+      // Same for viewport motion: pinch-zoom frames must stay at composite
+      // cost, so bakes queue up and run once the viewport settles.
+      final deferUntil = deferBakesUntil;
+      if (!debugForceSyncRaster &&
+          (inkInputBusy ||
+              viewportMoving ||
+              (deferUntil != null && DateTime.now().isBefore(deferUntil)))) {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
       }

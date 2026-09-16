@@ -396,6 +396,15 @@ class InnerCanvasState extends State<InnerCanvas> {
   List<PdfLink>? _pagePdfLinks;
 
   void _loadPdfLinks() {
+    // Deferred: link boxes are tap-time affordances, never first-paint
+    // content. Waiting keeps PDF open + detection off the open path.
+    Future<void>.delayed(const Duration(milliseconds: 900), () {
+      if (!mounted) return;
+      _loadPdfLinksNow();
+    });
+  }
+
+  void _loadPdfLinksNow() {
     final pages = widget.coreInfo.pages;
     if (pages.isEmpty) return;
     final page = pages[_safePageIndex];
@@ -960,7 +969,10 @@ class InnerCanvasState extends State<InnerCanvas> {
 
     final paintQuadTree = page.strokeSpatialIndex;
 
-    final quillEditor = widget.coreInfo.pages.isNotEmpty
+    // Quill is only materialized while text editing: building a QuillEditor
+    // per page on every open/rebuild is a major first-frames cost, and the
+    // widget is IgnorePointer-wrapped otherwise.
+    final quillEditor = (widget.textEditing && widget.coreInfo.pages.isNotEmpty)
     ? QuillEditor(
       controller: widget.coreInfo.pages[_safePageIndex].quill.controller,
       config: QuillEditorConfig(
@@ -1465,14 +1477,19 @@ class _PageRasterBgLayerPainter extends CustomPainter {
     final isMoving = PageRasterCacheManager.viewportMoving;
     if (entry != null) {
       final cacheSharp = pageRasterCacheResCoversTarget(entry.res, idealRes);
-      // Keeps the raster lightweight and fast during movement. Uses vector instantly when stopping.
-      if (cacheSharp || isMoving) {
+      // Keep blitting the cached bitmap while moving or settling. Falling back
+      // to vector the instant motion stops caused a one-frame full repaint
+      // jank before the higher-res bake landed.
+      final settling =
+          !PageRasterCacheManager.viewportSettled ||
+          !PageRasterCacheManager.zoomLodSettled;
+      if (cacheSharp || isMoving || settling) {
         paintPageCacheImage(
           canvas,
           size,
           entry,
           targetRes: idealRes,
-          lowQualityFilter: isMoving,
+          lowQualityFilter: isMoving || !cacheSharp,
         );
       } else {
         fallback.paint(canvas, size);
@@ -1574,16 +1591,22 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     );
 
     final isMoving = PageRasterCacheManager.viewportMoving;
+    final settling =
+        !PageRasterCacheManager.viewportSettled ||
+        !PageRasterCacheManager.zoomLodSettled;
 
     final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
     bool useVectorFallback = isDrawing || entry == null;
     if (entry != null && !useVectorFallback) {
       if (entry.strokeCount > committedStrokes.length) {
+        // Cached bitmap contains removed strokes (eraser/undo): ghosts would
+        // linger, so fall back to vectors.
         useVectorFallback = true;
       } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
-        // If the resolution is not sufficient, update with super sharp high-quality vector,
-        // but ONLY when the screen is not moving, to prevent GPU drop rate.
-        if (!isMoving) {
+        // Stale resolution: keep blitting the soft bitmap while moving or
+        // settling so the UI stays fluid. Switch to sharp vectors only once
+        // fully settled, and even then the settle rebake lands shortly after.
+        if (!isMoving && !settling) {
           useVectorFallback = true;
         }
       }
@@ -1592,7 +1615,9 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     if (useVectorFallback) {
       final isInitialLoad = tiledCache.shouldDeferMeshWarmup;
       final idleFill = Pen.currentStroke == null && !Eraser.isDragging && !TiledStrokePictureCache.viewportMoving;
-      final budget = isInitialLoad ? 48 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
+      // Capped initial budget: the first frames must stay interactive. The
+      // visible page needs ~6-10 tiles; the rest fills across idle frames.
+      final budget = isInitialLoad ? 10 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
 
       tiledCache.paint(
         canvas: canvas,
@@ -1612,15 +1637,16 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         lineColor: lineColor,
         deferRaster: Eraser.isDragging || Pen.currentStroke != null,
         tileRecordBudgetMs: budget,
-        maxNewTilesPerPaint: isInitialLoad ? 64 : (idleFill ? 8 : 2),
+        maxNewTilesPerPaint: isInitialLoad ? 10 : (idleFill ? 8 : 2),
       );
     } else {
+      final stale = !pageRasterCacheResCoversTarget(entry!.res, idealRes);
       paintPageCacheImage(
         canvas,
         size,
-        entry!,
+        entry,
         targetRes: idealRes,
-        lowQualityFilter: isMoving,
+        lowQualityFilter: isMoving || stale,
       );
       
       if (entry.strokeCount < committedStrokes.length) {
@@ -1787,9 +1813,11 @@ class TiledStrokePictureCache {
 
   /// True while the page list is scrolling/flinging or the canvas is
   /// panning/zooming. Mesh upgrades wait until this is false.
+  /// Direct assignment is immediate (tests/headless bakes); production motion
+  /// uses [updateViewportMoving] with debounce semantics.
   static bool get viewportMoving => PageRasterCacheManager.viewportMoving;
   static set viewportMoving(bool value) {
-    PageRasterCacheManager.updateViewportMoving(value);
+    PageRasterCacheManager.viewportMoving = value;
   }
 
   /// True while a sidebar/split resize is animating. Used to ignore pan-idle
@@ -1818,15 +1846,15 @@ class TiledStrokePictureCache {
   /// been still for [viewportSettleDelay], visible tiles bake once at that
   /// LOD — even if the viewport is still coasting from inertia — so later
   /// pan/fling samples those bitmaps instead of retessellating vectors.
-  static bool zoomLodSettled = true;
+  /// Single source of truth lives in [PageRasterCacheManager].
+  static bool get zoomLodSettled => PageRasterCacheManager.zoomLodSettled;
+  static set zoomLodSettled(bool value) {
+    PageRasterCacheManager.zoomLodSettled = value;
+  }
 
   /// Bumped when motion starts (switch to textures) and when zoom has been
   /// still long enough to bake a raster LOD for that rest scale.
   static ValueNotifier<int> get lodEpoch => PageRasterCacheManager.lodEpoch;
-
-  static Timer? _tileZoomSettleTimer;
-  static double _tileZoomLod = 0;
-  static double? _tileLiveViewportScale;
 
   /// Tests bake with [ui.Picture.toImageSync] so a paint can finish in-frame.
   @visibleForTesting
@@ -1851,56 +1879,22 @@ class TiledStrokePictureCache {
   static void endLayoutResizeSession() =>
   PageRasterCacheManager.endLayoutResizeSession();
 
-  /// Live InteractiveViewer scale. Call on every pan/zoom frame so LOD does
-  /// not wait for a widget rebuild (which often only happens after drawing).
+  /// Live InteractiveViewer scale. Observe-only: transform listeners drive
+  /// motion via [PageRasterCacheManager.notifyViewportMotion], paint and
+  /// builder paths only update the LOD scale so they never extend the settle
+  /// timer by themselves.
   static void setViewportScale(double scale) {
-    _tileLiveViewportScale = scale;
-    _observeTileZoomScale(scale);
     PageRasterCacheManager.setViewportScale(scale);
   }
 
   static double effectiveScale(double fallback) =>
-  _tileLiveViewportScale ?? fallback;
+      PageRasterCacheManager.effectiveScale(fallback);
 
   static bool usesVectorStrokes(double scale) => scale >= vectorLodMinScale;
-
-  static void _observeTileZoomScale(double scale) {
-    if (usesVectorStrokes(scale)) {
-      _tileZoomSettleTimer?.cancel();
-      _tileZoomSettleTimer = null;
-      final crossedIntoVector =
-      _tileZoomLod > 0 && _tileZoomLod < vectorLodMinScale;
-      _tileZoomLod = rasterLodScale(scale);
-      zoomLodSettled = true;
-      if (crossedIntoVector) lodEpoch.value++;
-      return;
-    }
-    final lod = rasterLodScale(scale);
-    if (_tileZoomLod <= 0) {
-      _tileZoomLod = lod;
-      zoomLodSettled = true;
-      return;
-    }
-    if ((lod - _tileZoomLod).abs() <= 1e-6) return;
-    _tileZoomLod = lod;
-    zoomLodSettled = false;
-    _tileZoomSettleTimer?.cancel();
-    _tileZoomSettleTimer = Timer(viewportSettleDelay, () {
-      _tileZoomSettleTimer = null;
-      zoomLodSettled = true;
-      lodEpoch.value++;
-      SchedulerBinding.instance.ensureVisualUpdate();
-    });
-  }
 
   @visibleForTesting
   static void debugResetViewportLod() {
     PageRasterCacheManager.debugResetViewportLod(); // ignore: invalid_use_of_visible_for_testing_member
-    _tileZoomSettleTimer?.cancel();
-    _tileZoomSettleTimer = null;
-    zoomLodSettled = true;
-    _tileZoomLod = 0;
-    _tileLiveViewportScale = null;
     debugForceSyncRaster = false;
   }
 
@@ -2090,12 +2084,18 @@ class TiledStrokePictureCache {
         !forbidRecord &&
         tileRecordBudgetMs != null &&
         tileRecordBudgetMs > 0;
-    
-    final tileBudget = capLiveRefill
+
+    // Temporal LOD: while the viewport is moving, never tessellate on the
+    // gesture frame. Blit existing pictures/rasters only; missing tiles refill
+    // on settle via recordGeneration. This keeps pinch-zoom at composite cost.
+    final moving = viewportMoving;
+    final tileBudget = moving
+        ? 0
+        : capLiveRefill
         ? 2
         : (useTimeBudget
-            ? 0x7fffffff
-            : maxNewTilesPerPaint);
+              ? 0x7fffffff
+              : maxNewTilesPerPaint);
     final Stopwatch? budgetWatch = useTimeBudget
     ? (Stopwatch()..start())
     : null;
@@ -2104,7 +2104,6 @@ class TiledStrokePictureCache {
     ? effectiveScale(currentScale)
     : currentScale;
     if (enableRasterLod && followLiveViewportScale) {
-      _observeTileZoomScale(scale);
       PageRasterCacheManager.setViewportScale(scale);
     }
     final bakeScale = rasterLodScale(scale);
@@ -2313,7 +2312,9 @@ class TiledStrokePictureCache {
     _evictOffscreenRasters(visibleKeys);
     if (missingTiles) {
       _visibleTilesCaughtUp = false;
-      _scheduleMoreTiles();
+      // While moving, stay blit-only: do not chain another repaint now, the
+      // settle lodEpoch bump repaints once and refills then.
+      if (!moving) _scheduleMoreTiles();
     } else {
       _visibleTilesCaughtUp = true;
       _eagerRefillVisibleTiles = false;
@@ -2501,7 +2502,7 @@ class TiledStrokePictureCache {
   }
 
   void _evictOffscreenRasters(Set<int> visibleKeys) {
-    final scale = _tileLiveViewportScale ?? 1.0;
+    final scale = PageRasterCacheManager.liveViewportScale ?? 1.0;
     final extra = scale >= 2.5
     ? 3
     : scale >= 1.5
@@ -2906,12 +2907,12 @@ class TiledStrokePictureCache {
             }
             final dpr = devicePixelRatio ?? _devicePixelRatio();
             final wasSync = debugForceSyncRaster;
-            final wasMoving = viewportMoving;
-            final wasSettled = viewportSettled;
-            final wasZoomSettled = zoomLodSettled;
-            viewportMoving = false;
-            viewportSettled = true;
-            zoomLodSettled = true;
+            final wasMoving = PageRasterCacheManager.viewportMoving;
+            final wasSettled = PageRasterCacheManager.viewportSettled;
+            final wasZoomSettled = PageRasterCacheManager.zoomLodSettled;
+            PageRasterCacheManager.viewportMoving = false;
+            PageRasterCacheManager.viewportSettled = true;
+            PageRasterCacheManager.zoomLodSettled = true;
             debugForceSyncRaster = true;
             try {
               for (var pass = 0; pass < 16; pass++) {
@@ -2947,9 +2948,9 @@ class TiledStrokePictureCache {
               );
             } finally {
               debugForceSyncRaster = wasSync;
-              viewportMoving = wasMoving;
-              viewportSettled = wasSettled;
-              zoomLodSettled = wasZoomSettled;
+              PageRasterCacheManager.viewportMoving = wasMoving;
+              PageRasterCacheManager.viewportSettled = wasSettled;
+              PageRasterCacheManager.zoomLodSettled = wasZoomSettled;
             }
           }
 

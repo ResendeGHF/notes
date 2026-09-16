@@ -480,26 +480,41 @@ class EditorState extends State<Editor>
   bool _hasPdfLinks = false;
   final ValueNotifier<bool> _showPdfLinkBoxes = ValueNotifier(true);
 
-  void _checkForPdfLinks() async {
-    bool found = false;
-    for (final page in coreInfo.pages) {
-      if (page.backgroundImage is PdfEditorImage) {
-        final pdfImg = page.backgroundImage as PdfEditorImage;
-        final pdfDoc = await _waitForPdfDocument(pdfImg.assetId);
-        if (pdfDoc != null) {
-          final links = await PdfLinkDetector.detectLinksOnPage(pdfDoc, pdfImg.pdfPage);
-          if (links.isNotEmpty) {
-            found = true;
-            break;
+  void _checkForPdfLinks() {
+    // Deferred off the open critical path: PDF open + link detection runs
+    // after first frames settle and only when a PDF-backed page exists.
+    Future<void>.delayed(const Duration(milliseconds: 1200), () async {
+      if (!mounted) return;
+      if (!coreInfo.pages.any(
+        (page) => page.backgroundImage is PdfEditorImage,
+      )) {
+        return;
+      }
+      bool found = false;
+      for (final page in coreInfo.pages) {
+        if (!mounted) return;
+        if (page.backgroundImage is PdfEditorImage) {
+          final pdfImg = page.backgroundImage as PdfEditorImage;
+          final pdfDoc = await _waitForPdfDocument(pdfImg.assetId);
+          if (pdfDoc != null) {
+            final links = await PdfLinkDetector.detectLinksOnPage(
+              pdfDoc,
+              pdfImg.pdfPage,
+            );
+            if (links.isNotEmpty) {
+              found = true;
+              break;
+            }
           }
         }
+        await Future<void>.delayed(Duration.zero);
       }
-    }
-    if (mounted && _hasPdfLinks != found) {
-      setState(() {
-        _hasPdfLinks = found;
-      });
-    }
+      if (mounted && _hasPdfLinks != found) {
+        setState(() {
+          _hasPdfLinks = found;
+        });
+      }
+    });
   }
 
   Future<void>? _pendingSaveFuture;
@@ -1711,6 +1726,11 @@ class EditorState extends State<Editor>
       }
       // First paint with strokes as soon as the body is parsed (low-quality
       // paths). Opening chrome stays until this frame can schedule.
+      // Full-page raster bakes wait out the open grace window so tiled
+      // recording and first frames own the UI isolate.
+      PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
+        const Duration(milliseconds: 700),
+      );
       if (mounted) setState(() {});
       await Future<void>.delayed(Duration.zero);
     } finally {
@@ -1834,7 +1854,9 @@ class EditorState extends State<Editor>
     _isSmoothScrolling = true;
     _suppressTransformClamp.value = true;
     InteractiveCanvasViewer.isAutoPanningEnabled = false;
-    PageRasterCacheManager.updateViewportMoving(true);
+    PageRasterCacheManager.notifyViewportMotion(
+      scale: currentMatrix.getMaxScaleOnAxis(),
+    );
 
     _smoothScrollController?.dispose();
     _smoothScrollController = AnimationController(
@@ -2061,33 +2083,46 @@ class EditorState extends State<Editor>
     int excludeTo,
   ) {
     if (info.pages.length <= excludeTo - excludeFrom + 1) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
-      const batch = 8;
-      for (int i = 0; i < info.pages.length; i++) {
-        if (i >= excludeFrom && i <= excludeTo) continue;
-        if (info.isLazyShellPage(i)) continue;
-        final page = info.pages[i];
-        if (page.strokeSpatialIndex == null && page.strokes.isNotEmpty) {
-          page.buildSpatialIndex();
+    // Start after first frames settle so tiles and first paint win the UI
+    // isolate. Time-sliced: pages with few strokes paint fine with linear
+    // scan (CanvasPainter threshold), so only index dense pages.
+    Future<void>.delayed(const Duration(milliseconds: 600), () {
+      if (!mounted || !identical(info, coreInfo)) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted || !identical(info, coreInfo)) return;
+        final budget = Stopwatch()..start();
+        for (int i = 0; i < info.pages.length; i++) {
+          if (!mounted || !identical(info, coreInfo)) return;
+          if (i >= excludeFrom && i <= excludeTo) continue;
+          if (info.isLazyShellPage(i)) continue;
+          final page = info.pages[i];
+          if (page.strokeSpatialIndex == null &&
+              page.allStrokesInDrawOrder.length >= 120) {
+            page.buildSpatialIndex();
+          }
+          page.backgroundImage?.onMoveImage = onMoveImage;
+          page.backgroundImage?.onDeleteImage = onDeleteImage;
+          page.backgroundImage?.onMiscChange = autosaveAfterDelay;
+          for (final image in page.images) {
+            image.onMoveImage = onMoveImage;
+            image.onDeleteImage = onDeleteImage;
+            image.onMiscChange = autosaveAfterDelay;
+          }
+          // Keep every idle slice under ~3ms so open stays interactive.
+          if (budget.elapsedMilliseconds >= 3) {
+            budget.reset();
+            await Future<void>.delayed(Duration.zero);
+          }
         }
-        page.backgroundImage?.onMoveImage = onMoveImage;
-        page.backgroundImage?.onDeleteImage = onDeleteImage;
-        page.backgroundImage?.onMiscChange = autosaveAfterDelay;
-        for (final image in page.images) {
-          image.onMoveImage = onMoveImage;
-          image.onDeleteImage = onDeleteImage;
-          image.onMiscChange = autosaveAfterDelay;
-        }
-        if ((i + 1) % batch == 0) await Future<void>.delayed(Duration.zero);
-        if (!mounted) return;
-      }
+      });
     });
   }
 
   void _deferQuillListeners(EditorCoreInfo info, int doneFrom, int doneTo) {
     if (info.pages.length <= doneTo - doneFrom + 1) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+    Future<void>.delayed(const Duration(milliseconds: 500), () {
+      if (!mounted || !identical(info, coreInfo)) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted || !identical(info, coreInfo)) return;
       const batch = 16;
       for (int i = 0; i < info.pages.length; i++) {
@@ -2107,6 +2142,7 @@ class EditorState extends State<Editor>
         if ((i + 1) % batch == 0) await Future<void>.delayed(Duration.zero);
         if (!mounted) return;
       }
+      });
     });
   }
 

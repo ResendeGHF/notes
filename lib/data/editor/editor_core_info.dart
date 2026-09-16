@@ -1022,9 +1022,9 @@ class EditorCoreInfo extends ChangeNotifier {
 
       final bsonBytes = await FileManager.readFile(noteBodyPath);
 
-      // After note body is cached, warm PDF in background (do not race body AES).
-      int assetCount = 0;
-
+      // After note body is cached, warm PDF in background (do not race body
+      // AES). Asset capacity counting runs after parse off the critical path
+      // so the first paint never waits on sequential file-exists I/O.
       if (vaultOpen && hasPdfAsset0 && !onlyFirstPage) {
         final pdfAsset0Path = '$noteBodyPath.0';
         const int largeVaultPdfCipherBytes = 40 * 1024 * 1024;
@@ -1045,52 +1045,6 @@ class EditorCoreInfo extends ChangeNotifier {
             log.fine('Vault PDF .0 prefetch skipped: $e');
           }
         }());
-        
-        while (true) {
-          final exists = await VaultAdapter.instance.fileExists(FileManager.toRelativePath('$noteBodyPath.$assetCount'));
-          if (!exists) break;
-          assetCount++;
-        }
-      } else if (!onlyFirstPage) {
-        while (true) {
-          final exists = await FileManager.doesFileExist('$noteBodyPath.$assetCount');
-          if (!exists) break;
-          assetCount++;
-        }
-      }
-
-      if (vaultOpen && hasPdfAsset0 && !onlyFirstPage) {
-        final pdfAsset0Path = '$noteBodyPath.0';
-        const int largeVaultPdfCipherBytes = 40 * 1024 * 1024;
-        unawaited(() async {
-          try {
-            final cipherSize =
-                await VaultAdapter.instance.getFileSize(pdfAsset0Path) ?? 0;
-            if (vaultPathAllowsDiskBackedDecrypt(pdfAsset0Path)) {
-              if (cipherSize >= largeVaultPdfCipherBytes) {
-                await Future<void>.delayed(Duration.zero);
-              }
-              await FileManager.readFileToTempFile(pdfAsset0Path);
-              return;
-            }
-            if (cipherSize >= largeVaultPdfCipherBytes) return;
-            await FileManager.readFile(pdfAsset0Path);
-          } catch (e, _) {
-            log.fine('Vault PDF .0 prefetch skipped: $e');
-          }
-        }());
-        
-        while (true) {
-          final exists = await VaultAdapter.instance.fileExists(FileManager.toRelativePath('$noteBodyPath.$assetCount'));
-          if (!exists) break;
-          assetCount++;
-        }
-      } else if (!onlyFirstPage) {
-        while (true) {
-          final exists = await FileManager.doesFileExist('$noteBodyPath.$assetCount');
-          if (!exists) break;
-          assetCount++;
-        }
       }
 
       final String? jsonString;
@@ -1148,15 +1102,81 @@ class EditorCoreInfo extends ChangeNotifier {
           preferEagerAllPages: hasPdfAsset0,
         );
 
-        coreInfo.assetCacheAll.ensureCapacity(assetCount, noteBodyPath);
         coreInfo.ensureDocumentDefaultsFromGlobal();
 
         coreInfo.ensureNoteId();
 
-        coreInfo.tags = await TagDatabase.instance.mergeTagsFromNote(
-          path,
-          coreInfo.tags,
-        );
+        // Off the critical path: asset placeholders and tag merge must never
+        // delay the first paint. Tags do not affect the canvas.
+        final loadedTags = coreInfo.tags;
+        unawaited(() async {
+          try {
+            coreInfo.tags = await TagDatabase.instance.mergeTagsFromNote(
+              path,
+              loadedTags,
+            );
+          } catch (e) {
+            log.fine('Tag merge after open skipped: $e');
+          }
+          if (onlyFirstPage) return;
+          try {
+            var assetCount = 0;
+            const maxProbe = 512;
+            const batchSize = 16;
+            while (assetCount < maxProbe) {
+              var batchEnd = assetCount;
+              if (vaultOpen) {
+                final futures = <Future<bool>>[];
+                for (var i = 0; i < batchSize && assetCount + i < maxProbe; i++) {
+                  futures.add(VaultAdapter.instance.fileExists(
+                    FileManager.toRelativePath(
+                      '$noteBodyPath.${assetCount + i}',
+                    ),
+                  ));
+                }
+                final results = await Future.wait(futures);
+                var contiguous = 0;
+                for (final exists in results) {
+                  if (!exists) break;
+                  contiguous++;
+                }
+                if (contiguous == 0) break;
+                batchEnd = assetCount + contiguous;
+                if (contiguous < results.length) {
+                  assetCount = batchEnd;
+                  break;
+                }
+                assetCount = batchEnd;
+              } else {
+                final futures = <Future<bool>>[];
+                for (var i = 0; i < batchSize && assetCount + i < maxProbe; i++) {
+                  futures.add(
+                    FileManager.doesFileExist('$noteBodyPath.${assetCount + i}'),
+                  );
+                }
+                final results = await Future.wait(futures);
+                var contiguous = 0;
+                for (final exists in results) {
+                  if (!exists) break;
+                  contiguous++;
+                }
+                if (contiguous == 0) break;
+                batchEnd = assetCount + contiguous;
+                if (contiguous < results.length) {
+                  assetCount = batchEnd;
+                  break;
+                }
+                assetCount = batchEnd;
+              }
+              await Future<void>.delayed(Duration.zero);
+            }
+            if (assetCount > 0) {
+              coreInfo.assetCacheAll.ensureCapacity(assetCount, noteBodyPath);
+            }
+          } catch (e) {
+            log.fine('Asset capacity warmup after open skipped: $e');
+          }
+        }());
         return coreInfo;
       } catch (e, stack) {
         log.severe(

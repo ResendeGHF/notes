@@ -313,7 +313,9 @@ void main() {
     // User grabs the canvas again while the bake is in flight.
     PageRasterCacheManager.updateViewportMoving(true);
     await Future<void>.delayed(const Duration(milliseconds: 60));
-    PageRasterCacheManager.updateViewportMoving(false);
+    // Delayed settle keeps moving true; complete it instantly so the
+    // follow-up bake below is not gated on the settle window.
+    PageRasterCacheManager.endProgrammaticViewportJump();
 
     // The aborted bake must not land a cache entry...
     expect(manager.debugInkCacheCount, 0);

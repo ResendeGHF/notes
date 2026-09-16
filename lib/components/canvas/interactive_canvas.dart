@@ -4,7 +4,6 @@
 
 // ignore_for_file: omit_obvious_property_types
 
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show clampDouble;
@@ -284,15 +283,13 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   double? _rotationStart = 0;
   double _currentRotation = 0;
   _GestureType? _gestureType;
-  Timer? _wheelZoomSettleTimer;
 
   void _markWheelZoomActive() {
-    PageRasterCacheManager.updateViewportMoving(true);
-    _wheelZoomSettleTimer?.cancel();
-    _wheelZoomSettleTimer = Timer(PageRasterCacheManager.viewportSettleDelay, () {
-      _wheelZoomSettleTimer = null;
-      PageRasterCacheManager.updateViewportMoving(false);
-    });
+    // Central debounce owns the settle timer; each wheel tick only refreshes
+    // motion so rapid scrolls never clear LOD mid-gesture.
+    PageRasterCacheManager.notifyViewportMotion(
+      scale: _transformer.value.getMaxScaleOnAxis(),
+    );
   }
 
   final bool _rotateEnabled = false;
@@ -354,14 +351,16 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     final Matrix4 nextMatrix = matrix.clone()
       ..translateByDouble(alignedTranslation.dx, alignedTranslation.dy, 0, 1);
 
-    final Quad nextViewport = _transformViewport(nextMatrix, _viewport);
+    final Rect gestureViewport = _gestureViewport ?? _viewport;
+    final Rect gestureBoundary = _gestureBoundaryRect ?? _boundaryRect;
+    final Quad nextViewport = _transformViewport(nextMatrix, gestureViewport);
 
-    if (_boundaryRect.isInfinite) {
+    if (gestureBoundary.isInfinite) {
       return nextMatrix;
     }
 
     final Quad boundariesAabbQuad = _getAxisAlignedBoundingBoxWithRotation(
-      _boundaryRect,
+      gestureBoundary,
       _currentRotation,
     );
 
@@ -387,7 +386,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
     final Quad correctedViewport = _transformViewport(
       correctedMatrix,
-      _viewport,
+      gestureViewport,
     );
     final Offset offendingCorrectedDistance = _exceedsBy(
       boundariesAabbQuad,
@@ -422,12 +421,14 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     assert(scale != 0.0);
 
     final double currentScale = _transformer.value.getMaxScaleOnAxis();
+    final Rect gestureViewport = _gestureViewport ?? _viewport;
+    final Rect gestureBoundary = _gestureBoundaryRect ?? _boundaryRect;
     final double totalScale = math.max(
       currentScale * scale,
 
       math.max(
-        _viewport.width / _boundaryRect.width,
-        _viewport.height / _boundaryRect.height,
+        gestureViewport.width / gestureBoundary.width,
+        gestureViewport.height / gestureBoundary.height,
       ),
     );
     final double clampedTotalScale = clampDouble(
@@ -478,6 +479,40 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   Duration? _lastPanStamp;
   var _viewportGestureActive = false;
 
+  /// Viewport and boundary geometry captured once per gesture so every
+  /// scale-update frame avoids render-object lookups. Content and window
+  /// sizes do not change mid-pinch; live getters remain as fallback.
+  Rect? _gestureViewport;
+  Rect? _gestureBoundaryRect;
+
+  Rect get _viewportForGesture {
+    if (_gestureViewport != null) return _gestureViewport!;
+    return _viewport;
+  }
+
+  Rect _boundaryRectForGesture() {
+    if (_gestureBoundaryRect != null) return _gestureBoundaryRect!;
+    return _boundaryRect;
+  }
+
+  void _captureGestureGeometry() {
+    try {
+      _gestureViewport = _viewport;
+    } catch (_) {
+      _gestureViewport = null;
+    }
+    try {
+      _gestureBoundaryRect = _boundaryRect;
+    } catch (_) {
+      _gestureBoundaryRect = null;
+    }
+  }
+
+  void _clearGestureGeometry() {
+    _gestureViewport = null;
+    _gestureBoundaryRect = null;
+  }
+
   void _onScaleStart(ScaleStartDetails details) {
     _ignoreThisPanZoomGesture =
         widget.shouldIgnorePanZoom?.call(details) ?? false;
@@ -500,6 +535,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
     _gestureType = null;
     _currentAxis = null;
+    _captureGestureGeometry();
     _scaleStart = _transformer.value.getMaxScaleOnAxis();
     _referenceFocalPoint = _transformer.toScene(details.localFocalPoint);
     _rotationStart = _currentRotation;
@@ -509,13 +545,31 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
       widget.onDrawStart?.call(details);
     } else if (!_ignoreThisPanZoomGesture) {
       _viewportGestureActive = true;
-      PageRasterCacheManager.updateViewportMoving(true);
+      PageRasterCacheManager.notifyViewportMotion(
+        scale: _transformer.value.getMaxScaleOnAxis(),
+      );
       widget.onInteractionStart?.call(details);
     }
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
     if (_ignoreThisPanZoomGesture && !isCurrentGestureADrawGesture) return;
+    // A second finger during a draw gesture promotes it to a viewport
+    // gesture: pinch-zoom must never paint ink, and it must enable the
+    // temporary raster LOD from its first frame.
+    if (isCurrentGestureADrawGesture && details.pointerCount >= 2) {
+      isCurrentGestureADrawGesture = false;
+      _viewportGestureActive = true;
+      PageRasterCacheManager.notifyViewportMotion(
+        scale: _transformer.value.getMaxScaleOnAxis(),
+      );
+      widget.onInteractionStart?.call(
+        ScaleStartDetails(
+          focalPoint: details.focalPoint,
+          localFocalPoint: details.localFocalPoint,
+        ),
+      );
+    }
     _scaleAnimationFocalPoint = details.localFocalPoint;
     final Offset focalPointScene = _transformer.toScene(
       details.localFocalPoint,
@@ -546,11 +600,13 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
         final double scaleChange = desiredScale / currentScale;
 
         if (scaleChange != 1.0) {
+          final Rect gestureViewport = _gestureViewport ?? _viewport;
+          final Rect gestureBoundary = _gestureBoundaryRect ?? _boundaryRect;
           final double totalScale = math.max(
             currentScale * scaleChange,
             math.max(
-              _viewport.width / _boundaryRect.width,
-              _viewport.height / _boundaryRect.height,
+              gestureViewport.width / gestureBoundary.width,
+              gestureViewport.height / gestureBoundary.height,
             ),
           );
           final double clampedTotalScale = clampDouble(
@@ -660,6 +716,8 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   void _onScaleEnd(ScaleEndDetails details) {
     if (_ignoreThisPanZoomGesture && !isCurrentGestureADrawGesture) {
       _ignoreThisPanZoomGesture = false;
+      // Never leave a stale viewport flag behind an ignored gesture.
+      _finishViewportGesture();
       return;
     }
     widget.onInteractionEnd?.call(details);
@@ -667,6 +725,9 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     if (isCurrentGestureADrawGesture) {
       _stopPhysics();
       isCurrentGestureADrawGesture = false;
+      // A draw promoted mid-gesture to viewport (second finger) still holds
+      // the viewport flag: release it with a delayed settle.
+      _finishViewportGesture();
       return widget.onDrawEnd?.call(details);
     }
 
@@ -713,6 +774,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
   }
 
   void _finishViewportGesture() {
+    _clearGestureGeometry();
     if (!_viewportGestureActive) return;
     _viewportGestureActive = false;
     PageRasterCacheManager.updateViewportMoving(false);
@@ -843,6 +905,12 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
       stows.lastCanvasScale = scale;
     }
 
+    // Authoritative motion signal: every matrix change (pan translation or
+    // pinch scale, including fling ticks, scrollbar drags and wheel zoom)
+    // refreshes the LOD before the next paint, so a missed gesture callback
+    // can never leave the raster optimization disabled mid-motion.
+    PageRasterCacheManager.notifyViewportMotion(scale: scale);
+
     _scheduleViewportRebuildIfNeeded();
   }
 
@@ -877,14 +945,32 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     _lastViewportSize = viewportRect.size;
   }
 
-  void _scheduleViewportRebuildIfNeeded() {
+  DateTime? _lastViewportRebuildTime;
+
+  void _scheduleViewportRebuildIfNeeded({bool force = false}) {
     if (widget.builder == null || _parentKey.currentContext == null) return;
     final viewportRect = _viewport;
     final quad = _transformViewport(_transformer.value, viewportRect);
     final bucket = _bucketViewport(_quadAxisAlignedBounds(quad));
-    if (_lastViewportBucket == bucket &&
+    if (!force &&
+        _lastViewportBucket == bucket &&
         _lastViewportSize == viewportRect.size) {
       return;
+    }
+    // During motion the Transform composites without rebuilding: throttle
+    // page-list rebuilds so continuous pinch-zoom cannot rebuild the whole
+    // page stack (quill editors, stroke flattening) every frame. The settle
+    // listener below forces one fresh rebuild when motion stops.
+    if (!force && PageRasterCacheManager.viewportMoving) {
+      final now = DateTime.now();
+      final last = _lastViewportRebuildTime;
+      if (last != null &&
+          now.difference(last) < const Duration(milliseconds: 180)) {
+        return;
+      }
+      _lastViewportRebuildTime = now;
+    } else {
+      _lastViewportRebuildTime = DateTime.now();
     }
     _lastViewportBucket = bucket;
     _lastViewportQuad = quad;
@@ -897,6 +983,11 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
       if (mounted) setState(() {});
     });
     SchedulerBinding.instance.ensureVisualUpdate();
+  }
+
+  void _onLodSettledRebuild() {
+    if (!mounted) return;
+    _scheduleViewportRebuildIfNeeded(force: true);
   }
 
   void _startPhysics() {
@@ -1017,6 +1108,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     _transformer.addListener(_handleTransformation);
     _scrollPhysicsStopListener = () => _stopPhysics();
     widget.scrollPhysicsStopNotifier?.addListener(_scrollPhysicsStopListener!);
+    PageRasterCacheManager.addLodSettledListener(_onLodSettledRebuild);
   }
 
   @override
@@ -1046,7 +1138,7 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
 
   @override
   void dispose() {
-    _wheelZoomSettleTimer?.cancel();
+    PageRasterCacheManager.removeLodSettledListener(_onLodSettledRebuild);
     widget.scrollPhysicsStopNotifier?.removeListener(
       _scrollPhysicsStopListener!,
     );
@@ -1199,7 +1291,14 @@ class _ImmediateScaleGestureRecognizer extends ScaleGestureRecognizer {
   @override
   void addAllowedPointer(PointerDownEvent event) {
     super.addAllowedPointer(event);
-    if (isDrawGesture(event)) {
+    // Immediate accept only for stylus: a touch that starts with one finger
+    // may still become a two-finger pinch, and locking it as draw up-front
+    // stole the zoom gesture and ran it without the viewport LOD. Touch draw
+    // still wins the arena after slop via the ScaleStartDetails check.
+    final isStylus =
+        event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    if (isStylus && isDrawGesture(event)) {
       resolve(GestureDisposition.accepted);
     }
   }

@@ -551,7 +551,12 @@ void main() {
     expect(TiledStrokePictureCache.zoomLodSettled, isFalse);
 
     // Zoom LOD may settle while inertia still holds viewportMoving.
-    await tester.pump(TiledStrokePictureCache.viewportSettleDelay);
+    // Debounce semantics: ongoing fling ticks refresh motion, so simulate
+    // one tick halfway through the settle window to keep moving true.
+    final halfDelay = TiledStrokePictureCache.viewportSettleDelay ~/ 2;
+    await tester.pump(halfDelay);
+    TiledStrokePictureCache.updateViewportMoving(true);
+    await tester.pump(halfDelay);
     expect(TiledStrokePictureCache.viewportMoving, isTrue);
     _paintCache(
       cache,

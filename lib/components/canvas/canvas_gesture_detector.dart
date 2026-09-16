@@ -263,8 +263,6 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     });
   }
 
-  Timer? _arrowKeySettleTimer;
-
   void _arrowKeyPanNow(AxisDirection direction) {
     final transformation = widget._transformationController.value;
     const panAmount = 50.0;
@@ -286,14 +284,12 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
       0,
       1,
     );
-    
-    PageRasterCacheManager.updateViewportMoving(true);
-    _arrowKeySettleTimer?.cancel();
-    _arrowKeySettleTimer = Timer(PageRasterCacheManager.viewportSettleDelay, () {
-      PageRasterCacheManager.updateViewportMoving(false);
-    });
 
     widget._transformationController.value = next;
+    // Central debounce owns the settle; the transform listener refreshes it.
+    PageRasterCacheManager.notifyViewportMotion(
+      scale: next.getMaxScaleOnAxis(),
+    );
   }
 
   var _setupKeybindings = false;
@@ -461,8 +457,9 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     if (_isClamping) return;
 
     // Transform updates every pan/zoom frame via AnimatedBuilder, but the
-    // page builder is bucket-throttled. Push scale here so zoom LOD rasters
-    // do not wait for a widget rebuild (or a new stroke).
+    // page builder is bucket-throttled. Observe the scale here for zoom LOD
+    // rasters; motion itself is driven once by InteractiveCanvasViewer so
+    // each frame restarts the settle timer exactly once.
     PageRasterCacheManager.setViewportScale(
       widget._transformationController.value.approxScale,
     );
