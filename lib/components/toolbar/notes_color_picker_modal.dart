@@ -451,29 +451,33 @@ class _NotesColorPickerModalState extends State<NotesColorPickerModal> {
                         ),
                         itemCount: _swatchCols * _swatchRows,
                         itemBuilder: (context, index) {
-                          final row = index ~/ _swatchCols;
-                          final col = index % _swatchCols;
-                          final c = _swatchAt(row, col);
-                          final isSelected = _color.toARGB32() == c.toARGB32();
-                          final contrastColor = ThemeData.estimateBrightnessForColor(c) == Brightness.dark
-                              ? Colors.white
-                              : Colors.black;
+                        final row = index ~/ _swatchCols;
+                        final col = index % _swatchCols;
+                        final c = _swatchAt(row, col);
+                        final isSelected = _color.toARGB32() == c.toARGB32();
+                        final contrastColor = ThemeData.estimateBrightnessForColor(c) == Brightness.dark
+                            ? Colors.white
+                            : Colors.black;
 
-                          return Material(
-                            color: c,
-                            shape: CircleBorder(
-                              side: BorderSide(
-                                color: colorScheme.outline.withValues(alpha: 0.15),
-                                width: 1,
-                              ),
+                        final borderRadius = BorderRadius.circular(6);
+
+                        return Material(
+                          color: c,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: borderRadius,
+                            side: BorderSide(
+                              color: colorScheme.outline.withValues(alpha: 0.15),
+                              width: 1,
                             ),
-                            clipBehavior: Clip.antiAlias,
-                            child: InkWell(
-                              onTap: () => _setColor(c),
-                              child: isSelected ? Icon(Icons.check, size: 16, color: contrastColor) : null,
-                            ),
-                          );
-                        },
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            borderRadius: borderRadius,
+                            onTap: () => _setColor(c),
+                            child: isSelected ? Icon(Icons.check, size: 16, color: contrastColor) : null,
+                          ),
+                        );
+                      },
                       )
                     : _SpectrumPane(hsv: _hsv, onChanged: _setHsv),
               ),
@@ -488,7 +492,8 @@ class _NotesColorPickerModalState extends State<NotesColorPickerModal> {
                     height: 44,
                     decoration: BoxDecoration(
                       color: _color,
-                      shape: BoxShape.circle,
+                      shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: colorScheme.outlineVariant),
                     ),
                   ),
@@ -562,7 +567,8 @@ class _NotesColorPickerModalState extends State<NotesColorPickerModal> {
                             padding: const EdgeInsets.only(right: 8),
                             child: Material(
                               color: c,
-                              shape: CircleBorder(
+                              shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
                                 side: BorderSide(
                                   color: colorScheme.outline.withValues(alpha: 0.15),
                                   width: 1,
@@ -876,7 +882,8 @@ class _ScreenEyedropperState extends State<_ScreenEyedropper> {
                   width: 72,
                   height: 72,
                   decoration: BoxDecoration(
-                    shape: BoxShape.circle,
+                    shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(8),
                     color: _preview,
                     border: Border.all(color: Colors.white, width: 3),
                     boxShadow: [
@@ -891,7 +898,8 @@ class _ScreenEyedropperState extends State<_ScreenEyedropper> {
                       width: 8,
                       height: 8,
                       decoration: BoxDecoration(
-                        shape: BoxShape.circle,
+                        shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: Colors.white, width: 1.5),
                       ),
                     ),
@@ -1018,7 +1026,8 @@ class _SvSquare extends StatelessWidget {
                   height: 28,
                   decoration: BoxDecoration(
                     color: HSVColor.fromAHSV(1, hue, saturation, value).toColor(),
-                    shape: BoxShape.circle,
+                    shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: Colors.white, width: 3),
                     boxShadow: [
                       BoxShadow(
@@ -1091,7 +1100,8 @@ class _HueBar extends StatelessWidget {
                 height: 28,
                 decoration: BoxDecoration(
                   color: HSVColor.fromAHSV(1, hue, 1, 1).toColor(),
-                  shape: BoxShape.circle,
+                  shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: Colors.white, width: 3),
                   boxShadow: [
                     BoxShadow(

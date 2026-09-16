@@ -831,29 +831,43 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        sectionTitle("Pen Style"),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: colorScheme.secondaryContainer,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              activePen.name,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: colorScheme.onSecondaryContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            _buildPenCard(Pen.ballpointPen(), const Icon(Symbols.ink_pen, size: 18), t.editor.pens.ballpointPen),
-            _buildPenCard(Pen.calligraphyPen(), const Icon(Symbols.brush, size: 18), t.editor.pens.calligraphyPen),
-            _buildPenCard(Pen.fountainPen(), const Icon(Symbols.stylus_note, size: 18), t.editor.pens.fountainPen),
-            _buildPenCard(Pen.advancedPencil(), const FaIcon(FontAwesomeIcons.pencil, size: 16), t.editor.pens.advancedPencil),
-            _buildPenCard(Pen.advancedPen(), const FaIcon(FontAwesomeIcons.sliders, size: 16), t.editor.pens.advancedPen),
+            for (final pen in _penStyles())
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 5),
+                child: _buildPenStyleIcon(pen, activePen.toolId == pen.toolId),
+              ),
           ],
         ),
-        const Divider(height: 32),
+        const SizedBox(height: 24),
 
         if (_penHasFavoriteColors(activePen)) ...[
-          sectionTitle("Color"),
           _buildPenColorSwatches(context, activePen, colorScheme),
-          const Divider(height: 32),
+          const SizedBox(height: 16),
         ],
 
-        sectionTitle("Size"),
         SizePicker(axis: Axis.horizontal, pen: activePen),
-        const Divider(height: 32),
+        const SizedBox(height: 16),
 
         if (activePen.toolId == ToolId.advancedPen) ...[
           AdvancedPenPresets(
@@ -863,7 +877,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
               setState(() {});
             },
           ),
-          const Divider(height: 32),
+          const SizedBox(height: 16),
         ],
         if (activePen.toolId == ToolId.advancedPencil) ...[
           AdvancedPencilPresets(
@@ -874,10 +888,9 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
               setState(() {});
             },
           ),
-          const Divider(height: 32),
+          const SizedBox(height: 16),
         ],
 
-        sectionTitle("Drawing Assist"),
         ValueListenableBuilder(
           valueListenable: stows.strokeStabilization,
           builder: (context, enabled, _) {
@@ -977,22 +990,99 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
   static ValueNotifier<bool> _neonStowFor(ToolId id) =>
       stows.lastBallpointPenNeon;
 
-  Widget _buildPenCard(Pen pen, Widget icon, String label) {
-    final isActive = _selectedPen?.toolId == pen.toolId;
-    return ChoiceChip(
-      label: Text(label),
-      avatar: isActive ? null : icon,
-      selected: isActive,
-      onSelected: (selected) {
-        if (selected) {
-          setState(() {
+  List<Pen> _penStyles() => [
+    Pen.ballpointPen(),
+    Pen.calligraphyPen(),
+    Pen.fountainPen(),
+    Pen.advancedPencil(),
+    Pen.advancedPen(),
+  ];
+
+  IconData _penStyleSymbol(ToolId id) {
+    return switch (id) {
+      ToolId.ballpointPen => Symbols.ink_pen,
+      ToolId.calligraphyPen => Symbols.brush,
+      ToolId.fountainPen => Symbols.stylus_fountain_pen,
+      ToolId.advancedPencil => Symbols.stylus_pencil,
+      ToolId.advancedPen => Symbols.draw,
+      _ => Symbols.ink_pen,
+    };
+  }
+
+  Widget _buildPenStyleIcon(Pen pen, bool isActive) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final color = isActive
+        ? colorScheme.onSecondaryContainer
+        : colorScheme.onSurfaceVariant;
+
+    final icon = Icon(_penStyleSymbol(pen.toolId), size: 30, color: color);
+
+    return Tooltip(
+      message: pen.name,
+      child: Material(
+        color: isActive
+            ? colorScheme.secondaryContainer
+            : colorScheme.surfaceContainerHighest,
+        shape: CircleBorder(
+          side: BorderSide(
+            color: isActive ? colorScheme.secondary : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: () => setState(() {
             _selectedPen = pen;
             Pen.currentPen = pen;
             widget.setTool(pen);
-          });
-        }
-      },
-      showCheckmark: true,
+          }),
+          child: SizedBox(
+            width: 56,
+            height: 56,
+            child: Center(
+              child: pen.toolId == ToolId.advancedPen
+                  ? Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        icon,
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            width: 18,
+                            height: 18,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: isActive
+                                  ? colorScheme.primary
+                                  : colorScheme.surfaceContainerHigh,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isActive
+                                    ? colorScheme.onPrimary.withValues(
+                                        alpha: 0.6,
+                                      )
+                                    : colorScheme.outlineVariant,
+                                width: 1,
+                              ),
+                            ),
+                            child: Icon(
+                              Symbols.tune,
+                              size: 11,
+                              color: isActive
+                                  ? colorScheme.onPrimary
+                                  : colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : icon,
+            ),
+          ),
+        ),
+      ),
     );
   }
 

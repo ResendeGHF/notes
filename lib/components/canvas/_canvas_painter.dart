@@ -983,7 +983,7 @@ class CanvasPainter extends CustomPainter {
         visualPath.close();
       }
 
-      final selectionColor = Colors.black.withInversion(invert);
+      final selectionColor = primaryColor;
 
       canvas.drawPath(
         visualPath,
@@ -1003,7 +1003,7 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    final selectionColor = Colors.black.withInversion(invert);
+    final selectionColor = primaryColor;
 
     if (selection.alignmentGuides.isNotEmpty) {
       final guidePaint = Paint()
