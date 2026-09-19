@@ -383,7 +383,11 @@ class InnerCanvasState extends State<InnerCanvas> {
     _pendingGeneration++;
     _invalidateCommittedStrokesFlatCache();
     _tiledStrokesSnapshot = currentInk;
-    _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: dirty == null);
+    // Eager refill: the live overlay is cleared above, so the committed tiles
+    // must be complete in this same frame — otherwise a fresh stroke blinks
+    // (gone for a frame, then popping in progressively), most visible on
+    // dense pages. The dirty rect is small (just the delta bounds).
+    _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true);
     _layer2Repaint.value++;
     _pendingRepaint.value++;
   }
@@ -1811,6 +1815,11 @@ class TiledStrokePictureCache {
   static const maxConcurrentRasters = 1;
   static const vectorLodMinScale = RasterLodTuning.vectorLodMinScale;
 
+  /// Eager-refill tiles that bypass the per-paint time budget. Covers an
+  /// erase pointer rect (up to 2x2 tiles at 512px) so the dirty block redraws
+  /// in the same frame even when a dense page's grid rebuild ate the budget.
+  static const _eagerRefillUnbudgetedTiles = 4;
+
   /// True while the page list is scrolling/flinging or the canvas is
   /// panning/zooming. Mesh upgrades wait until this is false.
   /// Direct assignment is immediate (tests/headless bakes); production motion
@@ -1915,6 +1924,10 @@ class TiledStrokePictureCache {
   bool _disposed = false;
   bool _moreTilesScheduled = false;
   bool _eagerRefillVisibleTiles = false;
+  // Union of the dirty rects behind [_eagerRefillVisibleTiles], or null for
+  // whole-page scope (full invalidate). Narrows the eager bypass so erase
+  // refills only its own block while cold tiles stay blit-only mid-motion.
+  Rect? _eagerDirtyRect;
   bool _visibleTilesCaughtUp = false;
   int _livePaintedTileCount = 0;
   int _visibleStrokeCount = RasterLodTuning.mediumStrokeCount;
@@ -1986,6 +1999,8 @@ class TiledStrokePictureCache {
     _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
+    // Whole-page scope (null) when eager; cleared otherwise.
+    _eagerDirtyRect = null;
   }
 
   void invalidateRect(Rect rect, {bool eagerRefill = true, double? padding}) {
@@ -2004,6 +2019,14 @@ class TiledStrokePictureCache {
     for (var tx = startX; tx <= endX; tx++) {
       for (var ty = startY; ty <= endY; ty++) {
         _discardTile(_tileKey(tx, ty));
+      }
+    }
+    if (eagerRefill) {
+      if (!_eagerRefillVisibleTiles || _eagerDirtyRect == null) {
+        // Fresh scope, or keep whole-page scope from a full invalidate.
+        _eagerDirtyRect = _eagerRefillVisibleTiles ? null : inflated;
+      } else {
+        _eagerDirtyRect = _eagerDirtyRect!.expandToInclude(inflated);
       }
     }
     _gridDirty = true;
@@ -2096,6 +2119,15 @@ class TiledStrokePictureCache {
         : (useTimeBudget
               ? 0x7fffffff
               : maxNewTilesPerPaint);
+    // Eager refill (erase/delete/theme-flip): refill every dirty visible
+    // tile in this same paint so the change is visible this frame and
+    // unchanged tiles never sit blank across progressive refills (the erase
+    // flicker). Bypasses the count cap but still respects the time budget
+    // and forbidRecord. Applies even while the viewport is moving (erase
+    // during pan inertia): only explicitly dirtied tiles re-record, so the
+    // blit-only-while-moving cost stays bounded by the time budget, and no
+    // raster bakes are scheduled (allowRaster stays false while moving).
+    final eagerRefill = _eagerRefillVisibleTiles && !forbidRecord;
     final Stopwatch? budgetWatch = useTimeBudget
     ? (Stopwatch()..start())
     : null;
@@ -2274,8 +2306,19 @@ class TiledStrokePictureCache {
         final tileStrokes = _strokesForTile(tileRect, strokes, page);
         if (tileStrokes.isEmpty) continue;
         final needsMesh = _tileNeedsMeshBuild(tileStrokes);
+        // Small eager refills (erase pointer rects) bypass the time budget
+        // so a dense page's grid rebuild cannot starve the dirty tiles into
+        // blank frames. Larger eager refills stay time-budgeted. The bypass
+        // is scoped to the eager dirty rect (null = whole page) so cold
+        // tiles entering mid-fling stay blit-only.
+        final inEagerScope =
+            _eagerDirtyRect == null ||
+            _eagerDirtyRect!.overlaps(tileRect);
         final canRecord =
-        !forbidRecord && recordedThisPaint < tileBudget && !overTime;
+        !forbidRecord &&
+        (eagerRefill && inEagerScope
+          ? (recordedThisPaint < _eagerRefillUnbudgetedTiles || !overTime)
+          : recordedThisPaint < tileBudget && !overTime);
         if (!canRecord) {
           missingTiles = true;
           continue;
@@ -2312,12 +2355,18 @@ class TiledStrokePictureCache {
     _evictOffscreenRasters(visibleKeys);
     if (missingTiles) {
       _visibleTilesCaughtUp = false;
-      // While moving, stay blit-only: do not chain another repaint now, the
-      // settle lodEpoch bump repaints once and refills then.
-      if (!moving) _scheduleMoreTiles();
+      // While moving, stay blit-only — except when erase-dirty tiles remain:
+      // those have no picture to blit (they were just discarded), so leaving
+      // them blank until settle is a visible blink through the whole inertia.
+      // Continues only while progress is made (self-terminating); cold tiles
+      // never record mid-motion, so a fling quickly returns to pure composite.
+      if (!moving || (eagerRefill && recordedThisPaint > 0)) {
+        _scheduleMoreTiles();
+      }
     } else {
       _visibleTilesCaughtUp = true;
       _eagerRefillVisibleTiles = false;
+      _eagerDirtyRect = null;
       if (allowRaster && staleRasters) {
         _scheduleMoreTiles();
       }
@@ -2327,6 +2376,116 @@ class TiledStrokePictureCache {
       !debugForceSyncRaster) {
       _scheduleBackgroundBake();
       }
+  }
+
+  /// Records the tile Pictures covering [targetRect] without an on-screen
+  /// [Canvas]. Used to pre-tessellate adjacent pages during idle frames so a
+  /// pan scrolls into fully drawn content instead of empty/partially filled
+  /// pages. Also warms the spatial grid and path-only metadata the paint path
+  /// needs.
+  ///
+  /// Tiles already recorded are skipped, so repeated calls (with rolling
+  /// [maxTiles]/[budgetMs] slices) make monotonic forward progress on a page.
+  /// While [viewportMoving] the call is capped to one tile so gesture frames
+  /// stay bounded; the editor scheduler only prewarms while settled anyway.
+  ///
+  /// Strictly additive: if the visual signature does not match what the
+  /// paint path would use (theme flip, page swap, resize in flight), this
+  /// call records nothing instead of invalidating — paint owns invalidation.
+  /// That guarantees background prewarm can never blank a live page.
+  ///
+  /// Returns the number of tiles recorded on this call.
+  int prewarmTiles({
+    required Rect targetRect,
+    required List<Stroke> strokes,
+    required EditorPage page,
+    required Size size,
+    required bool invert,
+    required Color primaryColor,
+    required int pageIndex,
+    required int totalPages,
+    required double currentScale,
+    required TextStyle defaultTextStyle,
+    int? lineHeight,
+    double? lineThickness,
+    Color? lineColor,
+    int maxTiles = 1,
+    int budgetMs = 0,
+  }) {
+    if (strokes.isEmpty || _disposed) return 0;
+    if (_pictures.isEmpty &&
+        !_gridDirty &&
+        _grid != null &&
+        _indexedStrokeCount != strokes.length) {
+      _gridDirty = true;
+    }
+    // Additive-only: never invalidate from a background prewarm. If the live
+    // paint path uses a different signature, it will invalidate on its own
+    // next paint; recording under a stale signature would only be discarded.
+    final signature = _visualSignatureFor(
+      size: size,
+      page: page,
+      invert: invert,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      lineColor: lineColor,
+    );
+    if (_visualSignature != 0 && _visualSignature != signature) {
+      return 0;
+    }
+    if (_visualSignature == 0) {
+      _visualSignature = signature;
+    }
+    _ensureGrid(strokes);
+    final pageRect = Offset.zero & size;
+    final area = pageRect.intersect(targetRect);
+    if (area.isEmpty) return 0;
+    if (viewportMoving && maxTiles > 1) {
+      maxTiles = 1;
+    }
+    final startX = (area.left / tileSize).floor();
+    final endX = (area.right / tileSize).floor();
+    final startY = (area.top / tileSize).floor();
+    final endY = (area.bottom / tileSize).floor();
+    final Stopwatch? watch = budgetMs > 0 ? (Stopwatch()..start()) : null;
+    var recorded = 0;
+    for (var ty = startY; ty <= endY; ty++) {
+      for (var tx = startX; tx <= endX; tx++) {
+        if (watch != null && watch.elapsedMilliseconds >= budgetMs) {
+          return recorded;
+        }
+        if (recorded >= maxTiles) return recorded;
+        final tileRect = _tileRect(tx, ty).intersect(pageRect);
+        if (tileRect.isEmpty) continue;
+        final key = _tileKey(tx, ty);
+        if (_pictures.containsKey(key)) continue;
+        final tileStrokes = _strokesForTile(tileRect, strokes, page);
+        if (tileStrokes.isEmpty) continue;
+        final picture = _recordTile(
+          tileRect: tileRect,
+          tileStrokes: tileStrokes,
+          page: page,
+          invert: invert,
+          primaryColor: primaryColor,
+          pageIndex: pageIndex,
+          totalPages: totalPages,
+          currentScale: currentScale,
+          defaultTextStyle: defaultTextStyle,
+          lineHeight: lineHeight,
+          lineThickness: lineThickness,
+          lineColor: lineColor,
+        );
+        _pictures[key] = picture;
+        _markFineInk(key, tileStrokes);
+        if (_tileNeedsMeshBuild(tileStrokes)) {
+          _pathOnlyKeys.add(key);
+        } else {
+          _pathOnlyKeys.remove(key);
+        }
+        recorded++;
+      }
+    }
+    return recorded;
   }
 
   void _scheduleMoreTiles() {
@@ -2717,7 +2876,30 @@ class TiledStrokePictureCache {
     required double? lineThickness,
     required Color? lineColor,
   }) {
-    final signature = Object.hash(
+    final signature = _visualSignatureFor(
+      size: size,
+      page: page,
+      invert: invert,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      lineColor: lineColor,
+    );
+    if (_visualSignature == signature) return;
+    if (_pictures.isNotEmpty) {
+      invalidateAll(eagerRefill: true);
+    }
+    _visualSignature = signature;
+  }
+
+  static int _visualSignatureFor({
+    required Size size,
+    required EditorPage page,
+    required bool invert,
+    required int? lineHeight,
+    required double? lineThickness,
+    required Color? lineColor,
+  }) {
+    return Object.hash(
       size.width,
       size.height,
       page,
@@ -2726,11 +2908,6 @@ class TiledStrokePictureCache {
       lineThickness,
       lineColor?.toARGB32(),
     );
-    if (_visualSignature == signature) return;
-    if (_pictures.isNotEmpty) {
-      invalidateAll(eagerRefill: true);
-    }
-    _visualSignature = signature;
   }
 
   ui.Picture _recordTile({

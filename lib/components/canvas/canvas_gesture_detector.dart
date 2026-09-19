@@ -42,6 +42,7 @@ class CanvasGestureDetector extends StatefulWidget {
     this.onRawPointerMoveForDraw,
     required this.onHovering,
     required this.onHoveringEnd,
+    this.onEraserHover,
     required this.onStylusButtonChanged,
     required this.onLongPress,
     this.onSecondaryTapDown,
@@ -61,6 +62,7 @@ class CanvasGestureDetector extends StatefulWidget {
     this.scrollPhysicsStopNotifier,
     this.tryHydratePage,
     this.onMaintainPageRasterBand,
+    this.onPrefetchNearbyPages,
     TransformationController? transformationController,
   }) : _transformationController =
            transformationController ?? TransformationController();
@@ -87,6 +89,9 @@ class CanvasGestureDetector extends StatefulWidget {
 
   final VoidCallback onHovering;
   final VoidCallback onHoveringEnd;
+  // Fired when the stylus eraser end approaches (invertedStylus hover).
+  // Used to settle viewport inertia before the first erase touch lands.
+  final VoidCallback? onEraserHover;
   final ValueChanged<bool> onStylusButtonChanged;
   final void Function(Offset globalPosition) onLongPress;
   final void Function(Offset globalPosition)? onSecondaryTapDown;
@@ -127,6 +132,10 @@ class CanvasGestureDetector extends StatefulWidget {
   /// Prefetch/evict page raster caches for the visible band ± neighbors.
   final void Function(int visibleStart, int visibleEnd)?
   onMaintainPageRasterBand;
+
+  /// Idle pre-tessellation hook: the editor records tile Pictures for pages
+  /// near the viewport so a pan scrolls into already-drawn content.
+  final void Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
 
   late final TransformationController _transformationController;
 
@@ -456,6 +465,42 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   void onTransformChanged() {
     if (_isClamping) return;
 
+    // Synchronous fail-safe: hydrate any on-screen lazy shell right here, in
+    // the transform listener, before the frame builds. The idle hydrate loop
+    // lags a frame behind, so without this a fast pan could render a shell
+    // placeholder for one frame. Cheap: binary search over page offsets.
+    if (widget.tryHydratePage != null &&
+        Pen.currentStroke == null &&
+        Eraser.isDragging == false &&
+        _pageVerticalOffsets.isNotEmpty &&
+        containerBounds.maxHeight > 0) {
+      final transform = widget._transformationController.value;
+      final scale = transform.approxScale;
+      if (scale > 0) {
+        final translateY = transform.getTranslation().y;
+        final contentTop = -translateY / scale;
+        final contentBottom =
+            (-translateY + containerBounds.maxHeight) / scale;
+        final first = CanvasGestureDetector.getPageIndex(
+          scrollY: contentTop,
+          pageOffsets: _pageVerticalOffsets,
+        );
+        final last = CanvasGestureDetector.getPageIndex(
+          scrollY: contentBottom,
+          pageOffsets: _pageVerticalOffsets,
+        );
+        final lastClamped =
+            last.clamp(0, widget.pages.length - 1);
+        for (var i = first.clamp(0, widget.pages.length - 1);
+            i <= lastClamped;
+            i++) {
+          if (widget.pages[i].isLazyShell) {
+            widget.tryHydratePage!(i);
+          }
+        }
+      }
+    }
+
     // Transform updates every pan/zoom frame via AnimatedBuilder, but the
     // page builder is bucket-throttled. Observe the scale here for zoom LOD
     // rasters; motion itself is driven once by InteractiveCanvasViewer so
@@ -595,10 +640,13 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   var stylusButtonWasPressed = false;
 
   void _listenerPointerHoverEvent(PointerEvent event) {
-    if (event.kind != PointerDeviceKind.stylus) return;
+    final isEraserHover = event.kind == PointerDeviceKind.invertedStylus;
+    if (event.kind != PointerDeviceKind.stylus && !isEraserHover) return;
 
     if (event.synthesized) {
       widget.onHoveringEnd();
+    } else if (isEraserHover) {
+      widget.onEraserHover?.call();
     } else {
       widget.onHovering();
       final barrelPressed = (event.buttons & kPrimaryStylusButton) != 0;
@@ -732,6 +780,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                       tryHydratePage: widget.tryHydratePage,
                       onMaintainPageRasterBand:
                           widget.onMaintainPageRasterBand,
+                      onPrefetchNearbyPages: widget.onPrefetchNearbyPages,
                     );
                   },
                 );
@@ -805,6 +854,7 @@ class _PagesBuilder extends StatefulWidget {
     this.isInfinite = false,
     this.tryHydratePage,
     this.onMaintainPageRasterBand,
+    this.onPrefetchNearbyPages,
   });
 
   final List<EditorPage> pages;
@@ -817,6 +867,7 @@ class _PagesBuilder extends StatefulWidget {
   final bool Function(int pageIndex)? tryHydratePage;
   final void Function(int visibleStart, int visibleEnd)?
   onMaintainPageRasterBand;
+  final void Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
 
   @override
   State<_PagesBuilder> createState() => _PagesBuilderState();
@@ -924,16 +975,19 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     if (Pen.currentStroke != null || Eraser.isDragging) {
       return;
     }
-    if (PageRasterCacheManager.viewportMoving) {
-      // Safety net: programmatic jumps clear moving, but if something else
-      // left the flag stuck, still allow hydrate after a short deferral.
+    // Hydrate near shells even mid-motion (at a reduced pace) so a live pan
+    // rarely exposes an empty page. No hard 6-frame gate: the sync hydrate in
+    // the transform listener already guarantees on-screen shells, this loop
+    // just keeps a wider band ready. Safety net: if the moving flag ever gets
+    // stuck (programmatic jump without settle), force-clear it so tiles and
+    // bakes resume instead of staying blit-only forever.
+    final moving = PageRasterCacheManager.viewportMoving;
+    if (moving) {
       _viewportMovingBlockedFrames++;
-      if (_viewportMovingBlockedFrames < 6) {
-        _scheduleIdlePageWork(visibleStart, visibleEnd);
-        return;
+      if (_viewportMovingBlockedFrames >= 6) {
+        PageRasterCacheManager.endProgrammaticViewportJump();
+        _viewportMovingBlockedFrames = 0;
       }
-      PageRasterCacheManager.endProgrammaticViewportJump();
-      _viewportMovingBlockedFrames = 0;
     } else {
       _viewportMovingBlockedFrames = 0;
     }
@@ -944,6 +998,7 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     final start = (visibleStart - radius).clamp(0, widget.pages.length - 1);
     final end = (visibleEnd + radius).clamp(0, widget.pages.length - 1);
     widget.onMaintainPageRasterBand?.call(start, end);
+    widget.onPrefetchNearbyPages?.call(start, end);
     final center = ((visibleStart + visibleEnd) / 2).round().clamp(
       0,
       widget.pages.length - 1,
@@ -951,7 +1006,9 @@ class _PagesBuilderState extends State<_PagesBuilder> {
 
     if (widget.tryHydratePage == null) return;
 
-    // Nearest-first: walk by distance from viewport center.
+    // Nearest-first: walk by distance from viewport center. While moving,
+    // hydrate at most one shell per frame so gesture frames stay bounded.
+    final maxPerCall = moving ? 1 : _maxShellsPerIdleFrame;
     var hydrated = 0;
     final maxDist = max(center - start, end - center);
     for (var dist = 0; dist <= maxDist; dist++) {
@@ -960,7 +1017,7 @@ class _PagesBuilderState extends State<_PagesBuilder> {
         if (!widget.pages[i].isLazyShell) continue;
         if (widget.tryHydratePage!(i)) {
           hydrated++;
-          if (hydrated >= _maxShellsPerIdleFrame) {
+          if (hydrated >= maxPerCall) {
             if (mounted) setState(() {});
             _scheduleIdlePageWork(visibleStart, visibleEnd);
             return;

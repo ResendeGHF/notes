@@ -337,6 +337,76 @@ void main() {
     page.dispose();
   });
 
+  testWidgets('eraser dirty rect refills while viewport is moving', (
+    tester,
+  ) async {
+    final page = EditorPage();
+    final strokes = _spreadStrokes();
+    for (final stroke in strokes) {
+      page.insertStroke(stroke);
+    }
+    _prewarm(page);
+
+    final cache = page.strokePictureCache;
+    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 32);
+    final filled = cache.recordedTileCount;
+    expect(filled, greaterThan(1));
+
+    // Erase during pan inertia: dirty tiles must refill in the same paint
+    // instead of sitting blank until the viewport settles (erase flicker).
+    // Cold tiles still must not record mid-motion (blit-only preserved).
+    TiledStrokePictureCache.viewportMoving = true;
+    cache.invalidateRect(
+      const Rect.fromLTWH(0, 0, 1000, 1400),
+      eagerRefill: true,
+    );
+    expect(cache.recordedTileCount, 0);
+
+    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    expect(cache.recordedTileCount, filled);
+    expect(cache.willEagerRefillVisibleTiles, isFalse);
+
+    TiledStrokePictureCache.viewportMoving = false;
+    page.dispose();
+  });
+
+  testWidgets('moving erase refills only dirty tiles, cold stay blit-only', (
+    tester,
+  ) async {
+    final page = EditorPage();
+    final strokes = _spreadStrokes();
+    for (final stroke in strokes) {
+      page.insertStroke(stroke);
+    }
+    _prewarm(page);
+
+    final cache = page.strokePictureCache;
+    // Settle-paint only the top-left tile; the rest stays cold.
+    _paintCache(
+      cache,
+      page,
+      strokes: strokes,
+      clip: const Rect.fromLTWH(0, 0, 400, 400),
+      maxNewTilesPerPaint: 32,
+    );
+    expect(cache.recordedTileCount, 1);
+
+    // Erase inside the recorded tile while the viewport is moving.
+    TiledStrokePictureCache.viewportMoving = true;
+    cache.invalidateRect(
+      const Rect.fromLTWH(0, 0, 100, 100),
+      eagerRefill: true,
+    );
+    expect(cache.recordedTileCount, 0);
+
+    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    // Dirty tile refilled same-frame; cold tiles untouched mid-motion.
+    expect(cache.recordedTileCount, 1);
+
+    TiledStrokePictureCache.viewportMoving = false;
+    page.dispose();
+  });
+
   test('raster LOD snaps zoom to quarter-stops', () {
     expect(TiledStrokePictureCache.rasterLodScale(1), 1);
     expect(TiledStrokePictureCache.rasterLodScale(2.4), 2.5);

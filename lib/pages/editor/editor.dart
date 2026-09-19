@@ -375,6 +375,71 @@ class EditorState extends State<Editor>
     }
   }
 
+  /// Idle tile pre-tessellation for pages near the visible band. Called once
+  /// per idle frame by the page builder. Records tile Pictures for hydrated
+  /// pages (nearest-first, sliced by budget) so content is already drawn when
+  /// the user scrolls there, instead of appearing block by block. During a
+  /// live pan only the nearest page at one tile/frame is recorded; the full
+  /// budget is reserved for settled frames. Never runs during a stroke.
+  void _prefetchNearbyPageContent(int bandStart, int bandEnd) {
+    if (coreInfo.pages.isEmpty) return;
+    if (Pen.currentStroke != null || Eraser.isDragging) return;
+    final moving = TiledStrokePictureCache.viewportMoving;
+    final pageCount = coreInfo.pages.length;
+    final center = ((bandStart + bandEnd) ~/ 2).clamp(0, pageCount - 1);
+    final theme = _cachedTheme ?? ThemeData.light();
+    final invert = theme.brightness == Brightness.dark
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        : false;
+    final scale = _transformationController.value.approxScale;
+    final currentScale = scale > 0 ? scale : 1.0;
+    final defaultTextStyle =
+        theme.textTheme.bodyMedium ?? const TextStyle();
+    const radius = 2;
+    // Whole-frame budget; slices are shared across the pages we touch.
+    // While moving, tessellate at most the nearest page at one tile per
+    // frame (prewarmTiles self-caps maxTiles) so gesture frames stay free;
+    // idle gets the full 8ms so the whole band fills before the user scrolls.
+    final frameStopwatch = Stopwatch()..start();
+    final pagesPerFrame = moving ? 1 : 3;
+    var pagesTouched = 0;
+    for (var dist = 0; dist <= radius; dist++) {
+      for (final i in {
+        center - dist,
+        if (dist > 0) center + dist,
+      }) {
+        if (i < 0 || i >= pageCount) continue;
+        if (pagesTouched >= pagesPerFrame) return;
+        if (frameStopwatch.elapsedMilliseconds >= 8) return;
+        pagesTouched++;
+        final page = coreInfo.pages[i];
+        if (page.isLazyShell) continue;
+        if (page.allStrokesInDrawOrder.isEmpty) continue;
+        page.strokePictureCache.prewarmTiles(
+          targetRect: Offset.zero & page.size,
+          strokes: page.allStrokesInDrawOrder.toList(),
+          page: page,
+          size: page.size,
+          invert: invert,
+          primaryColor: theme.colorScheme.primary,
+          pageIndex: i,
+          totalPages: pageCount,
+          currentScale: currentScale,
+          defaultTextStyle: defaultTextStyle,
+          lineHeight: page.hasLocalLineHeight
+              ? page.lineHeight
+              : coreInfo.lineHeight,
+          lineThickness: page.hasLocalLineThickness
+              ? page.lineThickness.toDouble()
+              : coreInfo.lineThickness.toDouble(),
+          lineColor: page.lineColor,
+          maxTiles: moving ? 1 : 8,
+          budgetMs: moving ? 2 : 8,
+        );
+      }
+    }
+  }
+
   final GlobalKey<EnhancedToolbarState> _toolbarKey = GlobalKey();
   var history = EditorHistory();
 
@@ -3878,6 +3943,9 @@ class EditorState extends State<Editor>
       Eraser.isDragging = true;
       eraserPosition = position;
       _eraserPositionRepaint.value = position;
+      // Touch-down guarantee (covers devices without hover): kill any
+      // residual inertia so the first erase lands settled.
+      _stopViewportInertiaForEraser();
       // One rebuild to mount the eraser overlay; hits after this do not
       // setState (that dropped FPS when ink was actually deleted).
       if (mounted) setState(() {});
@@ -5424,10 +5492,25 @@ class EditorState extends State<Editor>
 
   void onHovering() {
     isHovering = true;
+    // Eraser tool hovering with the pen tip: same as eraser-end approach,
+    // settle inertia before the touch lands.
+    if (currentTool is Eraser) {
+      _stopViewportInertiaForEraser();
+    }
   }
 
   void onHoveringEnd() {
     isHovering = false;
+  }
+
+  /// Halts pan/zoom inertia the moment the eraser approaches (hover) or
+  /// touches down, so erase strokes land on a settled viewport. Erase tiles
+  /// discarded mid-fling would otherwise blink until settle, and the raster
+  /// LOD bake queue would keep churning underneath the gesture.
+  void _stopViewportInertiaForEraser() {
+    if (!PageRasterCacheManager.viewportMoving) return;
+    _scrollPhysicsStopNotifier.value++;
+    PageRasterCacheManager.endProgrammaticViewportJump();
   }
 
   void onStylusButtonChanged(bool buttonPressed) {
@@ -8945,6 +9028,7 @@ class EditorState extends State<Editor>
             onPointerUpOrCancel: _finishActivePenStrokeFromPointerEnd,
             onHovering: onHovering,
             onHoveringEnd: onHoveringEnd,
+            onEraserHover: _stopViewportInertiaForEraser,
             onStylusButtonChanged: onStylusButtonChanged,
             onLongPress: _showCanvasMenu,
             onSecondaryTapDown: _showCanvasMenu,
@@ -9085,6 +9169,7 @@ class EditorState extends State<Editor>
             placeholderPageBuilder: _editorPlaceholderPageBuilder,
             tryHydratePage: _tryIdleHydratePage,
             onMaintainPageRasterBand: _maintainPageRasterBand,
+            onPrefetchNearbyPages: _prefetchNearbyPageContent,
             transformationController: _transformationController,
             scrollPhysicsStopNotifier: _scrollPhysicsStopNotifier,
             pageLayoutWidthOverride: _pageLayoutWidthOverride,

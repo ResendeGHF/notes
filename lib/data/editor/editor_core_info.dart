@@ -1666,7 +1666,10 @@ class EditorCoreInfo extends ChangeNotifier {
       } else if (count <= 2) {
         eagerIndices = Set<int>.from(List.generate(count, (i) => i));
       } else {
-        const window = 0;
+        const window = 2;
+        // ±2 keeps the landing page plus its immediate neighbors fully parsed
+        // at open, so a first scroll never exposes empty shells. Distant pages
+        // stay lazy until idle hydrate/tap lands on them.
         final center = initialPageIndex
             .clamp(0, math.max(0, count - 1))
             .toInt();
@@ -2099,7 +2102,7 @@ class EditorCoreInfo extends ChangeNotifier {
       } else {
         // Landing window around the opening page (±2). Remaining pages stay
         // shells and hydrate on jump/scroll — never eager-all (even for PDF).
-        const window = 0;
+        const window = 2;
         final center = initialPageIndex
             .clamp(0, math.max(0, count - 1))
             .toInt();
