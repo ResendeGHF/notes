@@ -1038,6 +1038,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final data = reader.data;
     int offset = reader.offset;
 
+    // Track bounds inline while points are hot: grid builds and culling then
+    // skip the O(points) first-bounds pass per stroke on dense pages. Only
+    // finite points count (mirrors the filter applied below).
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = double.negativeInfinity;
+    double maxY = double.negativeInfinity;
+
     if (pressureEnabled) {
       for (int i = 0; i < pointCount; i++) {
         double x = data.getInt32(offset, Endian.little) / 1000.0;
@@ -1047,6 +1055,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         double pressure = data.getInt32(offset, Endian.little) / 1000.0;
         offset += 4;
         points[i] = PointVector(x, y, pressure);
+        if (x.isFinite && y.isFinite && pressure.isFinite) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
       }
     } else {
       for (int i = 0; i < pointCount; i++) {
@@ -1055,9 +1069,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         double y = data.getInt32(offset, Endian.little) / 1000.0;
         offset += 4;
         points[i] = PointVector(x, y);
+        if (x.isFinite && y.isFinite) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
       }
     }
     reader.offset = offset;
+    final bool hasFinitePoints = minX != double.infinity;
 
     final int pageIndex;
     key = reader.readKey();
@@ -1103,6 +1124,20 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
     final options = BinaryOptions().optionsFromBinary(reader, initialKey: key);
 
+    // Bounds were tracked inline during the packed-points loop above using
+    // the same finite-point rule as the filter below, with the same margin
+    // as the lazy [bounds] getter. Pre-seeding avoids an O(points) pass per
+    // stroke on the first grid build / cull of dense pages.
+    final double boundsMargin = options.size / 2;
+    final Rect parsedBounds = hasFinitePoints
+        ? Rect.fromLTRB(
+            minX - boundsMargin,
+            minY - boundsMargin,
+            maxX + boundsMargin,
+            maxY + boundsMargin,
+          )
+        : Rect.zero;
+
     return Stroke(
         color: color,
         pressureEnabled: pressureEnabled,
@@ -1114,6 +1149,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..flatEdge = !options.start.cap
       ..neon = neon
       ..paint = paint
+      .._cachedBounds = parsedBounds
       ..points.addAll(
         points.where(
           (point) =>
@@ -2960,6 +2996,60 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return _cachedVertices;
   }
 
+  /// Attaches mesh arrays triangulated by the background mesh worker. The
+  /// worker runs the same geometry ([solidMeshChunks]) on equivalent inputs,
+  /// so attached arrays are identical to UI-built ones. A structural guard
+  /// (point count, endpoints, color) rejects results for strokes edited or
+  /// moved while the worker ran, instead of mispainting. Returns true when
+  /// attached. Must run on the UI isolate ([ui.Vertices] construction).
+  bool adoptBackgroundMesh({
+    required Float32List positions,
+    required Uint16List indices,
+    Int32List? colors,
+    required int pointCount,
+    required double firstX,
+    required double firstY,
+    required double lastX,
+    required double lastY,
+  }) {
+    if (points.length != pointCount || points.isEmpty) return false;
+    final first = points.first;
+    final last = points.last;
+    if (first.x != firstX ||
+        first.y != firstY ||
+        last.x != lastX ||
+        last.y != lastY) {
+      return false;
+    }
+    _rawPositions = positions;
+    _rawIndices = indices;
+    _rawColors = colors;
+    _cachedVertices = ui.Vertices.raw(
+      ui.VertexMode.triangles,
+      positions,
+      indices: indices,
+      colors: colors,
+    );
+    final int currentHash = visualFingerprint;
+    _cachedVerticesHash = currentHash;
+    if (options.isComplete) {
+      while (_globalVertexCache.length >= _kMaxVertexCacheSize &&
+          _vertexCacheLru.isNotEmpty) {
+        final evictKey = _vertexCacheLru.removeAt(0);
+        _globalVertexCache.remove(evictKey);
+        // Do not dispose: other strokes may still reference this mesh.
+      }
+      _globalVertexCache[currentHash] = _StrokeMeshData(
+        _cachedVertices!,
+        positions,
+        indices,
+        colors,
+      );
+      _vertexCacheLru.add(currentHash);
+    }
+    return true;
+  }
+
   static void _bumpVertexCacheLru(int key) {
     _vertexCacheLru.remove(key);
     _vertexCacheLru.add(key);
@@ -3261,12 +3351,32 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
   }
 
-  _StrokeMeshData? _generateSpineMeshLOD() {
-    if (points.length < 2) return null;
-    _ensurePackedPoints();
-    if (_packedPoints == null || _packedPoints!.length < 6) return null;
-
-    final double scale = _targetScale;
+  /// Pure spine-mesh triangulation (isolate-safe): same math the UI path
+  /// uses, but operating only on explicit inputs with no instance state, no
+  /// singletons and no GPU objects. Shared by [_generateSpineMeshLOD] (UI)
+  /// and the background mesh worker — single source of truth, so worker
+  /// output is byte-identical. Returns raw arrays; callers wrap Vertices.
+  static ({Float32List positions, Uint16List indices, Int32List? colors})?
+  buildSpineMeshArrays({
+    required Float32List packedBase,
+    required Float32List? predictedTail,
+    required ToolId toolId,
+    required bool flatEdge,
+    required double size,
+    required double smoothing,
+    required bool simulatePressure,
+    required bool isComplete,
+    required bool startCap,
+    required bool startTaper,
+    required double? startCustomTaper,
+    required bool endCap,
+    required bool endTaper,
+    required double? endCustomTaper,
+    required bool pressureMapsToCoverage,
+    required bool pressureEnabled,
+    required double targetScale,
+  }) {
+    final double scale = targetScale;
     // Mild overview LOD for hemisphere tessellation only — writing zoom unchanged.
     final int targetCapSegments = scale < 0.35
         ? math.max(4, (_capSegments * 0.6).round())
@@ -3274,7 +3384,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     double toleranceMultiplier = 1.0;
     if (toolId == ToolId.experimentalPen) {
-      toleranceMultiplier = math.max(0.1, options.smoothing * 3.0);
+      toleranceMultiplier = math.max(0.1, smoothing * 3.0);
     }
 
     // Same spine simplification live and committed — divergent tolerances popped
@@ -3288,17 +3398,17 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // Packed samples stay prediction-free so commit can rebuild without a
     // phantom tail. Live cheap-pen mesh appends the tip so the cap tracks
     // the stylus (path tools already did this in getPolygon).
-    Float32List packed = _packedPoints!;
-    if (_usesLiveCheapSpineMesh && _predictedTail != null) {
-      final src = _packedPoints!;
-      final extraLen = _predictedTail!.length * 3;
-      packed = Float32List(src.length + extraLen);
+    Float32List packed = packedBase;
+    final bool liveCheapSpineMesh =
+        !isComplete &&
+        (toolId == ToolId.ballpointPen ||
+            toolId == ToolId.fountainPen ||
+            toolId == ToolId.calligraphyPen);
+    if (liveCheapSpineMesh && predictedTail != null) {
+      final src = packedBase;
+      packed = Float32List(src.length + predictedTail.length);
       packed.setAll(0, src);
-      for (int i = 0; i < _predictedTail!.length; i++) {
-        packed[src.length + i * 3] = _predictedTail![i].x;
-        packed[src.length + i * 3 + 1] = _predictedTail![i].y;
-        packed[src.length + i * 3 + 2] = _predictedTail![i].pressure ?? 0.5;
-      }
+      packed.setAll(src.length, predictedTail);
     }
 
     Float32List rawSmooth = _getAdaptiveSpineFast(
@@ -3343,8 +3453,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final bool isCalligraphy = toolId == ToolId.calligraphyPen;
 
     final double baseSize = isHighlighter
-        ? (options.size / 2.0) * highlighterStrokeScaleFactor
-        : options.size / 2.0;
+        ? (size / 2.0) * highlighterStrokeScaleFactor
+        : size / 2.0;
     final bool canTaper = !isCalligraphy;
     final double calliCos = isCalligraphy ? math.cos(-40 * math.pi / 180) : 1.0;
     final double calliSin = isCalligraphy ? math.sin(-40 * math.pi / 180) : 0.0;
@@ -3361,16 +3471,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : (isCalligraphy ? false : (options.start.cap || isBallpoint))) &&
-        (!options.start.taperEnabled || !canTaper || roundCapOverridesTaper);
+            : (isCalligraphy ? false : (startCap || isBallpoint))) &&
+        (!startTaper || !canTaper || roundCapOverridesTaper);
     final bool generateEndCap =
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : (isCalligraphy ? false : (options.end.cap || isBallpoint))) &&
-        (!options.end.taperEnabled || !canTaper || roundCapOverridesTaper);
+            : (isCalligraphy ? false : (endCap || isBallpoint))) &&
+        (!endTaper || !canTaper || roundCapOverridesTaper);
 
-    final bool useCoverage = toolId == ToolId.advancedPencil && paint.pressureMapsToCoverage;
+    final bool useCoverage = toolId == ToolId.advancedPencil && pressureMapsToCoverage;
 
     // Spine points can emit >1 quad pair when miter subdivisions activate.
     final int maxPairs =
@@ -3425,7 +3535,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
 
     final bool usePressure =
-        (options.simulatePressure || pressureEnabled) &&
+        (simulatePressure || pressureEnabled) &&
         toolId != ToolId.ballpointPen &&
         toolId != ToolId.highlighter;
 
@@ -3517,19 +3627,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     var taperLenStartMesh = 6;
     var taperLenEndMesh = 6;
     if (toolId == ToolId.fountainPen) {
-      taperLenStartMesh = (options.start.customTaper ?? 12).round().clamp(
+      taperLenStartMesh = (startCustomTaper ?? 12).round().clamp(
         4,
         64,
       );
-      taperLenEndMesh = (options.end.customTaper ?? 12).round().clamp(4, 64);
+      taperLenEndMesh = (endCustomTaper ?? 12).round().clamp(4, 64);
     } else if (toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
         toolId == ToolId.experimentalPen) {
-      taperLenStartMesh = (options.start.customTaper ?? 10).round().clamp(
+      taperLenStartMesh = (startCustomTaper ?? 10).round().clamp(
         4,
         64,
       );
-      taperLenEndMesh = (options.end.customTaper ?? 10).round().clamp(4, 64);
+      taperLenEndMesh = (endCustomTaper ?? 10).round().clamp(4, 64);
     }
 
     for (int i = 0; i < count; i++) {
@@ -3613,12 +3723,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
       double pressure = usePressure ? pp : 0.5;
       if (canTaper) {
-        if (options.start.taperEnabled &&
+        if (startTaper &&
             i < taperLenStartMesh &&
             !generateStartCap) {
           final double t = i / taperLenStartMesh;
           pressure *= (t * (2 - t));
-        } else if (options.end.taperEnabled &&
+        } else if (endTaper &&
             i > count - (taperLenEndMesh + 1) &&
             !generateEndCap) {
           final double t = (count - 1 - i) / taperLenEndMesh;
@@ -3716,15 +3826,61 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     );
     final Uint16List finalIndices = Uint16List.sublistView(indices, 0, iIndex);
     final Int32List? finalColors = useCoverage ? Int32List.sublistView(colorsArray!, 0, pairCount * 2) : null;
-
-    final ui.Vertices verts = ui.Vertices.raw(
-      ui.VertexMode.triangles,
-      finalPositions,
+    return (
+      positions: finalPositions,
       indices: finalIndices,
       colors: finalColors,
     );
-    return _StrokeMeshData(verts, finalPositions, finalIndices, finalColors);
   }
+
+  _StrokeMeshData? _generateSpineMeshLOD() {
+    if (points.length < 2) return null;
+    _ensurePackedPoints();
+    if (_packedPoints == null || _packedPoints!.length < 6) return null;
+    Float32List? tail;
+    if (_usesLiveCheapSpineMesh && _predictedTail != null) {
+      final src = _predictedTail!;
+      tail = Float32List(src.length * 3);
+      for (int i = 0; i < src.length; i++) {
+        tail[i * 3] = src[i].x;
+        tail[i * 3 + 1] = src[i].y;
+        tail[i * 3 + 2] = src[i].pressure ?? 0.5;
+      }
+    }
+    final arrays = Stroke.buildSpineMeshArrays(
+      packedBase: _packedPoints!,
+      predictedTail: tail,
+      toolId: toolId,
+      flatEdge: flatEdge,
+      size: options.size,
+      smoothing: options.smoothing,
+      simulatePressure: options.simulatePressure,
+      isComplete: options.isComplete,
+      startCap: options.start.cap,
+      startTaper: options.start.taperEnabled,
+      startCustomTaper: options.start.customTaper,
+      endCap: options.end.cap,
+      endTaper: options.end.taperEnabled,
+      endCustomTaper: options.end.customTaper,
+      pressureMapsToCoverage: paint.pressureMapsToCoverage,
+      pressureEnabled: pressureEnabled,
+      targetScale: _targetScale,
+    );
+    if (arrays == null) return null;
+    final ui.Vertices verts = ui.Vertices.raw(
+      ui.VertexMode.triangles,
+      arrays.positions,
+      indices: arrays.indices,
+      colors: arrays.colors,
+    );
+    return _StrokeMeshData(
+      verts,
+      arrays.positions,
+      arrays.indices,
+      arrays.colors,
+    );
+  }
+
 
   static Float32List _getAdaptiveSpineFast(
     Float32List input,

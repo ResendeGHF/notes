@@ -1333,6 +1333,298 @@ class EditorPage extends ChangeNotifier implements HasSize {
     return page;
   }
 
+  /// Strokes parsed per UI yield in [fromBinaryAsync]. Keeps scroll-hydrate
+  /// of dense pages under ~10ms slices so 120Hz scrolling never freezes.
+  static const _kHydrateYieldEveryStrokes = 400;
+
+  /// Chunked twin of [fromBinary]: identical bytes in, identical page out,
+  /// but yields to the event loop every [_kHydrateYieldEveryStrokes] strokes
+  /// (plus once after images/quill). Used to hydrate dense lazy pages
+  /// without dropping frames. Any format change MUST be mirrored here (and
+  /// in [fromBinary]); `page_binary_parity_test` guards the equivalence.
+  static Future<EditorPage> fromBinaryAsync(
+    BinaryReader reader, {
+    required bool readOnly,
+    required int fileVersion,
+    required String sbnPath,
+    required AssetCacheAll assetCacheAll,
+  }) async {
+    Future<void> yieldToUI() => Future<void>.delayed(Duration.zero);
+
+    int key;
+    int? pageIdRead;
+
+    if (reader.isEOF) {
+      throw Exception('Page.fromBinary: EOF before reading version');
+    }
+    key = reader.readKey();
+    if (key != PageBinaryKeys.version) {
+      throw Exception(
+        'Page.fromBinary: version not set, got key: $key (expected ${PageBinaryKeys.version})',
+      );
+    }
+    reader.readIntNoKey();
+
+    final keyAfterVersion = reader.peekKey();
+    if (keyAfterVersion == PageBinaryKeys.pageId) {
+      reader.readKey();
+      pageIdRead = reader.readIntNoKey();
+    }
+
+    key = reader.readKey();
+    if (key != PageBinaryKeys.width) {
+      throw Exception('Page.fromBinary: width not set');
+    }
+    final double width = reader.readScaledFloat();
+
+    key = reader.readKey();
+    if (key != PageBinaryKeys.height) {
+      throw Exception('Page.fromBinary: height not set');
+    }
+    final double height = reader.readScaledFloat();
+    final Size size = Size(width, height);
+
+    final strokes = <Stroke>[];
+    final images = <EditorImage>[];
+    List<NoteLayer>? layersRead;
+    List<int>? layerOrderRead;
+    int? activeLayerRead;
+    QuillStruct? quill;
+    EditorImage? backgroundImage;
+    CanvasBackgroundPattern? backgroundPattern;
+    int? lineColor;
+    int? backgroundColor;
+    int? lineHeight;
+    double? lineThickness;
+    bool hasLocalPattern = false;
+    bool hasLocalBackgroundColor = false;
+    bool hasLocalLineColor = false;
+    bool hasLocalLineHeight = false;
+    bool hasLocalLineThickness = false;
+    bool hasLocalMargins = false;
+    bool hasLocalBorderColor = false;
+    int? borderColorRead;
+    double marginLeftRead = 0;
+    double marginRightRead = 0;
+    double marginTopRead = 0;
+    double marginBottomRead = 0;
+    var strokesSinceYield = 0;
+
+    Future<List<Stroke>> readStrokeArray(int count) async {
+      final out = <Stroke>[];
+      for (int i = 0; i < count; i++) {
+        out.add(
+          Stroke.fromBinary(
+            reader,
+            fileVersion: fileVersion,
+            page: HasSize(size),
+          ),
+        );
+        strokesSinceYield++;
+        if (strokesSinceYield >= _kHydrateYieldEveryStrokes) {
+          strokesSinceYield = 0;
+          await yieldToUI();
+        }
+      }
+      return out;
+    }
+
+    Future<List<EditorImage>> readImageArray(int count) async {
+      final out = <EditorImage>[];
+      for (int i = 0; i < count; i++) {
+        final imageInfo = EditorImage.readBinary(reader);
+        out.add(
+          EditorImage.fromBinary(
+            reader,
+            imageInfo: imageInfo,
+            inlineAssets: null,
+            isThumbnail: readOnly,
+            sbnPath: sbnPath,
+            assetCacheAll: assetCacheAll,
+          ),
+        );
+      }
+      await yieldToUI();
+      return out;
+    }
+
+    while (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+
+      if (nextKey == -1) {
+        break;
+      }
+
+      if (nextKey == PageBinaryKeys.strokes ||
+          nextKey == PageBinaryKeys.images ||
+          nextKey == PageBinaryKeys.layers ||
+          nextKey == PageBinaryKeys.quill ||
+          nextKey == PageBinaryKeys.backgroundImage ||
+          nextKey == PageBinaryKeys.backgroundPattern ||
+          nextKey == PageBinaryKeys.lineColor ||
+          nextKey == PageBinaryKeys.backgroundColor ||
+          nextKey == PageBinaryKeys.lineHeight ||
+          nextKey == PageBinaryKeys.lineThickness ||
+          nextKey == PageBinaryKeys.localFlags ||
+          nextKey == PageBinaryKeys.pageId ||
+          nextKey == PageBinaryKeys.activeLayer ||
+          nextKey == PageBinaryKeys.marginLeft ||
+          nextKey == PageBinaryKeys.marginRight ||
+          nextKey == PageBinaryKeys.marginTop ||
+          nextKey == PageBinaryKeys.marginBottom ||
+          nextKey == PageBinaryKeys.borderColor) {
+        key = reader.readKey();
+
+        switch (key) {
+          case PageBinaryKeys.strokes:
+            final count = reader.readIntNoKey();
+            strokes.addAll(await readStrokeArray(count));
+            break;
+          case PageBinaryKeys.images:
+            final count = reader.readIntNoKey();
+            images.addAll(await readImageArray(count));
+            break;
+          case PageBinaryKeys.layers:
+            final layerCount = reader.readIntNoKey();
+            final readLayers = <NoteLayer>[];
+            for (int li = 0; li < layerCount; li++) {
+              final strokeCount = reader.readIntNoKey();
+              final layerStrokes = await readStrokeArray(strokeCount);
+              final imageCount = reader.readIntNoKey();
+              final layerImages = await readImageArray(imageCount);
+              readLayers.add(
+                NoteLayer(
+                  name: li == 0 ? 'Base' : 'Layer ${li + 1}',
+                  strokes: layerStrokes,
+                  images: layerImages,
+                ),
+              );
+            }
+            final orderCount = reader.readIntNoKey();
+            layerOrderRead = <int>[];
+            for (int i = 0; i < orderCount; i++) {
+              layerOrderRead.add(reader.readIntNoKey());
+            }
+            layersRead = readLayers;
+            break;
+          case PageBinaryKeys.quill:
+            final deltaJson = jsonDecode(reader.readStringNoKey());
+            quill = QuillStruct(
+              controller: QuillController(
+                document: Document.fromJson(deltaJson as List),
+                selection: const TextSelection.collapsed(offset: 0),
+              ),
+              focusNode: FocusNode(debugLabel: 'Quill Focus Node'),
+            );
+            await yieldToUI();
+            break;
+          case PageBinaryKeys.backgroundImage:
+            final imageInfo = EditorImage.readBinary(reader);
+            backgroundImage = EditorImage.fromBinary(
+              reader,
+              imageInfo: imageInfo,
+              inlineAssets: null,
+              isThumbnail: false,
+              sbnPath: sbnPath,
+              assetCacheAll: assetCacheAll,
+            );
+            break;
+          case PageBinaryKeys.backgroundPattern:
+            final patternIndex = reader.readIntNoKey();
+            if (patternIndex >= 0 &&
+                patternIndex < CanvasBackgroundPattern.values.length) {
+              backgroundPattern = CanvasBackgroundPattern.values[patternIndex];
+            }
+            break;
+          case PageBinaryKeys.lineColor:
+            lineColor = reader.readIntNoKey();
+            break;
+          case PageBinaryKeys.backgroundColor:
+            backgroundColor = reader.readIntNoKey();
+            break;
+          case PageBinaryKeys.lineHeight:
+            lineHeight = reader.readIntNoKey();
+            break;
+          case PageBinaryKeys.lineThickness:
+            lineThickness = reader.readFloatNoKey();
+            break;
+          case PageBinaryKeys.localFlags:
+            int flags = reader.readIntNoKey();
+            hasLocalPattern = (flags & 1) != 0;
+            hasLocalBackgroundColor = (flags & 2) != 0;
+            hasLocalLineColor = (flags & 4) != 0;
+            hasLocalLineHeight = (flags & 8) != 0;
+            hasLocalLineThickness = (flags & 16) != 0;
+            hasLocalMargins = (flags & 32) != 0;
+            hasLocalBorderColor = (flags & 64) != 0;
+            break;
+          case PageBinaryKeys.marginLeft:
+            marginLeftRead = reader.readScaledFloat();
+            break;
+          case PageBinaryKeys.marginRight:
+            marginRightRead = reader.readScaledFloat();
+            break;
+          case PageBinaryKeys.marginTop:
+            marginTopRead = reader.readScaledFloat();
+            break;
+          case PageBinaryKeys.marginBottom:
+            marginBottomRead = reader.readScaledFloat();
+            break;
+          case PageBinaryKeys.borderColor:
+            borderColorRead = reader.readIntNoKey();
+            break;
+          case PageBinaryKeys.activeLayer:
+            activeLayerRead = reader.readIntNoKey();
+            break;
+        }
+      } else if (nextKey == PageBinaryKeys.version) {
+        break;
+      } else {
+        break;
+      }
+    }
+
+    final page = EditorPage(
+      size: size,
+      id: pageIdRead,
+      strokes: layersRead != null ? [] : strokes,
+      images: layersRead != null ? [] : images,
+      quill:
+          quill ??
+          QuillStruct(
+            controller: QuillController.basic(),
+            focusNode: FocusNode(debugLabel: 'Quill Focus Node'),
+          ),
+      backgroundImage: backgroundImage,
+      backgroundPattern: backgroundPattern,
+      lineColor: lineColor != null ? Color(lineColor) : null,
+      backgroundColor: backgroundColor != null ? Color(backgroundColor) : null,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      hasLocalPattern: hasLocalPattern,
+      hasLocalBackgroundColor: hasLocalBackgroundColor,
+      hasLocalLineColor: hasLocalLineColor,
+      hasLocalLineHeight: hasLocalLineHeight,
+      hasLocalLineThickness: hasLocalLineThickness,
+      hasLocalMargins: hasLocalMargins,
+      marginLeft: hasLocalMargins ? marginLeftRead : null,
+      marginRight: hasLocalMargins ? marginRightRead : null,
+      marginTop: hasLocalMargins ? marginTopRead : null,
+      marginBottom: hasLocalMargins ? marginBottomRead : null,
+      hasLocalBorderColor: hasLocalBorderColor,
+      borderColor: borderColorRead != null ? Color(borderColorRead) : null,
+    );
+    if (layersRead != null && layerOrderRead != null) {
+      page.replaceLayersFromBinary(layersRead, layerOrderRead);
+      if (activeLayerRead != null &&
+          activeLayerRead >= 0 &&
+          activeLayerRead < layersRead.length) {
+        page.activeLayerIndex = activeLayerRead;
+      }
+    }
+    return page;
+  }
+
   /// Advances [reader] past one serialized page and returns an empty page shell
   /// (size and optional [id] only). Used when loading large notes without
   /// materializing every page.

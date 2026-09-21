@@ -130,10 +130,11 @@ void main() {
     Pen.currentStroke = null;
   });
 
-  testWidgets('moving viewport does not record new tiles (blit-only)', (
+  testWidgets('fast moving viewport does not record new tiles (blit-only)', (
     tester,
   ) async {
     TiledStrokePictureCache.viewportMoving = false;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(false);
     final page = EditorPage();
     final strokes = _spreadStrokes();
     for (final stroke in strokes) {
@@ -152,14 +153,46 @@ void main() {
     expect(settledCount, greaterThan(0));
 
     TiledStrokePictureCache.viewportMoving = true;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(false);
     _paintCache(cache, page, strokes: strokes);
     expect(
       cache.recordedTileCount,
       settledCount,
-      reason: 'pan/zoom must not record new Pictures; only blit existing rasters',
+      reason:
+          'fast pan/zoom must not record new Pictures; only blit existing rasters',
     );
     expect(cache.debugLivePaintedTileCount, 0);
 
+    TiledStrokePictureCache.viewportMoving = false;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(true);
+    page.dispose();
+  });
+
+  testWidgets('slow pan records bounded tiles while moving, no rasters', (
+    tester,
+  ) async {
+    TiledStrokePictureCache.viewportMoving = false;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(true);
+    final page = EditorPage();
+    final strokes = _spreadStrokes();
+    for (final stroke in strokes) {
+      page.insertStroke(stroke);
+    }
+    _prewarm(page);
+
+    final cache = page.strokePictureCache;
+    // A slow reading pan into cold tiles records a bounded few per paint so
+    // content appears while scrolling — but never schedules raster bakes
+    // (the temporary raster LOD stays off mid-motion).
+    TiledStrokePictureCache.viewportMoving = true;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(true);
+    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 64);
+    final recorded = cache.recordedTileCount;
+    expect(recorded, greaterThan(0));
+    expect(recorded, lessThanOrEqualTo(3));
+    expect(cache.debugRasterCount, 0);
+
+    TiledStrokePictureCache.viewportMoving = false;
     page.dispose();
   });
 
@@ -193,6 +226,8 @@ void main() {
     tester,
   ) async {
     TiledStrokePictureCache.viewportMoving = true;
+    // Fast motion: strict blit-only (slow pans record bounded tiles instead).
+    TiledStrokePictureCache.debugSetViewportSlowMotion(false);
     final page = EditorPage();
     final strokes = _spreadStrokes();
     for (final stroke in strokes) {
@@ -207,11 +242,26 @@ void main() {
       reason: 'cold tiles are not recorded mid-motion (tileBudget 0)',
     );
     expect(cache.debugLivePaintedTileCount, 0);
+    expect(
+      cache.debugFallbackPaintedTileCount,
+      greaterThan(0),
+      reason: 'missing tiles must still draw fallback vectors while moving',
+    );
 
     TiledStrokePictureCache.viewportMoving = false;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(true);
     await tester.pump(TiledStrokePictureCache.viewportSettleDelay);
-    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    for (var i = 0; i < 12 && cache.recordedTileCount <= 1; i++) {
+      _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    }
     expect(cache.recordedTileCount, greaterThan(1));
+    for (
+      var i = 0;
+      i < 12 && !strokes.every((s) => s.hasCachedMesh);
+      i++
+    ) {
+      _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 8);
+    }
     expect(cache.debugPathOnlyTileCount, 0);
     expect(
       strokes.every((s) => s.hasCachedMesh),
@@ -233,8 +283,19 @@ void main() {
     }
 
     final cache = page.strokePictureCache;
-    _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    // Cold pages converge progressively (one tile per paint at this cap)
+    // while every paint stays fully visible via fallback vectors.
+    for (var i = 0; i < 8 && cache.recordedTileCount <= 1; i++) {
+      _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
+    }
     expect(cache.recordedTileCount, greaterThan(1));
+    for (
+      var i = 0;
+      i < 12 && !strokes.every((s) => s.hasCachedMesh);
+      i++
+    ) {
+      _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 8);
+    }
     expect(cache.debugPathOnlyTileCount, 0);
     expect(cache.debugLivePaintedTileCount, 0);
     expect(
@@ -370,6 +431,69 @@ void main() {
     page.dispose();
   });
 
+  testWidgets('cold page draws fallback immediately, converges progressively', (
+    tester,
+  ) async {
+    TiledStrokePictureCache.viewportMoving = false;
+    final page = EditorPage();
+    final strokes = <Stroke>[];
+    for (var i = 0; i < 200; i++) {
+      final stroke = testPolylineStroke(
+        toolId: ToolId.ballpointPen,
+        y: 20.0 + (i % 55) * 20,
+        x0: 20,
+        x1: 380,
+        points: 100,
+      );
+      strokes.add(stroke);
+      page.insertStroke(stroke);
+    }
+    final cache = page.strokePictureCache;
+
+    Future<int> drawnBytes({required int maxNew, int? budgetMs}) async {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(
+        recorder,
+        Rect.fromLTWH(0, 0, page.size.width, page.size.height),
+      );
+      canvas.clipRect(Offset.zero & page.size);
+      cache.paint(
+        canvas: canvas,
+        size: page.size,
+        invert: false,
+        strokes: strokes,
+        page: page,
+        primaryColor: Colors.blue,
+        pageIndex: 0,
+        totalPages: 1,
+        currentScale: 1,
+        defaultTextStyle: const TextStyle(),
+        maxNewTilesPerPaint: maxNew,
+        tileRecordBudgetMs: budgetMs,
+      );
+      final picture = recorder.endRecording();
+      // Byte size of the recorded draw ops (nested tile pictures are stored
+      // by reference, so this measures draws issued by this paint only).
+      final bytes = picture.approximateBytesUsed;
+      picture.dispose();
+      return bytes;
+    }
+
+    // Starved budget: at most one tile is recorded, but the page is fully
+    // visible right away through synchronous fallback vectors.
+    expect(await drawnBytes(maxNew: 1, budgetMs: 1), greaterThan(400));
+    expect(cache.debugFallbackPaintedTileCount, greaterThan(0));
+    final partialCount = cache.recordedTileCount;
+    expect(partialCount, greaterThanOrEqualTo(0));
+
+    // Full budget: recording converges while staying visible.
+    expect(await drawnBytes(maxNew: 64), greaterThan(400));
+    expect(cache.recordedTileCount, greaterThan(partialCount));
+
+    TiledStrokePictureCache.viewportMoving = false;
+    page.dispose();
+  });
+
   testWidgets('moving erase refills only dirty tiles, cold stay blit-only', (
     tester,
   ) async {
@@ -391,8 +515,9 @@ void main() {
     );
     expect(cache.recordedTileCount, 1);
 
-    // Erase inside the recorded tile while the viewport is moving.
+    // Erase inside the recorded tile while the viewport is moving fast.
     TiledStrokePictureCache.viewportMoving = true;
+    TiledStrokePictureCache.debugSetViewportSlowMotion(false);
     cache.invalidateRect(
       const Rect.fromLTWH(0, 0, 100, 100),
       eagerRefill: true,

@@ -135,7 +135,8 @@ class CanvasGestureDetector extends StatefulWidget {
 
   /// Idle pre-tessellation hook: the editor records tile Pictures for pages
   /// near the viewport so a pan scrolls into already-drawn content.
-  final void Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
+  /// Returns the number of tiles recorded (progress for the warmer loop).
+  final int Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
 
   late final TransformationController _transformationController;
 
@@ -867,7 +868,7 @@ class _PagesBuilder extends StatefulWidget {
   final bool Function(int pageIndex)? tryHydratePage;
   final void Function(int visibleStart, int visibleEnd)?
   onMaintainPageRasterBand;
-  final void Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
+  final int Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
 
   @override
   State<_PagesBuilder> createState() => _PagesBuilderState();
@@ -878,6 +879,12 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   static const double _pdfRenderCacheExtent = 120;
   static const int _minHydrateRadius = 2;
   static const int _maxShellsPerIdleFrame = 3;
+  // Parse-ahead horizon for the aggressive warmer: scrolls land inside it.
+  static const int _warmHydrateRadius = 6;
+  // Far-horizon pacing: one slice per tick, no vsync storm while waiting.
+  // Fast enough that a freshly opened note converges in about a second;
+  // each tick still yields, so opening stays interactive.
+  static const int _trickleIntervalMs = 150;
 
   final List<double> _pageOffsets = [];
   final List<double> _pageHeights = [];
@@ -889,6 +896,21 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   bool _idleWorkScheduled = false;
   bool _hasPdfBackedPages = false;
   int _viewportMovingBlockedFrames = 0;
+  // Persistent whole-note warmer: the aggressive loop chains frame callbacks
+  // while making progress (nearest-first), then sleeps; any build kick
+  // (scroll/edit/theme) wakes it. A slow trickle covers pages beyond the
+  // aggressive horizon so waiting really warms everything over time.
+  bool _warming = false;
+  int _lastVisibleStart = 0;
+  int _lastVisibleEnd = 0;
+  Timer? _trickleTimer;
+
+  @override
+  void dispose() {
+    _trickleTimer?.cancel();
+    _trickleTimer = null;
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(_PagesBuilder oldWidget) {
@@ -962,17 +984,97 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   }
 
   void _scheduleIdlePageWork(int startIndex, int endIndex) {
-    if (_idleWorkScheduled || widget.pages.isEmpty) return;
+    if (widget.pages.isEmpty) return;
+    _lastVisibleStart = startIndex.clamp(0, widget.pages.length - 1);
+    _lastVisibleEnd = endIndex.clamp(0, widget.pages.length - 1);
+    _kickTrickle();
+    if (_warming || _idleWorkScheduled) return;
+    _warming = true;
     _idleWorkScheduled = true;
     SchedulerBinding.instance.scheduleFrameCallback((_) {
       _idleWorkScheduled = false;
-      if (!mounted) return;
-      _runIdlePageWork(startIndex, endIndex);
+      if (!mounted) {
+        _warming = false;
+        return;
+      }
+      // Use the latest visible range, not the one captured at kick time:
+      // flings move several pages between kick and callback.
+      _runIdlePageWork(_lastVisibleStart, _lastVisibleEnd);
     });
+  }
+
+  /// Slow far-horizon sweep (one slice per tick): warms pages beyond the
+  /// aggressive band so waiting on any page eventually warms the whole note.
+  /// Progress-tracked; stops when done. Skipped while drawing/moving/hidden.
+  void _kickTrickle() {
+    if (_trickleTimer != null || !mounted || widget.pages.isEmpty) return;
+    if (_warming) return;
+    _trickleTimer = Timer(const Duration(milliseconds: _trickleIntervalMs), () {
+      _trickleTimer = null;
+      if (!mounted || _warming) return;
+      _runTrickle();
+    });
+  }
+
+  void _runTrickle() {
+    if (!mounted || _warming) return;
+    if (Pen.currentStroke != null || Eraser.isDragging) return;
+    // Fast flings pause the far-horizon sweep (paint fallback keeps those
+    // pages visible); slow pans and settled frames keep converging.
+    if (PageRasterCacheManager.viewportMoving &&
+        !PageRasterCacheManager.viewportSlowMotion) {
+      _kickTrickle();
+      return;
+    }
+    if (SchedulerBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    final pageCount = widget.pages.length;
+    if (pageCount == 0) return;
+    final center = ((_lastVisibleStart + _lastVisibleEnd) / 2)
+        .round()
+        .clamp(0, pageCount - 1);
+    var hydrated = 0;
+    if (widget.tryHydratePage != null) {
+      // Nearest shells anywhere in the note (beyond the aggressive band),
+      // up to two per tick so a fresh open converges quickly. Dense slices
+      // hydrate chunked-async with UI yields, so this stays interactive.
+      for (var n = 0; n < 2; n++) {
+        var nearest = -1;
+        var bestDist = pageCount + 1;
+        for (var i = 0; i < pageCount; i++) {
+          if (!widget.pages[i].isLazyShell) continue;
+          final dist = (i - center).abs();
+          if (dist < bestDist) {
+            bestDist = dist;
+            nearest = i;
+          }
+        }
+        if (nearest < 0) break;
+        if (widget.tryHydratePage!(nearest)) {
+          hydrated++;
+        } else {
+          break;
+        }
+      }
+    }
+    // Whole-note tile trickle; the editor orders outward from the viewport.
+    final prewarmed =
+        widget.onPrefetchNearbyPages?.call(0, pageCount - 1) ?? 0;
+    if (hydrated > 0 && mounted) setState(() {});
+    if (hydrated > 0 || prewarmed > 0) {
+      _kickTrickle();
+    }
+    // Else fully warm: sleep until the next build kick.
   }
 
   void _runIdlePageWork(int visibleStart, int visibleEnd) {
     if (Pen.currentStroke != null || Eraser.isDragging) {
+      // Drawing has priority; the loop sleeps and the next build kick
+      // (pen-up always rebuilds) resumes it.
+      _warming = false;
+      _trickleTimer?.cancel();
+      _trickleTimer = null;
       return;
     }
     // Hydrate near shells even mid-motion (at a reduced pace) so a live pan
@@ -992,40 +1094,56 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       _viewportMovingBlockedFrames = 0;
     }
 
+    final pageCount = widget.pages.length;
     final visibleCount = (visibleEnd - visibleStart + 1).clamp(1, 64);
-    // xnotes-style keep-set: ±N where N ≈ number of visible pages (min 2).
+    // Raster keep-set stays tight (GPU bitmaps): ±N where N ≈ number of
+    // visible pages (min 2).
     final radius = max(_minHydrateRadius, visibleCount);
-    final start = (visibleStart - radius).clamp(0, widget.pages.length - 1);
-    final end = (visibleEnd + radius).clamp(0, widget.pages.length - 1);
+    final start = (visibleStart - radius).clamp(0, pageCount - 1);
+    final end = (visibleEnd + radius).clamp(0, pageCount - 1);
     widget.onMaintainPageRasterBand?.call(start, end);
-    widget.onPrefetchNearbyPages?.call(start, end);
+    // Warm horizon is wider (parse + tiles are CPU-cheap to keep ahead).
+    final warmStart =
+        (visibleStart - _warmHydrateRadius).clamp(0, pageCount - 1);
+    final warmEnd = (visibleEnd + _warmHydrateRadius).clamp(0, pageCount - 1);
+    final prewarmed =
+        widget.onPrefetchNearbyPages?.call(warmStart, warmEnd) ?? 0;
     final center = ((visibleStart + visibleEnd) / 2).round().clamp(
       0,
-      widget.pages.length - 1,
+      pageCount - 1,
     );
 
-    if (widget.tryHydratePage == null) return;
-
-    // Nearest-first: walk by distance from viewport center. While moving,
-    // hydrate at most one shell per frame so gesture frames stay bounded.
-    final maxPerCall = moving ? 1 : _maxShellsPerIdleFrame;
     var hydrated = 0;
-    final maxDist = max(center - start, end - center);
-    for (var dist = 0; dist <= maxDist; dist++) {
-      for (final i in <int>{center - dist, if (dist > 0) center + dist}) {
-        if (i < start || i > end) continue;
-        if (!widget.pages[i].isLazyShell) continue;
-        if (widget.tryHydratePage!(i)) {
-          hydrated++;
-          if (hydrated >= maxPerCall) {
-            if (mounted) setState(() {});
-            _scheduleIdlePageWork(visibleStart, visibleEnd);
-            return;
+    if (widget.tryHydratePage != null) {
+      // Nearest-first: walk by distance from viewport center. While moving,
+      // hydrate at most one shell per frame so gesture frames stay bounded.
+      final maxPerCall = moving ? 1 : _maxShellsPerIdleFrame;
+      final maxDist = max(center - warmStart, warmEnd - center);
+      for (var dist = 0; dist <= maxDist; dist++) {
+        for (final i in <int>{center - dist, if (dist > 0) center + dist}) {
+          if (i < warmStart || i > warmEnd) continue;
+          if (!widget.pages[i].isLazyShell) continue;
+          if (widget.tryHydratePage!(i)) {
+            hydrated++;
+            if (hydrated >= maxPerCall) {
+              if (mounted) setState(() {});
+              _scheduleIdlePageWork(visibleStart, visibleEnd);
+              return;
+            }
           }
         }
       }
     }
     if (hydrated > 0 && mounted) setState(() {});
+    // Persistent loop: chain while making progress anywhere in the horizon;
+    // sleep when fully warm (any build kick wakes us). The trickle covers
+    // pages beyond the horizon.
+    if (mounted && (hydrated > 0 || prewarmed > 0)) {
+      _scheduleIdlePageWork(visibleStart, visibleEnd);
+    } else {
+      _warming = false;
+      _kickTrickle();
+    }
   }
 
   int _findFirstVisiblePageIndex(double viewportTop) {

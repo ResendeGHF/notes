@@ -472,8 +472,11 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
 
   @override
   Widget build(BuildContext context) {
-    final maximumDpi = (widget.renderScale * 180)
-        .clamp(120.0, 240.0)
+    // Quantized DPI buckets: a continuous pinch crosses at most 2-3 buckets
+    // instead of re-rasterizing a heavyweight PDF page on every frame (the
+    // zoom flicker). Each bucket renders once, then blits until crossed.
+    final maximumDpi = (((widget.renderScale * 180) / 40).round() * 40)
+        .clamp(120, 240)
         .toDouble();
 
     // Black on light / non-inverted pages; white when the PDF is inverted.

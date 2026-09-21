@@ -10,6 +10,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:bson/bson.dart';
@@ -37,6 +38,7 @@ import 'package:saber/components/canvas/_canvas_painter.dart';
 import 'package:saber/components/canvas/_circle_stroke.dart';
 import 'package:saber/components/canvas/_rectangle_stroke.dart';
 import 'package:saber/components/canvas/_shape_stroke.dart';
+import 'package:saber/components/canvas/mesh_warmup_worker.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas.dart' show Canvas;
 import 'package:saber/components/canvas/canvas_background_preview.dart';
@@ -238,6 +240,25 @@ class Editor extends StatefulWidget {
   State<Editor> createState() => EditorState();
 }
 
+/// Ship-time structural snapshot of a stroke sent to the background mesh
+/// worker. The attach guard compares these against the live stroke so results
+/// for edited/moved strokes are discarded instead of mispainted.
+class _MeshGuard {
+  const _MeshGuard({
+    required this.pointCount,
+    required this.firstX,
+    required this.firstY,
+    required this.lastX,
+    required this.lastY,
+  });
+
+  final int pointCount;
+  final double firstX;
+  final double firstY;
+  final double lastX;
+  final double lastY;
+}
+
 class EditorState extends State<Editor>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   final log = Logger('EditorState');
@@ -375,18 +396,176 @@ class EditorState extends State<Editor>
     }
   }
 
-  /// Idle tile pre-tessellation for pages near the visible band. Called once
-  /// per idle frame by the page builder. Records tile Pictures for hydrated
-  /// pages (nearest-first, sliced by budget) so content is already drawn when
-  /// the user scrolls there, instead of appearing block by block. During a
-  /// live pan only the nearest page at one tile/frame is recorded; the full
+  /// Idle tile pre-tessellation for pages near the visible band. Called by the
+  /// page builder's warmer (aggressive frame-chained sweeps plus a slow
+  /// whole-note trickle). Records tile Pictures nearest-first, sliced by
+  /// budget, so content is already drawn when the user scrolls there.
+  /// During a live pan nothing is recorded (blit-only purity); the full
   /// budget is reserved for settled frames. Never runs during a stroke.
-  void _prefetchNearbyPageContent(int bandStart, int bandEnd) {
-    if (coreInfo.pages.isEmpty) return;
-    if (Pen.currentStroke != null || Eraser.isDragging) return;
-    final moving = TiledStrokePictureCache.viewportMoving;
+  ///
+  /// Ordering is from the VISIBLE center (not the passed band center) so far
+  /// trickle sweeps still prioritize the pages around the viewport. Returns
+  /// the number of tiles recorded (progress for the warmer loop).
+  ///
+  /// Pages fully warmed at their current content revision are skipped (no
+  /// per-frame list materialization). Any content change bumps
+  /// [EditorPage.saveBinaryRevision] and re-arms warming automatically.
+  final Expando<int> _tilePrewarmDoneRevision = Expando<int>();
+
+  /// Meshes warmed by the background worker at this content revision.
+  final Expando<int> _meshWarmedRevision = Expando<int>();
+
+  /// Background mesh workers in flight (bounded CPU: triangulation is pure
+  /// ALU, but more workers than this starves the UI thread on small SoCs).
+  static const int _kMeshWarmConcurrency = 2;
+  int _meshWarmInFlight = 0;
+  final Set<EditorPage> _meshWarmPages = <EditorPage>{};
+
+  int _visibleBandCenter(int pageCount, int bandStart, int bandEnd) {
+    if (_lastPageRasterBandStart != null &&
+        _lastPageRasterBandEnd != null) {
+      return ((_lastPageRasterBandStart! + _lastPageRasterBandEnd!) ~/ 2)
+          .clamp(0, pageCount - 1);
+    }
+    return ((bandStart + bandEnd) ~/ 2).clamp(0, pageCount - 1);
+  }
+
+  /// Cheap mesh-work predicate: must NOT build anything (reading `vertices`
+  /// would triangulate on the UI thread, defeating the worker).
+  bool _needsWorkerMesh(Stroke s) => strokeNeedsMeshWarmup(s);
+
+  /// Background mesh triangulation for pages with cold meshes, BEYOND the
+  /// pages the UI handles itself. Near pages (dist < 3) triangulate on demand
+  /// via paint/tile-prewarm (budgeted, suppressed to atomic pops); sending
+  /// them to the worker too would duplicate the work and delay their tiles.
+  /// The worker warms ahead (dist 3..band) so arrivals find meshes ready.
+  /// Up to [_kMeshWarmConcurrency] pages concurrently, settled idle only.
+  /// Failures fall back silently to synchronous on-demand warming.
+  void _meshWarmupStep(int bandStart, int bandEnd) {
+    if (_meshWarmInFlight >= _kMeshWarmConcurrency) return;
     final pageCount = coreInfo.pages.length;
-    final center = ((bandStart + bandEnd) ~/ 2).clamp(0, pageCount - 1);
+    if (pageCount == 0) return;
+    final visibleCenter = _visibleBandCenter(pageCount, bandStart, bandEnd);
+    final maxDist = math.max(
+      visibleCenter - bandStart,
+      bandEnd - visibleCenter,
+    );
+    for (var dist = 0; dist <= maxDist; dist++) {
+      for (final i in {
+        visibleCenter - dist,
+        if (dist > 0) visibleCenter + dist,
+      }) {
+        if (i < bandStart || i > bandEnd || i < 0 || i >= pageCount) continue;
+        // Disjoint by construction: near pages belong to the UI paint and
+        // tile prewarm (instant, demand-driven); the worker warms ahead.
+        if ((i - visibleCenter).abs() < 3) continue;
+        final page = coreInfo.pages[i];
+        if (page.isLazyShell) continue;
+        if (_meshWarmPages.contains(page)) continue;
+        if (_meshWarmedRevision[page] == page.saveBinaryRevision) continue;
+        final work = _collectMeshWork(page);
+        if (work.total == 0) {
+          _meshWarmedRevision[page] = page.saveBinaryRevision;
+          continue;
+        }
+        if (work.total < kMeshWarmupMinStrokes) continue;
+        if (work.dtos.isEmpty) continue;
+        _meshWarmInFlight++;
+        _meshWarmPages.add(page);
+        final targets = work.targets;
+        final guards = work.guards;
+        warmStrokeMeshesInBackground({'strokes': work.dtos}).then((results) {
+          _meshWarmInFlight--;
+          _meshWarmPages.remove(page);
+          if (results == null) return;
+          var attached = 0;
+          for (var k = 0; k < results.length && k < targets.length; k++) {
+            final res = results[k];
+            if (res == null) continue;
+            final s = targets[k];
+            final g = guards[k];
+            if (s.adoptBackgroundMesh(
+              positions: res['pos'] as Float32List,
+              indices: res['idx'] as Uint16List,
+              colors: res['col'] as Int32List?,
+              pointCount: g.pointCount,
+              firstX: g.firstX,
+              firstY: g.firstY,
+              lastX: g.lastX,
+              lastY: g.lastY,
+            )) {
+              attached++;
+            }
+          }
+          if (attached == 0) return;
+          if (!page.strokePictureCache.isDisposed) {
+            page.strokePictureCache.recordGeneration.value++;
+          }
+          // More slices remain when cold strokes are left; otherwise done.
+          if (!_hasColdMeshStrokes(page)) {
+            _meshWarmedRevision[page] = page.saveBinaryRevision;
+          }
+        });
+        // One ship per frame (DTO assembly itself costs milliseconds);
+        // pipelining across frames still saturates concurrency.
+        return;
+      }
+    }
+  }
+
+  /// Collects up to [kMeshWarmupMaxStrokesPerCall] cold mesh-needing strokes
+  /// plus the total cold count (for the worth-it threshold and completion).
+  ({List<Stroke> targets, List<Map<String, Object?>> dtos, List<_MeshGuard> guards, int total}) _collectMeshWork(
+    EditorPage page,
+  ) {
+    final targets = <Stroke>[];
+    final dtos = <Map<String, Object?>>[];
+    final guards = <_MeshGuard>[];
+    var total = 0;
+    for (final s in page.allStrokesInDrawOrder) {
+      if (!_needsWorkerMesh(s)) continue;
+      total++;
+      if (dtos.length >= kMeshWarmupMaxStrokesPerCall) continue;
+      final pts = s.points;
+      targets.add(s);
+      guards.add(
+        _MeshGuard(
+          pointCount: pts.length,
+          firstX: pts.first.x,
+          firstY: pts.first.y,
+          lastX: pts.last.x,
+          lastY: pts.last.y,
+        ),
+      );
+      dtos.add(meshWarmupRequestFor(s));
+    }
+    return (targets: targets, dtos: dtos, guards: guards, total: total);
+  }
+
+  bool _hasColdMeshStrokes(EditorPage page) {
+    for (final s in page.allStrokesInDrawOrder) {
+      if (_needsWorkerMesh(s)) return true;
+    }
+    return false;
+  }
+
+  int _prefetchNearbyPageContent(int bandStart, int bandEnd) {
+    if (coreInfo.pages.isEmpty) return 0;
+    if (Pen.currentStroke != null || Eraser.isDragging) return 0;
+    // Fast motion records nothing here (the paint path draws synchronous
+    // fallback vectors instead, so pages are never blank). A slow reading
+    // pan keeps a tight prewarm slice so neighbors converge to cached tiles
+    // while content stays visible.
+    final moving = TiledStrokePictureCache.viewportMoving;
+    final slowMoving =
+        moving && PageRasterCacheManager.viewportSlowMotion;
+    if (moving && !slowMoving) return 0;
+    // Meshes first (off-thread): tile recording below then finds them warm.
+    // Skipped on fast motion: DTO assembly runs on the UI thread and the
+    // fallback paint path needs no meshes.
+    if (!moving) _meshWarmupStep(bandStart, bandEnd);
+    final pageCount = coreInfo.pages.length;
+    final visibleCenter = _visibleBandCenter(pageCount, bandStart, bandEnd);
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
         ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
@@ -395,29 +574,49 @@ class EditorState extends State<Editor>
     final currentScale = scale > 0 ? scale : 1.0;
     final defaultTextStyle =
         theme.textTheme.bodyMedium ?? const TextStyle();
-    const radius = 2;
     // Whole-frame budget; slices are shared across the pages we touch.
-    // While moving, tessellate at most the nearest page at one tile per
-    // frame (prewarmTiles self-caps maxTiles) so gesture frames stay free;
-    // idle gets the full 8ms so the whole band fills before the user scrolls.
+    // A generous slice warms neighbors well ahead of scrolling. While slow
+    // panning the slice shrinks so gesture frames stay smooth while still
+    // converging (fast flings return early above and rely on paint fallback).
     final frameStopwatch = Stopwatch()..start();
-    final pagesPerFrame = moving ? 1 : 3;
+    final pagesPerFrame = slowMoving ? 1 : 3;
+    final frameBudgetMs = slowMoving ? 6 : 24;
+    final prewarmMaxTiles = slowMoving ? 2 : 8;
+    final prewarmBudgetMs = slowMoving ? 4 : 16;
     var pagesTouched = 0;
-    for (var dist = 0; dist <= radius; dist++) {
+    var recordedTotal = 0;
+    // Outward from the visible center, bounded by the passed band.
+    final maxDist = math.max(
+      visibleCenter - bandStart,
+      bandEnd - visibleCenter,
+    );
+    for (var dist = 0; dist <= maxDist; dist++) {
       for (final i in {
-        center - dist,
-        if (dist > 0) center + dist,
+        visibleCenter - dist,
+        if (dist > 0) visibleCenter + dist,
       }) {
+        if (i < bandStart || i > bandEnd) continue;
         if (i < 0 || i >= pageCount) continue;
-        if (pagesTouched >= pagesPerFrame) return;
-        if (frameStopwatch.elapsedMilliseconds >= 8) return;
-        pagesTouched++;
+        if (pagesTouched >= pagesPerFrame) return recordedTotal;
+        if (frameStopwatch.elapsedMilliseconds >= frameBudgetMs) {
+          return recordedTotal;
+        }
         final page = coreInfo.pages[i];
         if (page.isLazyShell) continue;
+        if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) {
+          continue;
+        }
         if (page.allStrokesInDrawOrder.isEmpty) continue;
-        page.strokePictureCache.prewarmTiles(
+        pagesTouched++;
+        // Same stroke set the paint path uses (highlighters render on a
+        // separate overlay, never in tiles). Lazy view: no allocation when
+        // prewarm bails on signature mismatch.
+        final strokes = page.allStrokesInDrawOrder.where(
+          (s) => s.toolId != ToolId.highlighter,
+        );
+        final recorded = page.strokePictureCache.prewarmTiles(
           targetRect: Offset.zero & page.size,
-          strokes: page.allStrokesInDrawOrder.toList(),
+          strokes: strokes,
           page: page,
           size: page.size,
           invert: invert,
@@ -433,11 +632,19 @@ class EditorState extends State<Editor>
               ? page.lineThickness.toDouble()
               : coreInfo.lineThickness.toDouble(),
           lineColor: page.lineColor,
-          maxTiles: moving ? 1 : 8,
-          budgetMs: moving ? 2 : 8,
+          maxTiles: prewarmMaxTiles,
+          budgetMs: prewarmBudgetMs,
         );
+        // 0 = nothing left to warm at this revision; -1 = skipped on
+        // signature mismatch (retry next frame, keep unmarked).
+        if (recorded == 0) {
+          _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
+        } else if (recorded > 0) {
+          recordedTotal += recorded;
+        }
       }
     }
+    return recordedTotal;
   }
 
   final GlobalKey<EnhancedToolbarState> _toolbarKey = GlobalKey();
@@ -2613,6 +2820,9 @@ class EditorState extends State<Editor>
     for (int i = coreInfo.pages.length - 1; i >= 1; --i) {
       final thisPage = coreInfo.pages[i];
       final prevPage = coreInfo.pages[i - 1];
+      // Never delete unhydrated shells: they may hold real content on disk
+      // (a failed/skipped hydrate must not look like an empty page).
+      if (thisPage.isLazyShell || prevPage.isLazyShell) break;
       if (thisPage.isEmpty && prevPage.isEmpty) {
         final page = coreInfo.pages.removeAt(i);
         coreInfo.links = coreInfo.links
@@ -2935,6 +3145,9 @@ class EditorState extends State<Editor>
           }
 
           for (final idx in affectedPageIndices) {
+            // Same as paste-apply above: in-place geometry changes must bump
+            // the content revision for the tile spatial grid (and for save).
+            coreInfo.pages[idx].markSaveBinaryDirty();
             coreInfo.pages[idx].redrawStrokes();
           }
           break;
@@ -3205,6 +3418,11 @@ class EditorState extends State<Editor>
           }
 
           for (final idx in affectedPageIndices) {
+            // Geometry changed in place (shift/rotate/scale): same objects,
+            // same count — bump the content revision so the tile spatial grid
+            // rebuilds instead of serving stale bounds (ghost/missing ink
+            // until the next count change). Also marks the note for save.
+            coreInfo.pages[idx].markSaveBinaryDirty();
             coreInfo.pages[idx].redrawStrokes();
           }
           break;
@@ -10153,13 +10371,32 @@ class EditorState extends State<Editor>
   /// Idle BSON hydrate for upcoming shells. Must not run inside [pageBuilder].
   bool _tryIdleHydratePage(int index) {
     if (!coreInfo.isLazyShellPage(index)) return false;
-    final hydrated = coreInfo.tryHydratePageAtIndex(index);
-    if (hydrated) {
+    final accepted = coreInfo.tryHydratePageSmart(
+      index,
+      onAsyncHydrated: (page) => _finishAsyncHydrate(index, page),
+    );
+    if (accepted && !coreInfo.isLazyShellPage(index)) {
+      // Synchronous path (small slice) completed: wire like before.
       _wirePageImageCallbacks(index);
       listenToQuillChanges(coreInfo.pages[index].quill, index);
       _primeVisibleCanvasAssets(coreInfo, index, index, index);
+      return true;
     }
-    return hydrated;
+    // Chunked hydrate started (or already in flight): completion wires via
+    // callback; count as progress so the idle loop keeps sweeping.
+    return accepted;
+  }
+
+  /// Wires a chunked-hydrated page into the live editor. Identity-checked:
+  /// if the slot no longer holds this page (delete/reload race), skips.
+  void _finishAsyncHydrate(int index, EditorPage page) {
+    if (!mounted) return;
+    if (index < 0 || index >= coreInfo.pages.length) return;
+    if (!identical(coreInfo.pages[index], page)) return;
+    _wirePageImageCallbacks(index);
+    listenToQuillChanges(page.quill, index);
+    _primeVisibleCanvasAssets(coreInfo, index, index, index);
+    setState(() {});
   }
 
   Widget pageBuilder(BuildContext context, int pageIndex) {

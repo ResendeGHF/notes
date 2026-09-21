@@ -15,11 +15,14 @@ import 'package:flutter_quill/flutter_quill.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
 import 'package:saber/components/canvas/_canvas_background_painter.dart';
 import 'package:saber/components/canvas/_canvas_painter.dart';
+import 'package:saber/components/canvas/_circle_stroke.dart';
+import 'package:saber/components/canvas/_rectangle_stroke.dart';
 import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
+import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/components/canvas/selection_handles_overlay.dart';
 import 'package:saber/components/canvas/shape_control_points_overlay.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
@@ -672,7 +675,13 @@ class InnerCanvasState extends State<InnerCanvas> {
         if (needsFull) {
           _invalidateCommittedStrokeCache(eagerRefill: true);
         } else if (sessionDirty != null) {
-          _invalidateCommittedStrokeCache(dirty: sessionDirty);
+          // Eager like the per-move refills: the session area was already
+          // warm, so this completes same-frame instead of blinking through
+          // a progressive refill after the erase ends.
+          _invalidateCommittedStrokeCache(
+            dirty: sessionDirty,
+            eagerRefill: true,
+          );
         }
         _layer2Repaint.value++;
       } else if (strokeFinished || contentChanged) {
@@ -1619,9 +1628,10 @@ class _PageRasterInkLayerPainter extends CustomPainter {
     if (useVectorFallback) {
       final isInitialLoad = tiledCache.shouldDeferMeshWarmup;
       final idleFill = Pen.currentStroke == null && !Eraser.isDragging && !TiledStrokePictureCache.viewportMoving;
-      // Capped initial budget: the first frames must stay interactive. The
-      // visible page needs ~6-10 tiles; the rest fills across idle frames.
-      final budget = isInitialLoad ? 10 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
+      // Cold-fill suppression keeps partial work invisible, so settled slices
+      // can be generous: dense pages finish in few frames instead of a long
+      // cascade. Gesture/draw frames keep tight budgets (or blit-only).
+      final budget = isInitialLoad ? 16 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
 
       tiledCache.paint(
         canvas: canvas,
@@ -1804,11 +1814,37 @@ abstract final class RasterLodTuning {
   }
 }
 
+/// One draw call of the cheap spine fallback: many strokes merged into a
+/// single path, sharing color and width. Built once per content revision and
+/// blitted on every paint until HQ tiles take over, so scrolling a cold page
+/// costs a handful of drawPath calls instead of per-stroke tessellation.
+class _FallbackBatch {
+  _FallbackBatch({
+    required this.color,
+    required this.width,
+    required this.path,
+    required this.fill,
+  });
+
+  final Color color;
+  final double width;
+  final Path path;
+  final bool fill;
+}
+
 class TiledStrokePictureCache {
   static const tileSize = 512.0;
   static const _cullPadding = 128.0;
-  static const idleTileBudgetMs = 12;
+  // Settled-only budgets (never used mid-gesture): the viewport is static so
+  // a longer slice is imperceptible, and cold-fill suppression keeps partial
+  // work invisible. Larger slices finish dense pages in far fewer frames.
+  static const idleTileBudgetMs = 20;
   static const idleRasterBudgetMs = 16;
+
+  /// Slow-pan recording caps: bounded tiles and milliseconds per gesture
+  /// frame, so content streams in while reading-scroll without stutter.
+  static const _slowMovingMaxTiles = 3;
+  static const _slowMovingBudgetMs = 5;
 
   /// Absolute ceiling for a single tile bitmap.
   static const maxRasterEdgePx = 4096;
@@ -1827,6 +1863,11 @@ class TiledStrokePictureCache {
   static bool get viewportMoving => PageRasterCacheManager.viewportMoving;
   static set viewportMoving(bool value) {
     PageRasterCacheManager.viewportMoving = value;
+  }
+
+  /// Test-only override for [PageRasterCacheManager.viewportSlowMotion].
+  static void debugSetViewportSlowMotion(bool value) {
+    PageRasterCacheManager.debugSetViewportSlowMotion(value);
   }
 
   /// True while a sidebar/split resize is animating. Used to ignore pan-idle
@@ -1920,6 +1961,7 @@ class TiledStrokePictureCache {
   SpatialGrid? _grid;
   bool _gridDirty = true;
   int _indexedStrokeCount = -1;
+  int _indexedContentRevision = -1;
   int _visualSignature = 0;
   bool _disposed = false;
   bool _moreTilesScheduled = false;
@@ -1930,7 +1972,14 @@ class TiledStrokePictureCache {
   Rect? _eagerDirtyRect;
   bool _visibleTilesCaughtUp = false;
   int _livePaintedTileCount = 0;
+  int _fallbackPaintedTileCount = 0;
   int _visibleStrokeCount = RasterLodTuning.mediumStrokeCount;
+
+  /// Cheap spine fallback batches (see [_ensureFallbackBatches]). Merged
+  /// paths over all committed strokes, rebuilt only when the content
+  /// revision or visual signature changes.
+  List<_FallbackBatch>? _fallbackBatches;
+  int _fallbackCacheKey = 0;
 
   /// Bumped when a paint left unrecorded visible tiles so the next frame
   /// can record one more without blocking the current frame.
@@ -1939,6 +1988,11 @@ class TiledStrokePictureCache {
   int get recordedTileCount => _pictures.length;
 
   int get debugLivePaintedTileCount => _livePaintedTileCount;
+
+  /// Tiles drawn this paint as synchronous fallback vectors because they
+  /// could not be recorded yet (cold page, budget spent, fast motion).
+  /// Non-zero means the page was fully visible without cached tiles.
+  int get debugFallbackPaintedTileCount => _fallbackPaintedTileCount;
 
   int get debugPathOnlyTileCount => _pathOnlyKeys.length;
 
@@ -1977,6 +2031,8 @@ class TiledStrokePictureCache {
     _bakingKeys.clear();
     _pathOnlyKeys.clear();
     _fineInkKeys.clear();
+    _fallbackBatches = null;
+    _fallbackCacheKey = 0;
     _visibleTilesCaughtUp = false;
     recordGeneration.dispose();
   }
@@ -1996,6 +2052,8 @@ class TiledStrokePictureCache {
     _disposeAllRasters();
     _pathOnlyKeys.clear();
     _fineInkKeys.clear();
+    _fallbackBatches = null;
+    _fallbackCacheKey = 0;
     _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
@@ -2032,6 +2090,10 @@ class TiledStrokePictureCache {
     _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
+    // Fallback batches are page-level; any committed change rebuilds them
+    // lazily on the next paint that needs them.
+    _fallbackBatches = null;
+    _fallbackCacheKey = 0;
   }
 
   void _discardTile(int key) {
@@ -2068,6 +2130,7 @@ class TiledStrokePictureCache {
       return;
     }
     _livePaintedTileCount = 0;
+    _fallbackPaintedTileCount = 0;
     _ensureVisualSignature(
       size: size,
       page: page,
@@ -2108,17 +2171,18 @@ class TiledStrokePictureCache {
         tileRecordBudgetMs != null &&
         tileRecordBudgetMs > 0;
 
-    // Temporal LOD: while the viewport is moving, never tessellate on the
+    // Temporal LOD: while the viewport is moving fast, never tessellate on the
     // gesture frame. Blit existing pictures/rasters only; missing tiles refill
     // on settle via recordGeneration. This keeps pinch-zoom at composite cost.
+    // A slow reading pan records a bounded few tiles mid-motion (strict time
+    // slice) so content appears while scrolling instead of blank pages.
     final moving = viewportMoving;
-    final tileBudget = moving
-        ? 0
-        : capLiveRefill
-        ? 2
-        : (useTimeBudget
-              ? 0x7fffffff
-              : maxNewTilesPerPaint);
+    final slowMoving = moving && PageRasterCacheManager.viewportSlowMotion;
+    final tileBudget = !moving
+        ? (capLiveRefill
+              ? 2
+              : (useTimeBudget ? 0x7fffffff : maxNewTilesPerPaint))
+        : (slowMoving ? _slowMovingMaxTiles : 0);
     // Eager refill (erase/delete/theme-flip): refill every dirty visible
     // tile in this same paint so the change is visible this frame and
     // unchanged tiles never sit blank across progressive refills (the erase
@@ -2129,6 +2193,9 @@ class TiledStrokePictureCache {
     // raster bakes are scheduled (allowRaster stays false while moving).
     final eagerRefill = _eagerRefillVisibleTiles && !forbidRecord;
     final Stopwatch? budgetWatch = useTimeBudget
+    ? (Stopwatch()..start())
+    : null;
+    final Stopwatch? movingWatch = slowMoving
     ? (Stopwatch()..start())
     : null;
     final dpr = _devicePixelRatio();
@@ -2245,6 +2312,19 @@ class TiledStrokePictureCache {
       return true;
     }
 
+    // Never blank: recorded pictures blit when available; tiles that cannot
+    // be recorded on this frame (cold page, time budget spent, fast motion)
+    // are collected below and covered by one cheap spine-fallback pass after
+    // the loop. The fallback batches are built once per content revision and
+    // reused across frames, so scrolling a cold page costs a handful of
+    // drawPath calls instead of per-stroke tessellation.
+    void drawTileGated(int key, Rect tileRect, ui.Picture picture) {
+      drawTile(key, tileRect, picture);
+    }
+
+    final fallbackRects = <Rect>[];
+    var fallbackTiles = 0;
+
     for (var ty = startY; ty <= endY; ty++) {
       for (var tx = startX; tx <= endX; tx++) {
         final tileRect = _tileRect(tx, ty).intersect(pageRect);
@@ -2291,7 +2371,7 @@ class TiledStrokePictureCache {
           _disposeRaster(key);
           recordedThisPaint++;
           tryRasterize(key, tileRect, upgraded);
-          drawTile(key, tileRect, upgraded);
+          drawTileGated(key, tileRect, upgraded);
           continue;
             }
             }
@@ -2300,7 +2380,7 @@ class TiledStrokePictureCache {
             if (needsRaster && !tryRasterize(key, tileRect, existing)) {
               staleRasters = true;
             }
-            drawTile(key, tileRect, existing);
+            drawTileGated(key, tileRect, existing);
             continue;
         }
         final tileStrokes = _strokesForTile(tileRect, strokes, page);
@@ -2309,21 +2389,36 @@ class TiledStrokePictureCache {
         // Small eager refills (erase pointer rects) bypass the time budget
         // so a dense page's grid rebuild cannot starve the dirty tiles into
         // blank frames. Larger eager refills stay time-budgeted. The bypass
-        // is scoped to the eager dirty rect (null = whole page) so cold
-        // tiles entering mid-fling stay blit-only.
+        // is scoped to the eager dirty rect (null = whole page).
         final inEagerScope =
             _eagerDirtyRect == null ||
             _eagerDirtyRect!.overlaps(tileRect);
-        final canRecord =
-        !forbidRecord &&
-        (eagerRefill && inEagerScope
-          ? (recordedThisPaint < _eagerRefillUnbudgetedTiles || !overTime)
-          : recordedThisPaint < tileBudget && !overTime);
+        final movingOverTime = movingWatch != null &&
+        movingWatch.elapsedMilliseconds >= _slowMovingBudgetMs;
+        final bool countOk;
+        final bool timeOk;
+        if (eagerRefill && inEagerScope) {
+          countOk = true;
+          timeOk =
+              recordedThisPaint < _eagerRefillUnbudgetedTiles || !overTime;
+        } else if (slowMoving) {
+          countOk = recordedThisPaint < _slowMovingMaxTiles;
+          timeOk = !overTime && !movingOverTime;
+        } else {
+          countOk = recordedThisPaint < tileBudget;
+          timeOk = !overTime;
+        }
+        final canRecord = !forbidRecord && countOk && timeOk;
         if (!canRecord) {
+          // Recording is capped on this frame, but the strokes must still
+          // be visible: cover this tile with the cheap spine fallback drawn
+          // once after the loop (deduped across tiles, batches cached).
           missingTiles = true;
+          fallbackTiles++;
+          fallbackRects.add(tileRect);
           continue;
         }
-        final pathOnly = needsMesh;
+final pathOnly = needsMesh;
         final picture = _recordTile(
           tileRect: tileRect,
           tileStrokes: tileStrokes,
@@ -2332,7 +2427,7 @@ class TiledStrokePictureCache {
           primaryColor: primaryColor,
           pageIndex: pageIndex,
           totalPages: totalPages,
-          currentScale: scale,
+          currentScale: currentScale,
           defaultTextStyle: defaultTextStyle,
             lineHeight: lineHeight,
             lineThickness: lineThickness,
@@ -2349,18 +2444,30 @@ class TiledStrokePictureCache {
         if (!tryRasterize(key, tileRect, picture)) {
           staleRasters = true;
         }
-        drawTile(key, tileRect, picture);
+        drawTileGated(key, tileRect, picture);
       }
+    }
+    // Single fallback pass for every tile this frame could not record:
+    // clipped to the missing tiles, drawn from batches cached per content
+    // revision, so the page is fully visible at a handful of draw calls.
+    if (fallbackRects.isNotEmpty && !forbidRecord) {
+      _fallbackPaintedTileCount += fallbackTiles;
+      _ensureFallbackBatches(strokes: strokes, page: page, invert: invert);
+      _paintFallbackBatches(canvas, fallbackRects);
     }
     _evictOffscreenRasters(visibleKeys);
     if (missingTiles) {
       _visibleTilesCaughtUp = false;
-      // While moving, stay blit-only — except when erase-dirty tiles remain:
-      // those have no picture to blit (they were just discarded), so leaving
-      // them blank until settle is a visible blink through the whole inertia.
-      // Continues only while progress is made (self-terminating); cold tiles
-      // never record mid-motion, so a fling quickly returns to pure composite.
-      if (!moving || (eagerRefill && recordedThisPaint > 0)) {
+      // Repaint chaining: without it, nothing ever repaints the tile layer
+      // again (RepaintBoundary + unchanged delegates), so missing tiles would
+      // never upgrade from the synchronous fallback vectors. Chain while
+      // settled; while moving, chain only for erase leftovers (realtime) or
+      // slow pans with missing tiles. Fast flings repaint every gesture
+      // frame anyway (fallback stays visible) and the settle bump records
+      // the cached tiles then.
+      if (!moving ||
+          (eagerRefill && recordedThisPaint > 0) ||
+          (slowMoving && missingTiles)) {
         _scheduleMoreTiles();
       }
     } else {
@@ -2376,6 +2483,133 @@ class TiledStrokePictureCache {
       !debugForceSyncRaster) {
       _scheduleBackgroundBake();
       }
+  }
+
+  /// Builds (once per content revision) the cheap spine fallback batches used
+  /// to cover tiles this frame could not record. Generic ink is merged into a
+  /// few decimated centerline paths per color/width (no outline tessellation,
+  /// no meshes); shapes use their cached outline paths. HQ tiles replace this
+  /// transient layer as recording converges.
+  void _ensureFallbackBatches({
+    required List<Stroke> strokes,
+    required EditorPage page,
+    required bool invert,
+  }) {
+    final key = Object.hash(
+      _visualSignature,
+      page.saveBinaryRevision,
+      strokes.length,
+    );
+    if (_fallbackBatches != null && _fallbackCacheKey == key) return;
+    final strokePaths = <int, Path>{};
+    final strokeStyles = <int, (Color, double)>{};
+    final fillPaths = <int, Path>{};
+    final fillColors = <int, Color>{};
+
+    Path strokePathFor(Color color, double width) {
+      final k = Object.hash(color.value, (width * 2).round());
+      strokeStyles[k] = (color, width);
+      return strokePaths.putIfAbsent(k, () => Path());
+    }
+
+    for (final s in strokes) {
+      // Highlighters render on a separate overlay, never in tiles.
+      if (s.toolId == ToolId.highlighter) continue;
+      final color = s.color.withInversion(invert);
+      if (s is ShapeStroke) {
+        if (s.fill) {
+          final fc = s.fillColor.withInversion(invert);
+          (fillPaths[fc.value] ??= Path()).addPath(s.shapePath, Offset.zero);
+          fillColors[fc.value] = fc;
+        }
+        strokePathFor(
+          color,
+          s.options.size,
+        ).addPath(s.strokeDrawPath, Offset.zero);
+        continue;
+      }
+      if (s is CircleStroke) {
+        strokePathFor(color, s.options.size).addOval(
+          Rect.fromCircle(center: s.center, radius: s.radius),
+        );
+        continue;
+      }
+      if (s is RectangleStroke) {
+        strokePathFor(color, s.options.size).addRect(s.rect);
+        continue;
+      }
+      final pts = s.pointsForEraser;
+      if (pts.isEmpty) continue;
+      final w = s.options.size;
+      final path = strokePathFor(color, w);
+      if (pts.length == 1) {
+        final r = (w / 2).clamp(0.5, 999.0);
+        path.addOval(
+          Rect.fromCircle(
+            center: Offset(pts.first.x, pts.first.y),
+            radius: r,
+          ),
+        );
+        continue;
+      }
+      // Decimated spine: every stroke stays visible, dense ones cost at most
+      // ~33 segments. Fidelity returns with the HQ tiles.
+      final stride = pts.length > 32 ? (pts.length / 32).ceil() : 1;
+      path.moveTo(pts.first.x, pts.first.y);
+      for (var i = stride; i < pts.length; i += stride) {
+        path.lineTo(pts[i].x, pts[i].y);
+      }
+      path.lineTo(pts.last.x, pts.last.y);
+    }
+
+    _fallbackBatches = <_FallbackBatch>[
+      for (final e in fillPaths.entries)
+        _FallbackBatch(
+          color: fillColors[e.key]!,
+          width: 0,
+          path: e.value,
+          fill: true,
+        ),
+      for (final e in strokePaths.entries)
+        _FallbackBatch(
+          color: strokeStyles[e.key]!.$1,
+          width: strokeStyles[e.key]!.$2,
+          path: e.value,
+          fill: false,
+        ),
+    ];
+    _fallbackCacheKey = key;
+  }
+
+  /// Draws the cached fallback batches clipped to the union of [clipRects].
+  /// A handful of drawPath calls no matter how dense the page is.
+  void _paintFallbackBatches(Canvas canvas, List<Rect> clipRects) {
+    final batches = _fallbackBatches;
+    if (batches == null || batches.isEmpty || clipRects.isEmpty) return;
+    canvas.save();
+    if (clipRects.length == 1) {
+      canvas.clipRect(clipRects.first);
+    } else {
+      final union = Path();
+      for (final r in clipRects) {
+        union.addRect(r);
+      }
+      canvas.clipPath(union);
+    }
+    for (final b in batches) {
+      final paint = Paint()
+        ..color = b.color
+        ..style = b.fill ? PaintingStyle.fill : PaintingStyle.stroke
+        ..isAntiAlias = true;
+      if (!b.fill) {
+        paint
+          ..strokeWidth = b.width
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+      }
+      canvas.drawPath(b.path, paint);
+    }
+    canvas.restore();
   }
 
   /// Records the tile Pictures covering [targetRect] without an on-screen
@@ -2394,10 +2628,22 @@ class TiledStrokePictureCache {
   /// call records nothing instead of invalidating — paint owns invalidation.
   /// That guarantees background prewarm can never blank a live page.
   ///
-  /// Returns the number of tiles recorded on this call.
+  /// [strokes] must use the same stroke set the paint path uses (committed
+  /// strokes without highlighters); a different set only rebuilds the grid
+  /// without sharing tile work. Takes an [Iterable] so callers can pass a
+  /// lazy view — materialization happens only when this call proceeds past
+  /// the signature check.
+  ///
+  /// Returns the number of tiles recorded on this call, or -1 when skipped
+  /// on signature mismatch (caller should retry later, not mark complete).
+  ///
+  /// When tiles are recorded, [recordGeneration] is bumped so live views
+  /// repaint and show them: without this, pictures warmed idly on a visible
+  /// page would sit undrawn until an unrelated repaint. Off-screen pages
+  /// have no listeners, so the bump is a no-op for them.
   int prewarmTiles({
     required Rect targetRect,
-    required List<Stroke> strokes,
+    required Iterable<Stroke> strokes,
     required EditorPage page,
     required Size size,
     required bool invert,
@@ -2412,13 +2658,7 @@ class TiledStrokePictureCache {
     int maxTiles = 1,
     int budgetMs = 0,
   }) {
-    if (strokes.isEmpty || _disposed) return 0;
-    if (_pictures.isEmpty &&
-        !_gridDirty &&
-        _grid != null &&
-        _indexedStrokeCount != strokes.length) {
-      _gridDirty = true;
-    }
+    if (_disposed) return 0;
     // Additive-only: never invalidate from a background prewarm. If the live
     // paint path uses a different signature, it will invalidate on its own
     // next paint; recording under a stale signature would only be discarded.
@@ -2431,12 +2671,22 @@ class TiledStrokePictureCache {
       lineColor: lineColor,
     );
     if (_visualSignature != 0 && _visualSignature != signature) {
-      return 0;
+      return -1;
     }
     if (_visualSignature == 0) {
       _visualSignature = signature;
     }
-    _ensureGrid(strokes);
+    final List<Stroke> strokeList =
+        strokes is List<Stroke> ? strokes : strokes.toList(growable: false);
+    if (strokeList.isEmpty) return 0;
+    if (_pictures.isEmpty &&
+        !_gridDirty &&
+        _grid != null &&
+        (_indexedStrokeCount != strokeList.length ||
+            _indexedContentRevision != page.saveBinaryRevision)) {
+      _gridDirty = true;
+    }
+    _ensureGrid(strokeList, page.saveBinaryRevision);
     final pageRect = Offset.zero & size;
     final area = pageRect.intersect(targetRect);
     if (area.isEmpty) return 0;
@@ -2459,7 +2709,7 @@ class TiledStrokePictureCache {
         if (tileRect.isEmpty) continue;
         final key = _tileKey(tx, ty);
         if (_pictures.containsKey(key)) continue;
-        final tileStrokes = _strokesForTile(tileRect, strokes, page);
+        final tileStrokes = _strokesForTile(tileRect, strokeList, page);
         if (tileStrokes.isEmpty) continue;
         final picture = _recordTile(
           tileRect: tileRect,
@@ -2484,6 +2734,10 @@ class TiledStrokePictureCache {
         }
         recorded++;
       }
+    }
+    if (recorded > 0 && !_disposed) {
+      // New pictures are drawable now; wake any live view of this page.
+      recordGeneration.value++;
     }
     return recorded;
   }
@@ -2853,8 +3107,16 @@ class TiledStrokePictureCache {
           }
           }
 
-          void _ensureGrid(List<Stroke> strokes) {
-            if (!_gridDirty && _indexedStrokeCount == strokes.length) return;
+          void _ensureGrid(List<Stroke> strokes, int contentRevision) {
+            // Keyed on (revision, count): length alone goes stale on
+            // same-count reorder/transform (select-move, layer reorder),
+            // which used to paint strokes at stale positions until the next
+            // count change forced a rebuild (zoom "fixed" it by invalidating).
+            if (!_gridDirty &&
+                _indexedStrokeCount == strokes.length &&
+                _indexedContentRevision == contentRevision) {
+              return;
+            }
             final grid = SpatialGrid(cellSize: tileSize / 2);
             for (var i = 0; i < strokes.length; i++) {
               final bounds = strokes[i].bounds;
@@ -2864,6 +3126,7 @@ class TiledStrokePictureCache {
             }
             _grid = grid;
             _indexedStrokeCount = strokes.length;
+            _indexedContentRevision = contentRevision;
             _gridDirty = false;
           }
 
@@ -3005,7 +3268,7 @@ class TiledStrokePictureCache {
   int _countVisibleStrokes(Rect visible, List<Stroke> strokes, EditorPage page) {
             if (strokes.isEmpty) return 0;
             final query = visible.inflate(_cullPadding);
-            _ensureGrid(strokes);
+            _ensureGrid(strokes, page.saveBinaryRevision);
             final grid = _grid;
             if (grid == null) return strokes.length;
             var n = 0;
@@ -3021,7 +3284,7 @@ class TiledStrokePictureCache {
 
           List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
             final queryRect = tileRect.inflate(_cullPadding);
-            _ensureGrid(strokes);
+            _ensureGrid(strokes, page.saveBinaryRevision);
             final candidateIndices = _grid?.query(queryRect) ?? const <int>[];
             final tileStrokes = <Stroke>[];
             for (final index in candidateIndices) {

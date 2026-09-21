@@ -149,20 +149,23 @@ class CacheItem {
 
   void dispose() {
     if (isPdf) {
-      if (pdfDocumentNotifier.value != null) {
-        _pdfDocument?.dispose();
-        pdfDocumentNotifier.value = null;
-      }
+      try {
+        if (pdfDocumentNotifier.value != null) {
+          _pdfDocument?.dispose();
+          pdfDocumentNotifier.value = null;
+        }
+      } catch (_) {}
     }
 
     // SECURITY: Best-effort wipe of sensitive data from heap.
-
+// Must never throw: dispose runs during editor teardown, and an exception
+// here aborts the whole unmount cascade (seen in the wild with unmodifiable
+// BSON slice views). Unwipeable buffers are simply dereferenced.
     if (value is Uint8List) {
       final bytes = value as Uint8List;
-
-      for (var i = 0; i < bytes.length; i++) {
-        bytes[i] = 0;
-      }
+      try {
+        bytes.fillRange(0, bytes.length, 0);
+      } catch (_) {}
     }
 
     value = null;
@@ -1469,7 +1472,11 @@ class AssetCacheAll {
     _inflightImageDecodes.clear();
     _activeImageDecodes = 0;
     for (final item in _items) {
-      item.dispose();
+      try {
+        item.dispose();
+      } catch (_) {
+        // One poisoned item must never abort teardown of the rest.
+      }
     }
     _items.clear();
     _cleanupCacheAll();

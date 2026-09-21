@@ -909,7 +909,11 @@ class _InteractiveCanvasViewerState extends State<InteractiveCanvasViewer>
     // pinch scale, including fling ticks, scrollbar drags and wheel zoom)
     // refreshes the LOD before the next paint, so a missed gesture callback
     // can never leave the raster optimization disabled mid-motion.
-    PageRasterCacheManager.notifyViewportMotion(scale: scale);
+    final translation = _transformer.value.getTranslation();
+    PageRasterCacheManager.notifyViewportMotion(
+      scale: scale,
+      translation: Offset(translation.x, translation.y),
+    );
 
     _scheduleViewportRebuildIfNeeded();
   }

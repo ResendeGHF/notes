@@ -289,31 +289,78 @@ class EditorCoreInfo extends ChangeNotifier {
     return !isLazyShellPage(index);
   }
 
+  /// Slices bigger than this hydrate chunked-async (yields to the UI loop)
+  /// instead of one synchronous parse. ~256KB is a few hundred strokes.
+  static const _kChunkedHydrateByteThreshold = 256 * 1024;
+
+  /// Pages with a chunked hydrate in flight. Collapses duplicate work when
+  /// idle frames overlap a slow dense page.
+  final Set<int> _hydratingIndices = <int>{};
+
   Future<void> hydratePageAtIndexAsync(int index) async {
+    await hydratePageChunked(index);
+  }
+
+  /// Chunked hydrate: parses a lazy page slice with UI yields between stroke
+  /// batches so dense pages never freeze scrolling. Returns the new page, or
+  /// null when aborted (index invalid, page replaced mid-flight).
+  /// Safe to fire-and-forget: concurrent calls for one page collapse.
+  Future<EditorPage?> hydratePageChunked(int index) async {
     final lazy = _lazyPages;
-    if (lazy == null || !lazy.unhydratedIndices.contains(index)) return;
-    if (index < 0 || index >= pages.length) return;
-    
-    // Yield para renderizar os gestos de scroll na tela primeiro
-    await Future<void>.delayed(const Duration(milliseconds: 16));
-    
-    final start = lazy.pageByteOffsets[index];
-    final end = lazy.pageByteOffsets[index + 1];
-    final slice = Uint8List.sublistView(lazy.buffer, start, end);
-    final old = pages[index];
-    
-    pages[index] = EditorPage.fromBinary(
-      BinaryReader(slice),
-      readOnly: readOnly,
-      fileVersion: lazy.fileVersion,
-      sbnPath: filePath,
-      assetCacheAll: assetCacheAll,
-    );
-    old.dispose();
-    lazy.unhydratedIndices.remove(index);
-    if (lazy.unhydratedIndices.isEmpty) {
-      _lazyPages = null;
+    if (lazy == null || !lazy.unhydratedIndices.contains(index)) return null;
+    if (index < 0 || index >= pages.length) return null;
+    if (!_hydratingIndices.add(index)) return null;
+    try {
+      final start = lazy.pageByteOffsets[index];
+      final end = lazy.pageByteOffsets[index + 1];
+      final slice = Uint8List.sublistView(lazy.buffer, start, end);
+      final old = pages[index];
+      if (!old.isLazyShell) return null;
+      final page = await EditorPage.fromBinaryAsync(
+        BinaryReader(slice),
+        readOnly: readOnly,
+        fileVersion: lazy.fileVersion,
+        sbnPath: filePath,
+        assetCacheAll: assetCacheAll,
+      );
+      if (index >= pages.length || !identical(pages[index], old)) return null;
+      pages[index] = page;
+      old.dispose();
+      lazy.unhydratedIndices.remove(index);
+      if (lazy.unhydratedIndices.isEmpty) {
+        _lazyPages = null;
+      }
+      return page;
+    } finally {
+      _hydratingIndices.remove(index);
     }
+  }
+
+  /// Smart hydrate for scroll/idle paths: small slices parse synchronously
+  /// (instant), dense slices hydrate chunked without freezing the UI.
+  /// Returns true when the page is ready, already in flight, or a chunked
+  /// hydrate started — [onAsyncHydrated] fires on async completion so the UI
+  /// can wire callbacks and rebuild.
+  bool tryHydratePageSmart(
+    int index, {
+    void Function(EditorPage page)? onAsyncHydrated,
+  }) {
+    final lazy = _lazyPages;
+    if (lazy == null || !lazy.unhydratedIndices.contains(index)) return false;
+    if (index < 0 || index >= pages.length) return false;
+    if (_hydratingIndices.contains(index)) return true;
+    final sliceBytes =
+        lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
+    if (sliceBytes <= _kChunkedHydrateByteThreshold) {
+      _hydratePageAtIndex(index);
+      return !isLazyShellPage(index);
+    }
+    unawaited(
+      hydratePageChunked(index).then((page) {
+        if (page != null) onAsyncHydrated?.call(page);
+      }),
+    );
+    return true;
   }
 
   /// Materializes every page that was skipped during lazy BSON load.

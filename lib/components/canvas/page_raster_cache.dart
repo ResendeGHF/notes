@@ -125,6 +125,16 @@ final class PageRasterCacheManager {
   bool _disposed = false;
   bool _jobRunning = false;
 
+  /// Warmed CPU geometry (meshes, polygons, bounds) is much more expensive to
+  /// rebuild than bitmaps are to re-bake, so it survives well beyond the
+  /// raster keep-set: scrolling back and forth across a few pages must not
+  /// re-triangulate everything (the revisit cascade). Tight bitmaps still
+  /// drop at the band edge to bound GPU memory.
+  static const int geometryReleaseRadius = 8;
+  int _lastReleaseStart = -1;
+  int _lastReleaseEnd = -1;
+  int _lastReleasePageCount = -1;
+
   /// Bumped whenever committed content changes (ink/bg invalidation or a zoom
   /// wipe). In-flight raster jobs check this between work slices and abort, so
   /// a stroke commit or an undo never has to wait out a stale bake.
@@ -167,6 +177,7 @@ final class PageRasterCacheManager {
     final wasMoving = viewportMoving;
     viewportMoving = false;
     if (wasMoving) lodEpoch.value++;
+    _resetMotionVelocity();
     if (viewportSettled || _settleTimer != null) return;
     _restartSettleTimer();
   }
@@ -192,15 +203,88 @@ final class PageRasterCacheManager {
   /// viewport as moving and (re)starts the settle timer, so a missed gesture
   /// end can never leave the flag stuck. The timer clears the flag after
   /// [viewportSettleDelay] of inactivity.
-  static void notifyViewportMotion({double? scale}) {
+  ///
+  /// Also tracks motion velocity (translation + scale EMA) to distinguish a
+  /// slow reading pan (content may record boundedly mid-motion) from a fast
+  /// fling/pinch (strict blit-only). Pass [translation] in screen pixels when
+  /// known; scale-only calls leave velocity untouched.
+  static void notifyViewportMotion({double? scale, Offset? translation}) {
     if (scale != null) {
       setViewportScale(scale);
     }
+    _observeMotionVelocity(scale: scale, translation: translation);
     final started = !viewportMoving;
     viewportMoving = true;
     viewportSettled = false;
     if (started) lodEpoch.value++;
     _restartSettleTimer();
+  }
+
+  /// Slow reading pan vs fast fling/pinch, from motion velocity EMA.
+  /// Slow pans may record a bounded number of tiles mid-motion so content
+  /// appears while scrolling; fast motion stays strictly blit-only.
+  static bool viewportSlowMotion = true;
+  static const double _slowMotionPxPerSec = 450;
+  static const double _slowMotionScalePerSec = 0.9;
+  static double _motionSpeedEma = 0;
+  static double _scaleSpeedEma = 0;
+  static int _lastMotionMicros = 0;
+  static Offset? _lastMotionTranslation;
+  static double? _lastMotionScale;
+
+  static void _observeMotionVelocity({double? scale, Offset? translation}) {
+    final now = DateTime.now().microsecondsSinceEpoch;
+    final dtMicros = _lastMotionMicros == 0 ? 0 : now - _lastMotionMicros;
+    _lastMotionMicros = now;
+    var updated = false;
+    if (dtMicros > 0 && dtMicros < 1000000) {
+      final dt = dtMicros / 1000000.0;
+      if (translation != null) {
+        final prev = _lastMotionTranslation;
+        _lastMotionTranslation = translation;
+        if (prev != null) {
+          final inst = (translation - prev).distance / dt;
+          _motionSpeedEma = _motionSpeedEma * 0.35 + inst * 0.65;
+          updated = true;
+        }
+      }
+      if (scale != null) {
+        final prevScale = _lastMotionScale;
+        _lastMotionScale = scale;
+        if (prevScale != null && prevScale > 0) {
+          final inst = ((scale - prevScale).abs() / prevScale) / dt;
+          _scaleSpeedEma = _scaleSpeedEma * 0.35 + inst * 0.65;
+          updated = true;
+        }
+      }
+      if (updated) {
+        viewportSlowMotion = _motionSpeedEma < _slowMotionPxPerSec &&
+            _scaleSpeedEma < _slowMotionScalePerSec;
+      }
+    } else {
+      if (dtMicros >= 1000000) {
+        // Long idle: stale velocity, treat as slow until motion resumes.
+        _motionSpeedEma = 0;
+        _scaleSpeedEma = 0;
+        viewportSlowMotion = true;
+      }
+      if (translation != null) _lastMotionTranslation = translation;
+      if (scale != null) _lastMotionScale = scale;
+    }
+  }
+
+  @visibleForTesting
+  static void debugSetViewportSlowMotion(bool value) {
+    viewportSlowMotion = value;
+  }
+
+  static void _resetMotionVelocity() {
+    _motionSpeedEma = 0;
+    _scaleSpeedEma = 0;
+    viewportSlowMotion = true;
+    _lastMotionMicros = 0;
+    _lastMotionTranslation = null;
+    _lastMotionScale = null;
   }
 
   static void _restartSettleTimer() {
@@ -214,6 +298,7 @@ final class PageRasterCacheManager {
       }
       viewportMoving = false;
       viewportSettled = true;
+      _resetMotionVelocity();
       lodEpoch.value++;
       _notifyLodSettled();
       SchedulerBinding.instance.ensureVisualUpdate();
@@ -251,6 +336,7 @@ final class PageRasterCacheManager {
     }
     viewportSettled = true;
     zoomLodSettled = true;
+    _resetMotionVelocity();
   }
 
   static void beginLayoutResizeSession() {
@@ -348,6 +434,7 @@ final class PageRasterCacheManager {
     zoomLodSettled = true;
     layoutResizeSession = false;
     _layoutOcclusionDepth = 0;
+    _resetMotionVelocity();
     _zoomLod = 0;
     _liveViewportScale = null;
     _lastObservedRawScale = null;
@@ -738,7 +825,28 @@ final class PageRasterCacheManager {
       for (var i = bandStart; i <= bandEnd; i++) i,
     };
     dropExcept(keep);
-    releaseOffBandGeometry(coreInfo, keep);
+    // Release warmed geometry only outside a WIDER horizon, and only when
+    // that horizon moved: this runs every idle frame, and walking every
+    // stroke of every page each frame is a chronic tax on dense notes.
+    final releaseStart = (visibleStart - geometryReleaseRadius).clamp(
+      0,
+      coreInfo.pages.length - 1,
+    );
+    final releaseEnd = (visibleEnd + geometryReleaseRadius).clamp(
+      0,
+      coreInfo.pages.length - 1,
+    );
+    if (releaseStart != _lastReleaseStart ||
+        releaseEnd != _lastReleaseEnd ||
+        _lastReleasePageCount != coreInfo.pages.length) {
+      _lastReleaseStart = releaseStart;
+      _lastReleaseEnd = releaseEnd;
+      _lastReleasePageCount = coreInfo.pages.length;
+      final releaseKeep = <int>{
+        for (var i = releaseStart; i <= releaseEnd; i++) i,
+      };
+      releaseOffBandGeometry(coreInfo, releaseKeep);
+    }
     prefetchBand(
       coreInfo: coreInfo,
       bandStart: bandStart,

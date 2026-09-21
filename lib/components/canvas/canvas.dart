@@ -163,7 +163,17 @@ class Canvas extends StatelessWidget {
                     ),
                   ),
                 )
-              : SizedBox(width: page.size.width, height: page.size.height),
+              // Unhydrated shell: show the page rect with its background
+              // color immediately so fast scrolling never shows a gap.
+              // Strokes paint as soon as the shell hydrates (idle hydrate
+              // plus the synchronous transform-listener hydrate).
+              : Container(
+                  width: page.size.width,
+                  height: page.size.height,
+                  color: overrideInvert == true
+                      ? const Color(0xFF1E1E1E)
+                      : page.backgroundColor,
+                ),
         ),
       ),
     );
