@@ -7,6 +7,7 @@ common:
   done: Done
   continueBtn: Continue
   cancel: Cancel
+  save: Save
 home:
   folderColor:
     changeColor: Change color
@@ -219,6 +220,7 @@ settings:
     general: General
     writing: Writing
     editor: Editor
+    aiModels: AI models
     performance: Performance
     advanced: Advanced
   noteInkDefaults:
@@ -417,7 +419,7 @@ editor:
     changeColor: Change color
     changeStrokeType: Change stroke type
     changeStrokeTypeTitle: Change stroke type
-    changeStrokeTypeHint: Convert selected strokes to another pen.  toolbar: 
+    changeStrokeTypeHint: Convert selected strokes to another pen.
     toggleColors: Toggle colors
     select: Select
     toggleEraser: Toggle eraser
@@ -567,6 +569,51 @@ editor:
   selectionToLatex: Selection to LaTeX
   noteHandwritingToLatex: Note handwriting to LaTeX
   recognizedLatexTitle: Recognized LaTeX
+  vlmModels:
+    sectionSubtitle: On-device vision models for handwriting to LaTeX
+    notInstalled: 'Not installed · $size'
+    installed: 'Installed · $size'
+    downloading: 'Downloading… $progress%'
+    download: Download
+    uninstall: Uninstall
+    uninstallTitle: Uninstall model?
+    uninstallMessage: '$name will be deleted from this device. You can download it again later.'
+    delete: Delete
+    isDefault: Default model
+    setAsDefault: Set as default
+    unsupported: On-device transcription needs Android 11 or newer
+    downloadFailed: 'Model download failed: $error'
+    promptTitle: Transcribe with on-device AI
+    promptMessage: 'Convert handwriting to LaTeX with a vision model that runs entirely on this device (private, works offline after download).\n\nOne-time download, kept on device.'
+    useClassic: Use classic
+    downloadingTitle: 'Downloading $name'
+    preparing: Preparing…
+    rendering: Rendering…
+    renderingPage: 'Rendering page $current of $total…'
+    readingDraft: Reading draft…
+    transcribing: Transcribing…
+    transcribingPage: 'Transcribing page $current of $total…'
+    viewInputImage: View input image
+  onlineModels:
+    backendTitle: Transcription backend
+    backendOnDevice: On-device vision model
+    backendOnDeviceSubtitle: Private, works offline after a one-time download
+    backendOnline: Online provider
+    backendOnlineSubtitle: Fast frontier models over HTTPS (uses your data plan)
+    provider: Provider
+    apiKey: API key
+    apiKeySet: Key saved on this device
+    apiKeyMissing: No key saved
+    editKeyTitle: API key
+    keyFieldHint: Paste key (stored encrypted on device)
+    model: Model
+    modelHint: Empty uses the preset default
+    baseUrl: Endpoint URL
+    baseUrlHint: Empty uses the preset default
+    customUrlRequired: A custom endpoint needs a URL above
+    keySaved: Key saved
+    keyCleared: Key removed
+    retentionTitle: Data use
   calculate: Calculate
   lockImage: Lock Image
   unlockImage: Unlock Image
@@ -608,6 +655,70 @@ editor:
   noNotesMatchSearch: No notes match this search
   pickFile: Pick File
   editorTitle: Editor
+  toolbar:
+    toggleColors: Toggle colors
+    select: Select
+    toggleEraser: Toggle eraser
+    photo: Images
+    text: Text
+    toggleFingerDrawing: Toggle finger drawing
+    undo: Undo
+    redo: Redo
+    export: Export
+    exportAs: "Export as:"
+    fullscreen: Toggle fullscreen
+    regionScreenshot: Region screenshot
+    regionScreenshotHint: Drag to select an area
+    regionScreenshotTitle: Share or copy screenshot?
+    regionScreenshotBody: "Share with another app, or copy the image to the clipboard."
+    regionScreenshotShare: Share
+    regionScreenshotCopy: Copy to clipboard
+    regionScreenshotTooSmall: Selection too small
+    regionScreenshotFailed: Failed to capture screenshot
+toolbar:
+  derivative: Derivative
+  integral: Integral
+  mode2d: 2D
+  mode3d: 3D
+  calculusGraphSaved: "Calculus graph with legend saved!"
+  addNewSurface: Add New Surface
+  addNewField: Add New Field
+  addNewFunction: Add New Function
+  system2d: "2D system (x, y)"
+  system3d: "3D system (x, y, z)"
+  play: Play
+  stop: Stop
+  clear: Clear
+  copyValues: Copy values
+  saveImage: Save image
+  saveImageMetadata: Save image + metadata
+  start: Start
+  startCap: Start cap
+  end: End
+  endCap: End cap
+  simulatePressure: Simulate pressure
+  complete: Complete
+  savePreset: Save preset
+  updatePreset: Update preset
+  deletePreset: Delete preset
+  fill: Fill
+  mode: Mode
+  eraseStroke: Erase stroke
+  eraseArea: Erase area
+  plot: Plot
+  plot2dCartesian: 2D (Cartesian)
+  plot2dPolar: 2D (Polar)
+  plot3dSurface: 3D Surface (Cartesian)
+  plot3dSpherical: 3D Surface (Spherical)
+  vectorField2d: Vector Field 2D
+  vectorField3d: Vector Field 3D (slice)
+  findRoots: Find roots
+  findMin: Find min
+  findMax: Find max
+  showAsymptotes: Show asymptotes
+  findSaddle: Find saddle
+  f2d: 2D f(x)
+  f3d: "3D f(x,y)"
 export:
   noValidPagesSelected: No valid pages selected
   exportFailed: "Export failed: $error"
@@ -715,50 +826,6 @@ vault:
   restoreDataConfirm: "This will replace your current notes, settings, and metadata with the backup contents. Continue?"
   restoreVaultConfirm: "This will replace your current vault with the backup contents. Continue?"
   fileName: File name
-toolbar:
-  derivative: Derivative
-  integral: Integral
-  mode2d: "2D"
-  mode3d: "3D"
-  calculusGraphSaved: Calculus graph with legend saved!
-  addNewSurface: Add New Surface
-  addNewField: Add New Field
-  addNewFunction: Add New Function
-  system2d: "2D system (x, y)"
-  system3d: "3D system (x, y, z)"
-  play: Play
-  stop: Stop
-  clear: Clear
-  copyValues: Copy values
-  saveImage: Save image
-  saveImageMetadata: Save image + metadata
-  start: Start
-  startCap: Start cap
-  end: End
-  endCap: End cap
-  simulatePressure: Simulate pressure
-  complete: Complete
-  savePreset: Save preset
-  updatePreset: Update preset
-  deletePreset: Delete preset
-  fill: Fill
-  mode: Mode
-  eraseStroke: Erase stroke
-  eraseArea: Erase area
-  plot: Plot
-  plot2dCartesian: "2D (Cartesian)"
-  plot2dPolar: "2D (Polar)"
-  plot3dSurface: "3D Surface (Cartesian)"
-  plot3dSpherical: "3D Surface (Spherical)"
-  vectorField2d: Vector Field 2D
-  vectorField3d: Vector Field 3D (slice)
-  findRoots: Find roots
-  findMin: Find min
-  findMax: Find max
-  showAsymptotes: Show asymptotes
-  findSaddle: Find saddle
-  f2d: "2D f(x)"
-  f3d: "3D f(x,y)"
 backup:
   notificationTitle: Backing up notes...
   notificationBody: "$current / $total assets synced"

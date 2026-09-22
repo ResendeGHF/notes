@@ -20,7 +20,7 @@ class Translations with BaseTranslations<AppLocale, Translations> {
 	/// Constructing via the enum [AppLocale.build] is preferred.
 	Translations({Map<String, Node>? overrides, PluralResolver? cardinalResolver, PluralResolver? ordinalResolver, TranslationMetadata<AppLocale, Translations>? meta})
 		: assert(overrides == null, 'Set "translation_overrides: true" in order to enable this feature.'),
-		  $meta = meta ?? TranslationMetadata(
+		  _meta = meta ?? TranslationMetadata(
 		    locale: AppLocale.en,
 		    overrides: overrides ?? {},
 		    cardinalResolver: cardinalResolver,
@@ -28,7 +28,8 @@ class Translations with BaseTranslations<AppLocale, Translations> {
 		  );
 
 	/// Metadata for the translations of <en>.
-	@override final TranslationMetadata<AppLocale, Translations> $meta;
+	final TranslationMetadata<AppLocale, Translations> _meta;
+	@override TranslationMetadata<AppLocale, Translations> get $meta => _meta;
 
 	late final Translations _root = this; // ignore: unused_field
 
@@ -45,9 +46,9 @@ class Translations with BaseTranslations<AppLocale, Translations> {
 	late final Translations$appInfo$en appInfo = Translations$appInfo$en.internal(_root);
 	late final Translations$update$en update = Translations$update$en.internal(_root);
 	late final Translations$editor$en editor = Translations$editor$en.internal(_root);
+	late final Translations$toolbar$en toolbar = Translations$toolbar$en.internal(_root);
 	late final Translations$export$en export = Translations$export$en.internal(_root);
 	late final Translations$vault$en vault = Translations$vault$en.internal(_root);
-	late final Translations$toolbar$en toolbar = Translations$toolbar$en.internal(_root);
 	late final Translations$backup$en backup = Translations$backup$en.internal(_root);
 }
 
@@ -70,6 +71,9 @@ class Translations$common$en {
 
 	/// en: 'Cancel'
 	String get cancel => 'Cancel';
+
+	/// en: 'Save'
+	String get save => 'Save';
 }
 
 // Path: home
@@ -433,7 +437,6 @@ class Translations$editor$en {
 	late final Translations$editor$navigation$en navigation = Translations$editor$navigation$en.internal(_root);
 	late final Translations$editor$pens$en pens = Translations$editor$pens$en.internal(_root);
 	late final Translations$editor$selectionBar$en selectionBar = Translations$editor$selectionBar$en.internal(_root);
-	late final Translations$editor$toolbar$en toolbar = Translations$editor$toolbar$en.internal(_root);
 	late final Translations$editor$penOptions$en penOptions = Translations$editor$penOptions$en.internal(_root);
 	late final Translations$editor$penSizePresets$en penSizePresets = Translations$editor$penSizePresets$en.internal(_root);
 	late final Translations$editor$colors$en colors = Translations$editor$colors$en.internal(_root);
@@ -480,6 +483,9 @@ class Translations$editor$en {
 
 	/// en: 'Recognized LaTeX'
 	String get recognizedLatexTitle => 'Recognized LaTeX';
+
+	late final Translations$editor$vlmModels$en vlmModels = Translations$editor$vlmModels$en.internal(_root);
+	late final Translations$editor$onlineModels$en onlineModels = Translations$editor$onlineModels$en.internal(_root);
 
 	/// en: 'Calculate'
 	String get calculate => 'Calculate';
@@ -603,6 +609,146 @@ class Translations$editor$en {
 
 	/// en: 'Editor'
 	String get editorTitle => 'Editor';
+
+	late final Translations$editor$toolbar$en toolbar = Translations$editor$toolbar$en.internal(_root);
+}
+
+// Path: toolbar
+class Translations$toolbar$en {
+	Translations$toolbar$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Derivative'
+	String get derivative => 'Derivative';
+
+	/// en: 'Integral'
+	String get integral => 'Integral';
+
+	/// en: '2D'
+	String get mode2d => '2D';
+
+	/// en: '3D'
+	String get mode3d => '3D';
+
+	/// en: 'Calculus graph with legend saved!'
+	String get calculusGraphSaved => 'Calculus graph with legend saved!';
+
+	/// en: 'Add New Surface'
+	String get addNewSurface => 'Add New Surface';
+
+	/// en: 'Add New Field'
+	String get addNewField => 'Add New Field';
+
+	/// en: 'Add New Function'
+	String get addNewFunction => 'Add New Function';
+
+	/// en: '2D system (x, y)'
+	String get system2d => '2D system (x, y)';
+
+	/// en: '3D system (x, y, z)'
+	String get system3d => '3D system (x, y, z)';
+
+	/// en: 'Play'
+	String get play => 'Play';
+
+	/// en: 'Stop'
+	String get stop => 'Stop';
+
+	/// en: 'Clear'
+	String get clear => 'Clear';
+
+	/// en: 'Copy values'
+	String get copyValues => 'Copy values';
+
+	/// en: 'Save image'
+	String get saveImage => 'Save image';
+
+	/// en: 'Save image + metadata'
+	String get saveImageMetadata => 'Save image + metadata';
+
+	/// en: 'Start'
+	String get start => 'Start';
+
+	/// en: 'Start cap'
+	String get startCap => 'Start cap';
+
+	/// en: 'End'
+	String get end => 'End';
+
+	/// en: 'End cap'
+	String get endCap => 'End cap';
+
+	/// en: 'Simulate pressure'
+	String get simulatePressure => 'Simulate pressure';
+
+	/// en: 'Complete'
+	String get complete => 'Complete';
+
+	/// en: 'Save preset'
+	String get savePreset => 'Save preset';
+
+	/// en: 'Update preset'
+	String get updatePreset => 'Update preset';
+
+	/// en: 'Delete preset'
+	String get deletePreset => 'Delete preset';
+
+	/// en: 'Fill'
+	String get fill => 'Fill';
+
+	/// en: 'Mode'
+	String get mode => 'Mode';
+
+	/// en: 'Erase stroke'
+	String get eraseStroke => 'Erase stroke';
+
+	/// en: 'Erase area'
+	String get eraseArea => 'Erase area';
+
+	/// en: 'Plot'
+	String get plot => 'Plot';
+
+	/// en: '2D (Cartesian)'
+	String get plot2dCartesian => '2D (Cartesian)';
+
+	/// en: '2D (Polar)'
+	String get plot2dPolar => '2D (Polar)';
+
+	/// en: '3D Surface (Cartesian)'
+	String get plot3dSurface => '3D Surface (Cartesian)';
+
+	/// en: '3D Surface (Spherical)'
+	String get plot3dSpherical => '3D Surface (Spherical)';
+
+	/// en: 'Vector Field 2D'
+	String get vectorField2d => 'Vector Field 2D';
+
+	/// en: 'Vector Field 3D (slice)'
+	String get vectorField3d => 'Vector Field 3D (slice)';
+
+	/// en: 'Find roots'
+	String get findRoots => 'Find roots';
+
+	/// en: 'Find min'
+	String get findMin => 'Find min';
+
+	/// en: 'Find max'
+	String get findMax => 'Find max';
+
+	/// en: 'Show asymptotes'
+	String get showAsymptotes => 'Show asymptotes';
+
+	/// en: 'Find saddle'
+	String get findSaddle => 'Find saddle';
+
+	/// en: '2D f(x)'
+	String get f2d => '2D f(x)';
+
+	/// en: '3D f(x,y)'
+	String get f3d => '3D f(x,y)';
 }
 
 // Path: export
@@ -936,144 +1082,6 @@ class Translations$vault$en {
 
 	/// en: 'File name'
 	String get fileName => 'File name';
-}
-
-// Path: toolbar
-class Translations$toolbar$en {
-	Translations$toolbar$en.internal(this._root);
-
-	final Translations _root; // ignore: unused_field
-
-	// Translations
-
-	/// en: 'Derivative'
-	String get derivative => 'Derivative';
-
-	/// en: 'Integral'
-	String get integral => 'Integral';
-
-	/// en: '2D'
-	String get mode2d => '2D';
-
-	/// en: '3D'
-	String get mode3d => '3D';
-
-	/// en: 'Calculus graph with legend saved!'
-	String get calculusGraphSaved => 'Calculus graph with legend saved!';
-
-	/// en: 'Add New Surface'
-	String get addNewSurface => 'Add New Surface';
-
-	/// en: 'Add New Field'
-	String get addNewField => 'Add New Field';
-
-	/// en: 'Add New Function'
-	String get addNewFunction => 'Add New Function';
-
-	/// en: '2D system (x, y)'
-	String get system2d => '2D system (x, y)';
-
-	/// en: '3D system (x, y, z)'
-	String get system3d => '3D system (x, y, z)';
-
-	/// en: 'Play'
-	String get play => 'Play';
-
-	/// en: 'Stop'
-	String get stop => 'Stop';
-
-	/// en: 'Clear'
-	String get clear => 'Clear';
-
-	/// en: 'Copy values'
-	String get copyValues => 'Copy values';
-
-	/// en: 'Save image'
-	String get saveImage => 'Save image';
-
-	/// en: 'Save image + metadata'
-	String get saveImageMetadata => 'Save image + metadata';
-
-	/// en: 'Start'
-	String get start => 'Start';
-
-	/// en: 'Start cap'
-	String get startCap => 'Start cap';
-
-	/// en: 'End'
-	String get end => 'End';
-
-	/// en: 'End cap'
-	String get endCap => 'End cap';
-
-	/// en: 'Simulate pressure'
-	String get simulatePressure => 'Simulate pressure';
-
-	/// en: 'Complete'
-	String get complete => 'Complete';
-
-	/// en: 'Save preset'
-	String get savePreset => 'Save preset';
-
-	/// en: 'Update preset'
-	String get updatePreset => 'Update preset';
-
-	/// en: 'Delete preset'
-	String get deletePreset => 'Delete preset';
-
-	/// en: 'Fill'
-	String get fill => 'Fill';
-
-	/// en: 'Mode'
-	String get mode => 'Mode';
-
-	/// en: 'Erase stroke'
-	String get eraseStroke => 'Erase stroke';
-
-	/// en: 'Erase area'
-	String get eraseArea => 'Erase area';
-
-	/// en: 'Plot'
-	String get plot => 'Plot';
-
-	/// en: '2D (Cartesian)'
-	String get plot2dCartesian => '2D (Cartesian)';
-
-	/// en: '2D (Polar)'
-	String get plot2dPolar => '2D (Polar)';
-
-	/// en: '3D Surface (Cartesian)'
-	String get plot3dSurface => '3D Surface (Cartesian)';
-
-	/// en: '3D Surface (Spherical)'
-	String get plot3dSpherical => '3D Surface (Spherical)';
-
-	/// en: 'Vector Field 2D'
-	String get vectorField2d => 'Vector Field 2D';
-
-	/// en: 'Vector Field 3D (slice)'
-	String get vectorField3d => 'Vector Field 3D (slice)';
-
-	/// en: 'Find roots'
-	String get findRoots => 'Find roots';
-
-	/// en: 'Find min'
-	String get findMin => 'Find min';
-
-	/// en: 'Find max'
-	String get findMax => 'Find max';
-
-	/// en: 'Show asymptotes'
-	String get showAsymptotes => 'Show asymptotes';
-
-	/// en: 'Find saddle'
-	String get findSaddle => 'Find saddle';
-
-	/// en: '2D f(x)'
-	String get f2d => '2D f(x)';
-
-	/// en: '3D f(x,y)'
-	String get f3d => '3D f(x,y)';
 }
 
 // Path: backup
@@ -1679,6 +1687,9 @@ class Translations$settings$prefCategories$en {
 	/// en: 'Editor'
 	String get editor => 'Editor';
 
+	/// en: 'AI models'
+	String get aiModels => 'AI models';
+
 	/// en: 'Performance'
 	String get performance => 'Performance';
 
@@ -2152,15 +2163,6 @@ class Translations$editor$selectionBar$en {
 
 	/// en: 'Convert selected strokes to another pen.'
 	String get changeStrokeTypeHint => 'Convert selected strokes to another pen.';
-}
-
-// Path: editor.toolbar
-class Translations$editor$toolbar$en {
-	Translations$editor$toolbar$en.internal(this._root);
-
-	final Translations _root; // ignore: unused_field
-
-	// Translations
 
 	/// en: 'Toggle colors'
 	String get toggleColors => 'Toggle colors';
@@ -2593,6 +2595,219 @@ class Translations$editor$hud$en {
 
 	/// en: 'Lock panning to horizontal or vertical'
 	String get lockAxisAlignedPan => 'Lock panning to horizontal or vertical';
+}
+
+// Path: editor.vlmModels
+class Translations$editor$vlmModels$en {
+	Translations$editor$vlmModels$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'On-device vision models for handwriting to LaTeX'
+	String get sectionSubtitle => 'On-device vision models for handwriting to LaTeX';
+
+	/// en: 'Not installed · $size'
+	String notInstalled({required Object size}) => 'Not installed · ${size}';
+
+	/// en: 'Installed · $size'
+	String installed({required Object size}) => 'Installed · ${size}';
+
+	/// en: 'Downloading… $progress%'
+	String downloading({required Object progress}) => 'Downloading… ${progress}%';
+
+	/// en: 'Download'
+	String get download => 'Download';
+
+	/// en: 'Uninstall'
+	String get uninstall => 'Uninstall';
+
+	/// en: 'Uninstall model?'
+	String get uninstallTitle => 'Uninstall model?';
+
+	/// en: '$name will be deleted from this device. You can download it again later.'
+	String uninstallMessage({required Object name}) => '${name} will be deleted from this device. You can download it again later.';
+
+	/// en: 'Delete'
+	String get delete => 'Delete';
+
+	/// en: 'Default model'
+	String get isDefault => 'Default model';
+
+	/// en: 'Set as default'
+	String get setAsDefault => 'Set as default';
+
+	/// en: 'On-device transcription needs Android 11 or newer'
+	String get unsupported => 'On-device transcription needs Android 11 or newer';
+
+	/// en: 'Model download failed: $error'
+	String downloadFailed({required Object error}) => 'Model download failed: ${error}';
+
+	/// en: 'Transcribe with on-device AI'
+	String get promptTitle => 'Transcribe with on-device AI';
+
+	/// en: 'Convert handwriting to LaTeX with a vision model that runs entirely on this device (private, works offline after download).\n\nOne-time download, kept on device.'
+	String get promptMessage => 'Convert handwriting to LaTeX with a vision model that runs entirely on this device (private, works offline after download).\n\nOne-time download, kept on device.';
+
+	/// en: 'Use classic'
+	String get useClassic => 'Use classic';
+
+	/// en: 'Downloading $name'
+	String downloadingTitle({required Object name}) => 'Downloading ${name}';
+
+	/// en: 'Preparing…'
+	String get preparing => 'Preparing…';
+
+	/// en: 'Rendering…'
+	String get rendering => 'Rendering…';
+
+	/// en: 'Rendering page $current of $total…'
+	String renderingPage({required Object current, required Object total}) => 'Rendering page ${current} of ${total}…';
+
+	/// en: 'Reading draft…'
+	String get readingDraft => 'Reading draft…';
+
+	/// en: 'Transcribing…'
+	String get transcribing => 'Transcribing…';
+
+	/// en: 'Transcribing page $current of $total…'
+	String transcribingPage({required Object current, required Object total}) => 'Transcribing page ${current} of ${total}…';
+
+	/// en: 'View input image'
+	String get viewInputImage => 'View input image';
+}
+
+// Path: editor.onlineModels
+class Translations$editor$onlineModels$en {
+	Translations$editor$onlineModels$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Transcription backend'
+	String get backendTitle => 'Transcription backend';
+
+	/// en: 'On-device vision model'
+	String get backendOnDevice => 'On-device vision model';
+
+	/// en: 'Private, works offline after a one-time download'
+	String get backendOnDeviceSubtitle => 'Private, works offline after a one-time download';
+
+	/// en: 'Online provider'
+	String get backendOnline => 'Online provider';
+
+	/// en: 'Fast frontier models over HTTPS (uses your data plan)'
+	String get backendOnlineSubtitle => 'Fast frontier models over HTTPS (uses your data plan)';
+
+	/// en: 'Provider'
+	String get provider => 'Provider';
+
+	/// en: 'API key'
+	String get apiKey => 'API key';
+
+	/// en: 'Key saved on this device'
+	String get apiKeySet => 'Key saved on this device';
+
+	/// en: 'No key saved'
+	String get apiKeyMissing => 'No key saved';
+
+	/// en: 'API key'
+	String get editKeyTitle => 'API key';
+
+	/// en: 'Paste key (stored encrypted on device)'
+	String get keyFieldHint => 'Paste key (stored encrypted on device)';
+
+	/// en: 'Model'
+	String get model => 'Model';
+
+	/// en: 'Empty uses the preset default'
+	String get modelHint => 'Empty uses the preset default';
+
+	/// en: 'Endpoint URL'
+	String get baseUrl => 'Endpoint URL';
+
+	/// en: 'Empty uses the preset default'
+	String get baseUrlHint => 'Empty uses the preset default';
+
+	/// en: 'A custom endpoint needs a URL above'
+	String get customUrlRequired => 'A custom endpoint needs a URL above';
+
+	/// en: 'Key saved'
+	String get keySaved => 'Key saved';
+
+	/// en: 'Key removed'
+	String get keyCleared => 'Key removed';
+
+	/// en: 'Data use'
+	String get retentionTitle => 'Data use';
+}
+
+// Path: editor.toolbar
+class Translations$editor$toolbar$en {
+	Translations$editor$toolbar$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Toggle colors'
+	String get toggleColors => 'Toggle colors';
+
+	/// en: 'Select'
+	String get select => 'Select';
+
+	/// en: 'Toggle eraser'
+	String get toggleEraser => 'Toggle eraser';
+
+	/// en: 'Images'
+	String get photo => 'Images';
+
+	/// en: 'Text'
+	String get text => 'Text';
+
+	/// en: 'Toggle finger drawing'
+	String get toggleFingerDrawing => 'Toggle finger drawing';
+
+	/// en: 'Undo'
+	String get undo => 'Undo';
+
+	/// en: 'Redo'
+	String get redo => 'Redo';
+
+	/// en: 'Export'
+	String get export => 'Export';
+
+	/// en: 'Export as:'
+	String get exportAs => 'Export as:';
+
+	/// en: 'Toggle fullscreen'
+	String get fullscreen => 'Toggle fullscreen';
+
+	/// en: 'Region screenshot'
+	String get regionScreenshot => 'Region screenshot';
+
+	/// en: 'Drag to select an area'
+	String get regionScreenshotHint => 'Drag to select an area';
+
+	/// en: 'Share or copy screenshot?'
+	String get regionScreenshotTitle => 'Share or copy screenshot?';
+
+	/// en: 'Share with another app, or copy the image to the clipboard.'
+	String get regionScreenshotBody => 'Share with another app, or copy the image to the clipboard.';
+
+	/// en: 'Share'
+	String get regionScreenshotShare => 'Share';
+
+	/// en: 'Copy to clipboard'
+	String get regionScreenshotCopy => 'Copy to clipboard';
+
+	/// en: 'Selection too small'
+	String get regionScreenshotTooSmall => 'Selection too small';
+
+	/// en: 'Failed to capture screenshot'
+	String get regionScreenshotFailed => 'Failed to capture screenshot';
 }
 
 // Path: sentry.consent.description

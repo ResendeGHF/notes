@@ -16,6 +16,7 @@ import 'package:saber/data/editor/stroke_paint.dart';
 import 'package:saber/data/flavor_config.dart';
 import 'package:saber/data/pen_stroke_preset_scaling.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/google_ink_brush.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:stow/stow.dart';
 import 'package:stow_codecs/stow_codecs.dart';
@@ -173,6 +174,45 @@ class Stows {
   final enableMathSolver = PlainStow(
     'enableMathSolver',
     false,
+    volatile: !_isOnMainIsolate,
+  );
+
+  /// Installed vision-model id preferred for handwriting-to-LaTeX.
+  /// Falls back to the default catalog entry when unset or uninstalled.
+  final vlmPreferredModelId = PlainStow(
+    'vlmPreferredModelId',
+    'SmolVLM2-500M.litertlm',
+    volatile: !_isOnMainIsolate,
+  );
+
+  /// Transcription backend for handwriting-to-LaTeX: `'ondevice'` (local
+  /// vision model) or `'online'` (HTTPS provider below).
+  final latexBackend = PlainStow(
+    'latexBackend',
+    'ondevice',
+    volatile: !_isOnMainIsolate,
+  );
+
+  /// Online provider preset id (see online catalog). Unknown ids fall back
+  /// to the OpenAI preset.
+  final onlineProviderId = PlainStow(
+    'onlineProviderId',
+    'openai',
+    volatile: !_isOnMainIsolate,
+  );
+
+  /// Model override for the active online provider (empty = preset default).
+  final onlineModel = PlainStow(
+    'onlineModel',
+    '',
+    volatile: !_isOnMainIsolate,
+  );
+
+  /// Endpoint override for the active online provider (empty = preset
+  /// default; required when the provider preset is `custom`).
+  final onlineBaseUrl = PlainStow(
+    'onlineBaseUrl',
+    '',
     volatile: !_isOnMainIsolate,
   );
 
@@ -504,6 +544,7 @@ class Stows {
       ToolId.fountainPen.id: List<int>.from(modernPalette),
       ToolId.advancedPen.id: List<int>.from(modernPalette),
       ToolId.advancedPencil.id: List<int>.from(modernPalette),
+      ToolId.experimentalPen.id: List<int>.from(modernPalette),
       ToolId.shapePen.id: List<int>.from(modernPalette),
       ToolId.highlighter.id: List<int>.from(highlighterPalette),
       ToolId.laserPointer.id: List<int>.from(laserPalette),
@@ -519,6 +560,7 @@ class Stows {
     ToolId.shapePen,
     ToolId.advancedPen,
     ToolId.advancedPencil,
+    ToolId.experimentalPen,
   ];
 
   static Map<String, List<int>> _penFavoriteColorsFromJson(Object? json) {
@@ -582,6 +624,38 @@ class Stows {
 
   final advancedPencilPresets = PlainStow.json(
     'advancedPencilPresets',
+    <Map<String, dynamic>>[],
+    fromJson: _advancedPenPresetsFromJson,
+    volatile: !_isOnMainIsolate,
+  );
+
+  static GoogleInkBrushConfig _googleInkBrushFromJson(Object? json) {
+    if (json is Map<String, dynamic>) {
+      return GoogleInkBrushConfig.fromJson(json);
+    }
+    if (json is Map) {
+      return GoogleInkBrushConfig.fromJson(Map<String, dynamic>.from(json));
+    }
+    return GoogleInkBrushConfig();
+  }
+
+  /// Experimental (Google Ink) brush config + color + presets. Persisted
+  /// separately from Advanced Pen so the test bench never clobbers user ink.
+  final lastExperimentalInkBrush = PlainStow.json(
+    'lastExperimentalInkBrush',
+    GoogleInkBrushConfig(),
+    fromJson: _googleInkBrushFromJson,
+    volatile: !_isOnMainIsolate,
+  );
+
+  final lastExperimentalPenColor = PlainStow(
+    'lastExperimentalPenColor',
+    Colors.black.toARGB32(),
+    volatile: !_isOnMainIsolate,
+  );
+
+  final experimentalPenPresets = PlainStow.json(
+    'experimentalPenPresets',
     <Map<String, dynamic>>[],
     fromJson: _advancedPenPresetsFromJson,
     volatile: !_isOnMainIsolate,

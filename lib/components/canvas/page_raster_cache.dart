@@ -884,6 +884,10 @@ final class PageRasterCacheManager {
     if (coreInfo.isLazyShellPage(pageIndex)) return;
     final page = coreInfo.pages[pageIndex];
     final pageSize = page.size;
+    // Temporary-raster LOD covers every non-highlighter pen, including the
+    // experimental Google Ink pen (path-only geometry bakes via CanvasPainter
+    // exactly like Advanced Pen). The live native PlatformView never owns
+    // committed ink, so blit-during-motion + HQ-bake-on-settle applies here too.
     final inkStrokes = page.allStrokesInDrawOrder
         .where((s) => s.toolId != ToolId.highlighter)
         .toList(growable: false);

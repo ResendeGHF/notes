@@ -16,7 +16,7 @@ class TranslationsPtBr extends Translations with BaseTranslations<AppLocale, Tra
 	/// Constructing via the enum [AppLocale.build] is preferred.
 	TranslationsPtBr({Map<String, Node>? overrides, PluralResolver? cardinalResolver, PluralResolver? ordinalResolver, TranslationMetadata<AppLocale, Translations>? meta})
 		: assert(overrides == null, 'Set "translation_overrides: true" in order to enable this feature.'),
-		  $meta = meta ?? TranslationMetadata(
+		  _meta = meta ?? TranslationMetadata(
 		    locale: AppLocale.ptBr,
 		    overrides: overrides ?? {},
 		    cardinalResolver: cardinalResolver,
@@ -25,7 +25,8 @@ class TranslationsPtBr extends Translations with BaseTranslations<AppLocale, Tra
 		  super(cardinalResolver: cardinalResolver, ordinalResolver: ordinalResolver);
 
 	/// Metadata for the translations of <pt-BR>.
-	@override final TranslationMetadata<AppLocale, Translations> $meta;
+	final TranslationMetadata<AppLocale, Translations> _meta;
+	@override TranslationMetadata<AppLocale, Translations> get $meta => _meta;
 
 	late final TranslationsPtBr _root = this; // ignore: unused_field
 
@@ -43,9 +44,9 @@ class TranslationsPtBr extends Translations with BaseTranslations<AppLocale, Tra
 	@override late final _Translations$appInfo$pt_BR appInfo = _Translations$appInfo$pt_BR._(_root);
 	@override late final _Translations$update$pt_BR update = _Translations$update$pt_BR._(_root);
 	@override late final _Translations$editor$pt_BR editor = _Translations$editor$pt_BR._(_root);
+	@override late final _Translations$toolbar$pt_BR toolbar = _Translations$toolbar$pt_BR._(_root);
 	@override late final _Translations$export$pt_BR export = _Translations$export$pt_BR._(_root);
 	@override late final _Translations$vault$pt_BR vault = _Translations$vault$pt_BR._(_root);
-	@override late final _Translations$toolbar$pt_BR toolbar = _Translations$toolbar$pt_BR._(_root);
 }
 
 // Path: common
@@ -59,6 +60,7 @@ class _Translations$common$pt_BR extends Translations$common$en {
 	@override String get done => 'Feito';
 	@override String get continueBtn => 'Continuar';
 	@override String get cancel => 'Cancelar';
+	@override String get save => 'Salvar';
 }
 
 // Path: home
@@ -266,7 +268,6 @@ class _Translations$editor$pt_BR extends Translations$editor$en {
 	@override late final _Translations$editor$navigation$pt_BR navigation = _Translations$editor$navigation$pt_BR._(_root);
 	@override late final _Translations$editor$pens$pt_BR pens = _Translations$editor$pens$pt_BR._(_root);
 	@override late final _Translations$editor$selectionBar$pt_BR selectionBar = _Translations$editor$selectionBar$pt_BR._(_root);
-	@override late final _Translations$editor$toolbar$pt_BR toolbar = _Translations$editor$toolbar$pt_BR._(_root);
 	@override late final _Translations$editor$penOptions$pt_BR penOptions = _Translations$editor$penOptions$pt_BR._(_root);
 	@override late final _Translations$editor$penSizePresets$pt_BR penSizePresets = _Translations$editor$penSizePresets$pt_BR._(_root);
 	@override late final _Translations$editor$colors$pt_BR colors = _Translations$editor$colors$pt_BR._(_root);
@@ -289,6 +290,8 @@ class _Translations$editor$pt_BR extends Translations$editor$en {
 	@override String get selectionToLatex => 'Seleção para LaTeX';
 	@override String get noteHandwritingToLatex => 'Traços da nota para LaTeX';
 	@override String get recognizedLatexTitle => 'LaTeX reconhecido';
+	@override late final _Translations$editor$vlmModels$pt_BR vlmModels = _Translations$editor$vlmModels$pt_BR._(_root);
+	@override late final _Translations$editor$onlineModels$pt_BR onlineModels = _Translations$editor$onlineModels$pt_BR._(_root);
 	@override String get calculate => 'Calcular';
 	@override String get lockImage => 'Bloquear imagem';
 	@override String get unlockImage => 'Desbloquear imagem';
@@ -330,6 +333,59 @@ class _Translations$editor$pt_BR extends Translations$editor$en {
 	@override String get noNotesMatchSearch => 'Nenhuma nota corresponde à pesquisa';
 	@override String get pickFile => 'Escolher arquivo';
 	@override String get editorTitle => 'Editor';
+	@override late final _Translations$editor$toolbar$pt_BR toolbar = _Translations$editor$toolbar$pt_BR._(_root);
+}
+
+// Path: toolbar
+class _Translations$toolbar$pt_BR extends Translations$toolbar$en {
+	_Translations$toolbar$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
+
+	final TranslationsPtBr _root; // ignore: unused_field
+
+	// Translations
+	@override String get derivative => 'Derivada';
+	@override String get integral => 'Integral';
+	@override String get mode2d => '2D';
+	@override String get mode3d => '3D';
+	@override String get calculusGraphSaved => 'Gráfico de cálculo com legenda salvo!';
+	@override String get addNewSurface => 'Adicionar nova superfície';
+	@override String get addNewField => 'Adicionar novo campo';
+	@override String get addNewFunction => 'Adicionar nova função';
+	@override String get system2d => 'Sistema 2D (x, y)';
+	@override String get system3d => 'Sistema 3D (x, y, z)';
+	@override String get play => 'Reproduzir';
+	@override String get stop => 'Parar';
+	@override String get clear => 'Limpar';
+	@override String get copyValues => 'Copiar valores';
+	@override String get saveImage => 'Salvar imagem';
+	@override String get saveImageMetadata => 'Salvar imagem + metadados';
+	@override String get start => 'Início';
+	@override String get startCap => 'Tampa inicial';
+	@override String get end => 'Fim';
+	@override String get endCap => 'Tampa final';
+	@override String get simulatePressure => 'Simular pressão';
+	@override String get complete => 'Concluir';
+	@override String get savePreset => 'Salvar predefinição';
+	@override String get updatePreset => 'Atualizar predefinição';
+	@override String get deletePreset => 'Excluir predefinição';
+	@override String get fill => 'Preencher';
+	@override String get mode => 'Modo';
+	@override String get eraseStroke => 'Apagar traço';
+	@override String get eraseArea => 'Apagar área';
+	@override String get plot => 'Plotar';
+	@override String get plot2dCartesian => '2D (Cartesiano)';
+	@override String get plot2dPolar => '2D (Polar)';
+	@override String get plot3dSurface => 'Superfície 3D (Cartesiano)';
+	@override String get plot3dSpherical => 'Superfície 3D (Esférico)';
+	@override String get vectorField2d => 'Campo vetorial 2D';
+	@override String get vectorField3d => 'Campo vetorial 3D (fatia)';
+	@override String get findRoots => 'Encontrar raízes';
+	@override String get findMin => 'Encontrar mínimo';
+	@override String get findMax => 'Encontrar máximo';
+	@override String get showAsymptotes => 'Mostrar assíntotas';
+	@override String get findSaddle => 'Encontrar ponto de sela';
+	@override String get f2d => '2D f(x)';
+	@override String get f3d => '3D f(x,y)';
 }
 
 // Path: export
@@ -453,57 +509,6 @@ class _Translations$vault$pt_BR extends Translations$vault$en {
 	@override String get restoreDataConfirm => 'Isso substituirá suas notas, configurações e metadados atuais pelo conteúdo do backup. Continuar?';
 	@override String get restoreVaultConfirm => 'Isso substituirá seu cofre atual pelo conteúdo do backup. Continuar?';
 	@override String get fileName => 'Nome do arquivo';
-}
-
-// Path: toolbar
-class _Translations$toolbar$pt_BR extends Translations$toolbar$en {
-	_Translations$toolbar$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
-
-	final TranslationsPtBr _root; // ignore: unused_field
-
-	// Translations
-	@override String get derivative => 'Derivada';
-	@override String get integral => 'Integral';
-	@override String get mode2d => '2D';
-	@override String get mode3d => '3D';
-	@override String get calculusGraphSaved => 'Gráfico de cálculo com legenda salvo!';
-	@override String get addNewSurface => 'Adicionar nova superfície';
-	@override String get addNewField => 'Adicionar novo campo';
-	@override String get addNewFunction => 'Adicionar nova função';
-	@override String get system2d => 'Sistema 2D (x, y)';
-	@override String get system3d => 'Sistema 3D (x, y, z)';
-	@override String get play => 'Reproduzir';
-	@override String get stop => 'Parar';
-	@override String get clear => 'Limpar';
-	@override String get copyValues => 'Copiar valores';
-	@override String get saveImage => 'Salvar imagem';
-	@override String get saveImageMetadata => 'Salvar imagem + metadados';
-	@override String get start => 'Início';
-	@override String get startCap => 'Tampa inicial';
-	@override String get end => 'Fim';
-	@override String get endCap => 'Tampa final';
-	@override String get simulatePressure => 'Simular pressão';
-	@override String get complete => 'Concluir';
-	@override String get savePreset => 'Salvar predefinição';
-	@override String get updatePreset => 'Atualizar predefinição';
-	@override String get deletePreset => 'Excluir predefinição';
-	@override String get fill => 'Preencher';
-	@override String get mode => 'Modo';
-	@override String get eraseStroke => 'Apagar traço';
-	@override String get eraseArea => 'Apagar área';
-	@override String get plot => 'Plotar';
-	@override String get plot2dCartesian => '2D (Cartesiano)';
-	@override String get plot2dPolar => '2D (Polar)';
-	@override String get plot3dSurface => 'Superfície 3D (Cartesiano)';
-	@override String get plot3dSpherical => 'Superfície 3D (Esférico)';
-	@override String get vectorField2d => 'Campo vetorial 2D';
-	@override String get vectorField3d => 'Campo vetorial 3D (fatia)';
-	@override String get findRoots => 'Encontrar raízes';
-	@override String get findMin => 'Encontrar mínimo';
-	@override String get findMax => 'Encontrar máximo';
-	@override String get showAsymptotes => 'Mostrar assíntotas';
-	@override String get findSaddle => 'Encontrar ponto de sela';
-	@override String get f2d => '2D f(x)';
 	@override String get f3d => '3D f(x,y)';
 }
 
@@ -815,6 +820,7 @@ class _Translations$settings$prefCategories$pt_BR extends Translations$settings$
 	@override String get general => 'Geral';
 	@override String get writing => 'Escrita';
 	@override String get editor => 'Editor';
+	@override String get aiModels => 'Modelos de IA';
 	@override String get performance => 'Desempenho';
 	@override String get advanced => 'Avançado';
 }
@@ -1086,36 +1092,7 @@ class _Translations$editor$selectionBar$pt_BR extends Translations$editor$select
 	@override String get changeColor => 'Alterar cor';
 	@override String get changeStrokeType => 'Alterar tipo de traço';
 	@override String get changeStrokeTypeTitle => 'Alterar tipo de traço';
-	@override String get changeStrokeTypeHint =>
-			'Converter os traços selecionados para outra caneta.';
-}
-
-// Path: editor.toolbar
-class _Translations$editor$toolbar$pt_BR extends Translations$editor$toolbar$en {
-	_Translations$editor$toolbar$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
-
-	final TranslationsPtBr _root; // ignore: unused_field
-
-	// Translations
-	@override String get toggleColors => 'Alternar cores';
-	@override String get select => 'Selecionar';
-	@override String get toggleEraser => 'Alternar borracha';
-	@override String get photo => 'Imagens';
-	@override String get text => 'Texto';
-	@override String get toggleFingerDrawing => 'Alternar desenho com dedo';
-	@override String get undo => 'Desfazer';
-	@override String get redo => 'Refazer';
-	@override String get export => 'Exportar';
-	@override String get exportAs => 'Exportar como:';
-	@override String get fullscreen => 'Tela cheia (F11)';
-	@override String get regionScreenshot => 'Captura de região';
-	@override String get regionScreenshotHint => 'Arraste para selecionar uma área';
-	@override String get regionScreenshotTitle => 'Compartilhar ou copiar a captura?';
-	@override String get regionScreenshotBody => 'Compartilhe com outro app, ou copie a imagem para a área de transferência.';
-	@override String get regionScreenshotShare => 'Compartilhar';
-	@override String get regionScreenshotCopy => 'Copiar para a área de transferência';
-	@override String get regionScreenshotTooSmall => 'Seleção muito pequena';
-	@override String get regionScreenshotFailed => 'Falha ao capturar a tela';
+	@override String get changeStrokeTypeHint => 'Converter os traços selecionados para outra caneta.';
 }
 
 // Path: editor.penOptions
@@ -1302,6 +1279,95 @@ class _Translations$editor$hud$pt_BR extends Translations$editor$hud$en {
 	@override String get lockSingleFingerPan => 'Desativar rolagem com um dedo';
 	@override String get unlockAxisAlignedPan => 'Desbloquear rolagem horizontal ou vertical';
 	@override String get lockAxisAlignedPan => 'Bloquear rolagem horizontal ou vertical';
+}
+
+// Path: editor.vlmModels
+class _Translations$editor$vlmModels$pt_BR extends Translations$editor$vlmModels$en {
+	_Translations$editor$vlmModels$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
+
+	final TranslationsPtBr _root; // ignore: unused_field
+
+	// Translations
+	@override String get sectionSubtitle => 'Modelos de visão no dispositivo para manuscrito para LaTeX';
+	@override String notInstalled({required Object size}) => 'Não instalado · ${size}';
+	@override String installed({required Object size}) => 'Instalado · ${size}';
+	@override String downloading({required Object progress}) => 'Baixando… ${progress}%';
+	@override String get download => 'Baixar';
+	@override String get uninstall => 'Desinstalar';
+	@override String get uninstallTitle => 'Desinstalar modelo?';
+	@override String uninstallMessage({required Object name}) => '${name} será apagado deste aparelho. Você pode baixá-lo de novo depois.';
+	@override String get delete => 'Excluir';
+	@override String get isDefault => 'Modelo padrão';
+	@override String get setAsDefault => 'Definir como padrão';
+	@override String get unsupported => 'Transcrição no dispositivo exige Android 11 ou mais recente';
+	@override String downloadFailed({required Object error}) => 'Falha no download do modelo: ${error}';
+	@override String get promptTitle => 'Transcrever com IA no dispositivo';
+	@override String get promptMessage => 'Converta manuscrito para LaTeX com um modelo de visão que roda inteiramente neste aparelho (privado, funciona offline após o download).\n\nDownload único, mantido no aparelho.';
+	@override String get useClassic => 'Usar clássico';
+	@override String downloadingTitle({required Object name}) => 'Baixando ${name}';
+	@override String get preparing => 'Preparando…';
+	@override String get rendering => 'Renderizando…';
+	@override String renderingPage({required Object current, required Object total}) => 'Renderizando página ${current} de ${total}…';
+	@override String get readingDraft => 'Lendo rascunho…';
+	@override String get transcribing => 'Transcrevendo…';
+	@override String transcribingPage({required Object current, required Object total}) => 'Transcrevendo página ${current} de ${total}…';
+	@override String get viewInputImage => 'Ver imagem de entrada';
+}
+
+// Path: editor.onlineModels
+class _Translations$editor$onlineModels$pt_BR extends Translations$editor$onlineModels$en {
+	_Translations$editor$onlineModels$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
+
+	final TranslationsPtBr _root; // ignore: unused_field
+
+	// Translations
+	@override String get backendTitle => 'Mecanismo de transcrição';
+	@override String get backendOnDevice => 'Modelo de visão no dispositivo';
+	@override String get backendOnDeviceSubtitle => 'Privado, funciona offline após um download único';
+	@override String get backendOnline => 'Provedor online';
+	@override String get backendOnlineSubtitle => 'Modelos de ponta via HTTPS (usa seu plano de dados)';
+	@override String get provider => 'Provedor';
+	@override String get apiKey => 'Chave de API';
+	@override String get apiKeySet => 'Chave salva neste aparelho';
+	@override String get apiKeyMissing => 'Nenhuma chave salva';
+	@override String get editKeyTitle => 'Chave de API';
+	@override String get keyFieldHint => 'Cole a chave (guardada criptografada no aparelho)';
+	@override String get model => 'Modelo';
+	@override String get modelHint => 'Vazio usa o padrão do preset';
+	@override String get baseUrl => 'URL do endpoint';
+	@override String get baseUrlHint => 'Vazio usa o padrão do preset';
+	@override String get customUrlRequired => 'Um endpoint personalizado precisa de URL acima';
+	@override String get keySaved => 'Chave salva';
+	@override String get keyCleared => 'Chave removida';
+	@override String get retentionTitle => 'Uso de dados';
+}
+
+// Path: editor.toolbar
+class _Translations$editor$toolbar$pt_BR extends Translations$editor$toolbar$en {
+	_Translations$editor$toolbar$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
+
+	final TranslationsPtBr _root; // ignore: unused_field
+
+	// Translations
+	@override String get toggleColors => 'Alternar cores';
+	@override String get select => 'Selecionar';
+	@override String get toggleEraser => 'Alternar borracha';
+	@override String get photo => 'Imagens';
+	@override String get text => 'Texto';
+	@override String get toggleFingerDrawing => 'Alternar desenho com dedo';
+	@override String get undo => 'Desfazer';
+	@override String get redo => 'Refazer';
+	@override String get export => 'Exportar';
+	@override String get exportAs => 'Exportar como:';
+	@override String get fullscreen => 'Tela cheia (F11)';
+	@override String get regionScreenshot => 'Captura de região';
+	@override String get regionScreenshotHint => 'Arraste para selecionar uma área';
+	@override String get regionScreenshotTitle => 'Compartilhar ou copiar a captura?';
+	@override String get regionScreenshotBody => 'Compartilhe com outro app, ou copie a imagem para a área de transferência.';
+	@override String get regionScreenshotShare => 'Compartilhar';
+	@override String get regionScreenshotCopy => 'Copiar para a área de transferência';
+	@override String get regionScreenshotTooSmall => 'Seleção muito pequena';
+	@override String get regionScreenshotFailed => 'Falha ao capturar a tela';
 }
 
 // Path: sentry.consent.description

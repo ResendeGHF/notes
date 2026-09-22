@@ -9,6 +9,8 @@ import 'package:args/args.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 import 'package:go_router/go_router.dart';
 import 'package:logging/logging.dart';
 import 'package:path_to_regexp/path_to_regexp.dart';
@@ -124,6 +126,10 @@ Future<void> appRunner(List<String> args) async {
   // Warm Advanced Pencil grain shader (non-blocking).
   unawaited(PencilShader.init());
 
+  // On-device vision engine for page-to-LaTeX (models download on demand).
+  // Never blocks or breaks startup; failures surface at transcription time.
+  unawaited(_initVlmEngine());
+
   pdfrxFlutterInitialize(dismissPdfiumWasmWarnings: true);
 
   await Future.wait([
@@ -156,6 +162,15 @@ Future<void> appRunner(List<String> args) async {
   });
 
   runApp(TranslationProvider(child: const App()));
+}
+
+Future<void> _initVlmEngine() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await FlutterGemma.initialize(inferenceEngines: [LiteRtLmEngine()]);
+  } catch (_) {
+    // The transcription service retries lazily with a proper error.
+  }
 }
 
 void setLocale() {

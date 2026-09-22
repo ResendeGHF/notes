@@ -192,10 +192,11 @@ NoteToolSettings captureNoteToolSettings({
   } else if (cp.toolId == ToolId.calligraphyPen) {
     calligraphyOpts = cp.options;
     calligraphyColor = cp.color.value;
-  } else if (cp.toolId == ToolId.advancedPen ||
-      cp.toolId == ToolId.experimentalPen) {
+  } else if (cp.toolId == ToolId.advancedPen) {
     advancedOpts = cp.options;
     advancedColor = cp.color.value;
+  } else if (cp.toolId == ToolId.experimentalPen) {
+    // Experimental keeps its own brush prefs; do not clobber Advanced Pen.
   }
 
   highlighterOpts = ch.options;

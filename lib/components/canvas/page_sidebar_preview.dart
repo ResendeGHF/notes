@@ -54,40 +54,67 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
   int _lastObservedRevision = -1;
   late final ScrollController _quillScrollController = ScrollController();
 
-  EditorPage get _page => widget.coreInfo.pages[widget.pageIndex];
+  /// Page instance this state currently listens to. Tracked directly (instead
+  /// of re-resolving by index) so listener removal never touches a shrunk
+  /// page list during unmount after page deletions.
+  EditorPage? _listenedPage;
+
+  /// Null when [PageSidebarPreview.pageIndex] no longer addresses a page
+  /// (e.g. pages were deleted while this preview was mounted). All readers
+  /// must handle null instead of throwing a RangeError.
+  EditorPage? get _page {
+    final pages = widget.coreInfo.pages;
+    final index = widget.pageIndex;
+    if (index < 0 || index >= pages.length) return null;
+    return pages[index];
+  }
+
+  void _attachPageListener() {
+    final page = _page;
+    if (identical(page, _listenedPage)) return;
+    _detachPageListener();
+    _listenedPage = page;
+    page?.addListener(_onPageChanged);
+    _lastObservedRevision = page?.saveBinaryRevision ?? -1;
+  }
+
+  void _detachPageListener() {
+    _listenedPage?.removeListener(_onPageChanged);
+    _listenedPage = null;
+  }
 
   @override
   void initState() {
     super.initState();
-    _lastObservedRevision = _page.saveBinaryRevision;
-    _page.addListener(_onPageChanged);
+    _attachPageListener();
     WidgetsBinding.instance.addPostFrameCallback((_) => _scheduleBake());
   }
 
   @override
   void didUpdateWidget(covariant PageSidebarPreview oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.pageIndex != widget.pageIndex) {
-      oldWidget.coreInfo.pages[oldWidget.pageIndex].removeListener(
-        _onPageChanged,
-      );
-      _page.addListener(_onPageChanged);
+    if (oldWidget.pageIndex != widget.pageIndex ||
+        !identical(oldWidget.coreInfo, widget.coreInfo)) {
+      _detachPageListener();
+      _attachPageListener();
+      // Keep the previous raster only when still showing the same instance.
       _inkRaster = null;
-      _lastObservedRevision = _page.saveBinaryRevision;
     }
     _scheduleBake();
   }
 
   @override
   void dispose() {
-    _page.removeListener(_onPageChanged);
+    _detachPageListener();
     _quillScrollController.dispose();
     super.dispose();
   }
 
   void _onPageChanged() {
     if (!mounted) return;
-    final revision = _page.saveBinaryRevision;
+    final page = _listenedPage ?? _page;
+    if (page == null) return;
+    final revision = page.saveBinaryRevision;
     if (revision == _lastObservedRevision) return;
     _lastObservedRevision = revision;
     _scheduleBake(force: true);
@@ -96,12 +123,17 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
   void _scheduleBake({bool force = false}) {
     final displaySize = widget.displaySize;
     if (displaySize.width <= 0 || displaySize.height <= 0) return;
+    final page = _page;
+    if (page == null) {
+      if (_inkRaster != null && mounted) setState(() => _inkRaster = null);
+      return;
+    }
 
     if (!force &&
-        _page.sidebarPreviewMatches(_page.saveBinaryRevision, displaySize)) {
-      final cached = _page.sidebarPreviewImage;
+        page.sidebarPreviewMatches(page.saveBinaryRevision, displaySize)) {
+      final cached = page.sidebarPreviewImage;
       if (!identical(_inkRaster, cached)) {
-        setState(() => _inkRaster = cached);
+        if (mounted) setState(() => _inkRaster = cached);
       }
       return;
     }
@@ -120,8 +152,13 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
   }
 
   Future<void> _bakeInkRaster(Size displaySize, int generation) async {
-    if (!mounted) return;
     final page = _page;
+    if (!mounted || page == null) {
+      if (mounted && generation == _bakeGeneration) {
+        setState(() => _baking = false);
+      }
+      return;
+    }
     final strokes = page.allStrokesInDrawOrder.toList(growable: false);
     ui.Image? image;
     final previewScale = displaySize.width / page.size.width;
@@ -191,6 +228,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
   @override
   Widget build(BuildContext context) {
     final page = _page;
+    if (page == null) return const SizedBox.shrink();
     final pageSize = page.size;
     final displaySize = widget.displaySize;
     if (displaySize.width <= 0 || displaySize.height <= 0) {

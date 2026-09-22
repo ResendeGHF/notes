@@ -85,6 +85,19 @@ dependencies {
     implementation("com.google.android.material:material:1.13.0")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // Google Ink digital-ink stack (experimental pen live engine).
+    // InProgressStrokesView captures stylus MotionEvents at native rate
+    // (pressure / tilt / orientation) and renders the low-latency shader mesh;
+    // Brush + StockBrushes define the testable stroke families.
+    // See https://github.com/google/ink and ink-stroke-modeler.
+    val inkVersion = "1.1.0-alpha03"
+    implementation("androidx.ink:ink-authoring:$inkVersion")
+    implementation("androidx.ink:ink-brush:$inkVersion")
+    implementation("androidx.ink:ink-geometry:$inkVersion")
+    implementation("androidx.ink:ink-rendering:$inkVersion")
+    implementation("androidx.ink:ink-strokes:$inkVersion")
+    implementation("androidx.ink:ink-nativeloader:$inkVersion")
 }
 
 val abiCodes = mapOf("arm64-v8a" to 2)

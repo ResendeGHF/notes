@@ -167,6 +167,8 @@ dependencies:
   wakelock_plus: ^1.4.0
   flutter_timezone: ^5.0.1
   fluentui_system_icons: ^1.1.273
+  flutter_gemma: ^1.8.4
+  flutter_gemma_litertlm: ^1.7.1
 
   # Python integration removed; plotting now handled in Dart
 

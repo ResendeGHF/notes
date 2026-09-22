@@ -3,43 +3,108 @@
 
 // ignore_for_file: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
 
-import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_digital_ink_recognition/google_mlkit_digital_ink_recognition.dart'
     as ml;
 import 'package:logging/logging.dart';
-import 'package:math_expressions/math_expressions.dart';
 import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/services/math_text_utils.dart';
 import 'package:saber/services/stroke_ink_clusters.dart';
 import 'package:vector_math/vector_math_64.dart' show Matrix4;
+
+/// Result of attempting to solve writing lines: answer strokes to add plus
+/// consumed previous-answer strokes to remove. Null means "not solvable";
+/// a non-null outcome without changes means "already solved, nothing to do".
+class MathSolveOutcome {
+  const MathSolveOutcome({
+    this.addedStrokes = const [],
+    this.removedStrokes = const [],
+  });
+
+  final List<Stroke> addedStrokes;
+  final List<Stroke> removedStrokes;
+
+  bool get hasChanges => addedStrokes.isNotEmpty || removedStrokes.isNotEmpty;
+}
 
 class MathSolverService {
   final _recognizer = ml.DigitalInkRecognizer(languageCode: 'en-US');
   final _modelManager = ml.DigitalInkRecognizerModelManager();
   static final log = Logger('MathSolverService');
 
+  /// ML Kit digital ink is implemented natively on Android/iOS only. On
+  /// desktop/web the method channel has no handler, so skip silently instead
+  /// of spamming MissingPluginException warnings.
+  static bool get isSupported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// In-flight background download, if any. Single-flight so repeated
+  /// recognition attempts while offline never stack downloads.
+  Future<void>? _pendingDownload;
+
+  /// Latched when the method channel has no native handler (e.g. plugin
+  /// registration failed at startup). Skips all further channel calls so one
+  /// broken environment cannot spam the log on every recognition attempt.
+  bool _channelDead = false;
+
   Future<void> init() async {
+    if (!isSupported || _channelDead) return;
     try {
       final isDownloaded = await _modelManager.isModelDownloaded('en-US');
       if (!isDownloaded) {
         log.info('Downloading Math Solver model (en-US)...');
-        await _modelManager.downloadModel('en-US');
+        // NB: isWifiRequired defaults to true upstream, which makes every
+        // download fail on mobile data ("conditions not met"). These models
+        // are small, so allow any connection here.
+        await _modelManager
+            .downloadModel('en-US', isWifiRequired: false)
+            .timeout(const Duration(seconds: 60));
       }
+    } on MissingPluginException catch (e) {
+      _channelDead = true;
+      log.info('Digital ink plugin unavailable, math solver disabled: $e');
     } catch (e) {
       log.warning(
-        'Failed to download Math Solver model (Device might be offline): $e',
+        'Failed to download Math Solver model (${e.runtimeType}): $e. '
+        'Check the network connection and Google Play Services.',
       );
     }
   }
 
+  /// Kicks a single-flight background download when the model is missing, so
+  /// a later recognition attempt recovers without reopening the editor.
+  void _ensureDownloadInBackground() {
+    if (_pendingDownload != null) return;
+    log.info('Math Solver model missing, downloading in background...');
+    final fut = _modelManager
+        .downloadModel('en-US', isWifiRequired: false)
+        .timeout(const Duration(seconds: 90))
+        .then<void>((_) {})
+        .catchError((Object e) {
+      log.warning(
+        'Background Math Solver model download failed (${e.runtimeType}): $e.',
+      );
+    });
+    _pendingDownload = fut;
+    fut.whenComplete(() => _pendingDownload = null);
+  }
+
   Future<void> dispose() async {
+    if (!isSupported || _channelDead) return;
     try {
       await _recognizer.close();
+    } on MissingPluginException catch (e) {
+      _channelDead = true;
+      log.info('Digital ink plugin unavailable, math solver disabled: $e');
     } catch (e) {
       log.warning('Failed to dispose Math Solver recognizer: $e');
     }
@@ -60,75 +125,9 @@ class MathSolverService {
     return ink;
   }
 
-  String _normalizeForParser(String expressionPart) {
-    return expressionPart
-        .replaceAll('−', '-')
-        .replaceAll('x', '*')
-        .replaceAll('×', '*')
-        .replaceAll('÷', '/')
-        .replaceAll('π', 'pi')
-        .replaceAll(' ', '');
-  }
-
-  double _evaluateExpression(String expressionPart) {
-    final normalizedExpr = _normalizeForParser(expressionPart);
-    if (normalizedExpr.isEmpty) {
-      throw FormatException('empty expression');
-    }
-    final parser = Parser();
-    final exp = parser.parse(normalizedExpr);
-    final cm = ContextModel();
-    cm.bindVariable(Variable('pi'), Number(math.pi));
-    cm.bindVariable(Variable('e'), Number(math.e));
-    return exp.evaluate(EvaluationType.REAL, cm);
-  }
-
-  /// Fixes common OCR quirks: invisible chars, fullwidth digits/operators, stray spaces.
-  String _normalizeOcrMath(String raw) {
-    var s = raw.trim();
-    s = s.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
-    const fw = '０１２３４５６７８９＋－×÷＝';
-    const asc = '0123456789+-*/=';
-    for (var i = 0; i < fw.length; i++) {
-      s = s.replaceAll(fw[i], asc[i]);
-    }
-    s = s.replaceAll('−', '-');
-    s = s.replaceAll('⋅', '*').replaceAll('·', '*');
-    s = s.replaceAll(RegExp(r'\s+'), ' ');
-    return s.trim();
-  }
-
-  /// Evaluates [raw] like `2+2=4*2=` left-to-right: each non-empty segment
-  /// between `=` is a full expression; trailing `=` requests the last value.
-  double? _solveChainedEquals(String raw) {
-    final trimmed = _normalizeOcrMath(raw);
-    if (!trimmed.contains('=')) return null;
-
-    if (!trimmed.endsWith('=')) {
-      return null;
-    }
-
-    final parts = trimmed.split('=');
-    if (parts.length < 2) return null;
-
-    double? last;
-    for (var i = 0; i < parts.length; i++) {
-      final seg = parts[i].trim();
-      if (seg.isEmpty) {
-        if (i == parts.length - 1 && last != null) {
-          return last;
-        }
-        continue;
-      }
-      try {
-        last = _evaluateExpression(seg);
-      } catch (e, st) {
-        log.fine('Eval failed for "$seg": $e\n$st');
-        return null;
-      }
-    }
-    return last;
-  }
+  /// Last answer per solve signature, so re-solving an unchanged line is a
+  /// silent no-op instead of history-churning remove/add cycles.
+  final Map<String, String> _lastSolveAnswers = {};
 
   String _formatResult(double eval) {
     var resultString = eval.toString();
@@ -148,92 +147,123 @@ class MathSolverService {
     return resultString;
   }
 
-  List<Stroke>? _strokesForSolvedLine(
+  /// Solves one writing line. Previously generated answer strokes on the
+  /// line contribute their known text (never re-recognized: mechanical glyph
+  /// outlines poison the recognizer); only real handwriting runs go to ML
+  /// Kit. Returns null when the line is not a solvable equation.
+  Future<MathSolveOutcome?> _solveLine(
     List<Stroke> lineStrokes,
-    String recognizedText,
     EditorPage page,
     int pageIndex,
-  ) {
-    final solved = _solveChainedEquals(recognizedText);
-    if (solved == null) return null;
+  ) async {
+    if (lineStrokes.isEmpty) return null;
+    final tokens = splitLineTokens(lineStrokes);
+    if (tokens.isEmpty) return null;
 
-    final resultString = _formatResult(solved);
+    final buffer = StringBuffer();
+    final consumed = <Stroke>[];
+    var handwrittenSig = StringBuffer();
+    for (final token in tokens) {
+      if (token.isKnown) {
+        buffer.write(token.knownText);
+        consumed.addAll(token.known!);
+      } else {
+        final run = token.run!;
+        final ink = _buildInk(run);
+        if (ink.strokes.isEmpty) return null;
+        final candidates = await _recognizer.recognize(ink);
+        if (candidates.isEmpty) return null;
+        final text = candidates.first.text.trim();
+        if (text.isEmpty) return null;
+        buffer.write(text);
+        handwrittenSig.write(text);
+        handwrittenSig.write('|');
+      }
+    }
+
+    final assembled = buffer.toString();
+    if (!assembled.trim().endsWith('=')) return null;
+
+    final solved = solveMathChain(assembled);
+    if (solved == null) {
+      log.fine('No solution for "$assembled"');
+      return null;
+    }
+    final answer = _formatResult(solved);
+
+    // Dedup: same handwritten ink with the same answer already on the line
+    // (e.g. decorative pen-up on a solved line) changes nothing.
+    final sig =
+        '$pageIndex|${lineStrokes.length}|$handwrittenSig=>${consumed.map((s) => knownResultOf(s)?.text ?? '').join()}';
+    if (_lastSolveAnswers[sig] == answer) {
+      return const MathSolveOutcome();
+    }
+    if (_lastSolveAnswers.length > 200) _lastSolveAnswers.clear();
+    _lastSolveAnswers[sig] = answer;
+
     final bounds = _getCombinedBounds(lineStrokes);
     final fontSize = (bounds.height * 0.8).clamp(30.0, 80.0);
-
     final startOffset = Offset(
       bounds.right + 25,
       bounds.center.dy + (fontSize * 0.35),
     );
-
-    return _generateVectorStrokes(
-      resultString,
+    final added = _generateVectorStrokes(
+      answer,
       startOffset,
       fontSize,
       page,
       pageIndex,
     );
+    if (added.isEmpty) return null;
+    tagSolverResultStrokes(added, answer);
+    return MathSolveOutcome(addedStrokes: added, removedStrokes: consumed);
   }
 
-  Future<List<Stroke>?> processStrokes(
+  Future<MathSolveOutcome?> processStrokes(
     List<Stroke> strokes,
     EditorPage page,
     int pageIndex,
   ) async {
-    if (strokes.isEmpty) return null;
+    if (!isSupported || _channelDead || strokes.isEmpty) return null;
 
     try {
       final isModelReady = await _modelManager.isModelDownloaded('en-US');
-      if (!isModelReady) return null;
+      if (!isModelReady) {
+        _ensureDownloadInBackground();
+        return null;
+      }
+    } on MissingPluginException catch (e) {
+      _channelDead = true;
+      log.info('Digital ink plugin unavailable, math solver disabled: $e');
+      return null;
     } catch (e) {
       return null;
     }
 
     try {
-
-      final monoInk = _buildInk(strokes);
-      if (monoInk.strokes.isNotEmpty) {
-        final candidates = await _recognizer.recognize(monoInk);
-        if (candidates.isNotEmpty) {
-          final out = _strokesForSolvedLine(
-            strokes,
-            candidates.first.text,
-            page,
-            pageIndex,
-          );
-          if (out != null && out.isNotEmpty) {
-            return out;
-          }
-        }
-      }
-
       final lineClusters = clusterStrokesIntoWritingLines(strokes);
       if (lineClusters.isEmpty) return null;
 
-      final allOut = <Stroke>[];
-
+      final added = <Stroke>[];
+      final removed = <Stroke>[];
+      var solvedAny = false;
       for (final lineStrokes in lineClusters) {
         if (lineStrokes.isEmpty) continue;
-
-        final ink = _buildInk(lineStrokes);
-        if (ink.strokes.isEmpty) continue;
-
-        final candidates = await _recognizer.recognize(ink);
-        if (candidates.isEmpty) continue;
-
-        final mathString = candidates.first.text;
-        final lineOut = _strokesForSolvedLine(
-          lineStrokes,
-          mathString,
-          page,
-          pageIndex,
-        );
-        if (lineOut != null && lineOut.isNotEmpty) {
-          allOut.addAll(lineOut);
-        }
+        final outcome = await _solveLine(lineStrokes, page, pageIndex);
+        if (outcome == null) continue;
+        solvedAny = true;
+        added.addAll(outcome.addedStrokes);
+        removed.addAll(outcome.removedStrokes);
       }
 
-      return allOut.isEmpty ? null : allOut;
+      // Null (unsolvable) only when no line solved; an empty outcome means
+      // "already solved", which callers treat as silent success.
+      if (!solvedAny) return null;
+      return MathSolveOutcome(addedStrokes: added, removedStrokes: removed);
+    } on MissingPluginException catch (e) {
+      _channelDead = true;
+      log.info('Digital ink plugin unavailable, math solver disabled: $e');
+      return null;
     } catch (e, st) {
       log.warning('processStrokes: $e', e, st);
       return null;

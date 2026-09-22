@@ -26,7 +26,11 @@ import 'package:saber/data/extensions/point_extensions.dart';
 import 'package:saber/data/extensions/svg_path_formatting.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
+import 'package:saber/data/stroke_geometry/google_ink_geometry.dart'
+    show buildGoogleInkPath, buildGoogleInkPolygon;
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/google_ink_brush.dart'
+    show GoogleInkBrushConfig, GoogleInkBrushFamily;
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/services/display_ink_feel.dart';
 
@@ -169,6 +173,13 @@ class BinaryOptions {
           endCustomTaper = reader.readFloat();
         case StrokeBinaryKeys.endCap:
           endCap = reader.readBoolNoKey();
+        case StrokeBinaryKeys.googleInkFamily:
+          // Defensive: snapshot lives pre-options, but drain it here too so
+          // a misplaced key can never desync the stream.
+          reader.readStringNoKey();
+        case StrokeBinaryKeys.googleInkEpsilon:
+        case StrokeBinaryKeys.googleInkSmoothingMs:
+          reader.readFloat();
       }
       key = reader.readKey();
     }
@@ -336,6 +347,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// may still carry the flag on other tools and are drawn without neon.
   bool neon = false;
 
+  /// Google Ink brush snapshot per stroke (experimental pen only). Persisted
+  /// so committed ink remembers the test config used at draw time. Rendered
+  /// by the Dart stroke-modeler fallback (`google_ink_geometry.dart`) and by
+  /// the native `Brush` while live. Ignored by all other pens.
+  String googleInkFamily = 'pressurePen';
+  double googleInkEpsilon = 0.1;
+  double googleInkSmoothingMs = 16.0;
+
   Path? _neonInnerPath;
 
   /// Bright neon core (ballpoint-style inset).
@@ -402,6 +421,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   int get geometricFingerprint {
+    // Experimental ink geometry depends on the Google Ink brush snapshot, not
+    // just size/color: include family + epsilon so tile / raster / mesh caches
+    // invalidate when the test bench changes brushes.
+    final giExtra = toolId == ToolId.experimentalPen
+        ? Object.hash(
+            googleInkFamily,
+            (googleInkEpsilon * 1000).round(),
+            (googleInkSmoothingMs * 10).round(),
+          )
+        : 0;
     if (points.isEmpty) {
       return Object.hash(
         color,
@@ -409,6 +438,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         toolId.index,
         0,
         options.isComplete,
+        giExtra,
       );
     }
     final first = points.first;
@@ -423,6 +453,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       (options.size * 1000).round(),
       toolId.index,
       options.isComplete,
+      giExtra,
     );
   }
 
@@ -460,11 +491,35 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   Path? _lowQualityPath;
-  Path get lowQualityPath =>
-      _lowQualityPath ??= getPath(lowQualityPolygon, smooth: true);
+  Path get lowQualityPath {
+    // Experimental paints its authored path (ovals for dashed) at every
+    // quality: the polygon form cannot represent disjoint dots.
+    if (toolId == ToolId.experimentalPen) return highQualityPath;
+    return _lowQualityPath ??= getPath(lowQualityPolygon, smooth: true);
+  }
 
   Path get highQualityPath {
     if (_cachedPath != null && _cachedPathValid) return _cachedPath!;
+
+    // Experimental (Google Ink) fills its authored path directly: ribbon
+    // polygon with travel-aware round caps, or one oval subpath per dot for
+    // the dashed family (never a concatenated dot-polygon — its bridges are
+    // bow-ties that cancel fill).
+    if (toolId == ToolId.experimentalPen) {
+      final base = _pointsForLiveRender(points);
+      if (base.isEmpty) {
+        _cachedPathValid = true;
+        return _cachedPath ??= Path();
+      }
+      _cachedPath = buildGoogleInkPath(
+        base,
+        googleInkConfig(),
+        isComplete: options.isComplete,
+      );
+      _cachedPath!.fillType = PathFillType.nonZero;
+      _cachedPathValid = true;
+      return _cachedPath!;
+    }
 
     _cachedPath ??= Path();
     _cachedPath!.reset();
@@ -498,11 +553,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // Path-outline pens already include round joins/caps. Midpoint smoothing of
     // the outline polygon creates self-intersections near returns and chipped caps.
     // Fountain keeps the previous smoothed-path look (mesh tips are separate).
+    // Experimental (Google Ink) authors its own caps/joins in
+    // buildGoogleInkPolygon; smoothing them again pinches the tips into
+    // bow-ties whose nonzero winding cancels out (holes at start/end caps and
+    // erased patches at stroke intersections).
     final bool preserveAuthoredOutline =
         toolId == ToolId.highlighter ||
         toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
         toolId == ToolId.ballpointPen ||
+        toolId == ToolId.experimentalPen ||
         toolId == ToolId.laserPointer;
 
     if (toolId == ToolId.calligraphyPen &&
@@ -903,14 +963,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       );
     }
 
-    return Stroke(
-        color: color,
-        pressureEnabled: pressureEnabled,
-        options: options,
-        pageIndex: pageIndex,
-        page: page,
-        toolId: toolId,
-      )
+    final stroke = Stroke(
+      color: color,
+      pressureEnabled: pressureEnabled,
+      options: options,
+      pageIndex: pageIndex,
+      page: page,
+      toolId: toolId,
+    )
       ..points.addAll(
         points.where(
           (point) =>
@@ -925,6 +985,15 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..paint = json['sp'] is Map
           ? StrokePaint.fromJson(Map<String, dynamic>.from(json['sp'] as Map))
           : const StrokePaint();
+    // Google Ink snapshot (experimental pen only; defaults keep old notes valid).
+    if (json['giF'] is String) stroke.googleInkFamily = json['giF'] as String;
+    final giE = toDoubleSafe(json['giE']);
+    if (giE != null && giE.isFinite) stroke.googleInkEpsilon = giE.clamp(0.01, 1.0);
+    final giS = toDoubleSafe(json['giS']);
+    if (giS != null && giS.isFinite) {
+      stroke.googleInkSmoothingMs = giS.clamp(0.0, 120.0);
+    }
+    return stroke;
   }
   Map<String, dynamic> toJson() {
     if (toolId == ToolId.highlighter) {
@@ -946,6 +1015,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       'rot': rotationDeg,
       if (neon) 'n': true,
       if (!paint.isSolid) 'sp': paint.toJson(),
+      if (toolId == ToolId.experimentalPen) 'giF': googleInkFamily,
+      if (toolId == ToolId.experimentalPen) 'giE': googleInkEpsilon,
+      if (toolId == ToolId.experimentalPen) 'giS': googleInkSmoothingMs,
     }..addAll(options.toJson());
   }
 
@@ -987,6 +1059,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       writer.writeString(
         StrokeBinaryKeys.strokePaint,
         jsonEncode(paint.toJson()),
+      );
+    }
+    if (toolId == ToolId.experimentalPen) {
+      writer.writeString(StrokeBinaryKeys.googleInkFamily, googleInkFamily);
+      writer.writeFloat(StrokeBinaryKeys.googleInkEpsilon, googleInkEpsilon);
+      writer.writeFloat(
+        StrokeBinaryKeys.googleInkSmoothingMs,
+        googleInkSmoothingMs,
       );
     }
 
@@ -1122,6 +1202,25 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       } catch (_) {}
       key = reader.readKey();
     }
+    var googleInkFamily = 'pressurePen';
+    var googleInkEpsilon = 0.1;
+    var googleInkSmoothingMs = 16.0;
+    // Google Ink snapshot sits between paint and options (experimental only).
+    // Loop so any subset / order stays forward-compatible.
+    var giGuard = 0;
+    while ((key == StrokeBinaryKeys.googleInkFamily ||
+            key == StrokeBinaryKeys.googleInkEpsilon ||
+            key == StrokeBinaryKeys.googleInkSmoothingMs) &&
+        giGuard++ < 4) {
+      if (key == StrokeBinaryKeys.googleInkFamily) {
+        googleInkFamily = reader.readStringNoKey();
+      } else if (key == StrokeBinaryKeys.googleInkEpsilon) {
+        googleInkEpsilon = reader.readFloat();
+      } else {
+        googleInkSmoothingMs = reader.readFloat();
+      }
+      key = reader.readKey();
+    }
     final options = BinaryOptions().optionsFromBinary(reader, initialKey: key);
 
     // Bounds were tracked inline during the packed-points loop above using
@@ -1149,6 +1248,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..flatEdge = !options.start.cap
       ..neon = neon
       ..paint = paint
+      ..googleInkFamily = googleInkFamily
+      ..googleInkEpsilon = googleInkEpsilon.clamp(0.01, 1.0)
+      ..googleInkSmoothingMs = googleInkSmoothingMs.clamp(0.0, 120.0)
       .._cachedBounds = parsedBounds
       ..points.addAll(
         points.where(
@@ -1233,6 +1335,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       reader.readStringNoKey();
       key = reader.readKey();
     }
+    var giGuard = 0;
+    while ((key == StrokeBinaryKeys.googleInkFamily ||
+            key == StrokeBinaryKeys.googleInkEpsilon ||
+            key == StrokeBinaryKeys.googleInkSmoothingMs) &&
+        giGuard++ < 4) {
+      if (key == StrokeBinaryKeys.googleInkFamily) {
+        reader.readStringNoKey();
+      } else {
+        reader.readFloat();
+      }
+      key = reader.readKey();
+    }
     BinaryOptions().optionsFromBinary(reader, initialKey: key);
   }
 
@@ -1250,6 +1364,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   Offset? _predInstantVelLast;
 
   /// Stroke stabilization / prediction apply only to these ink tools.
+  /// Experimental (Google Ink) is intentionally excluded: smoothing +
+  /// prediction live in the native `InProgressStrokesView` input model /
+  /// MotionEventPredictor (or the Dart stroke-modeler fallback), so Flutter
+  /// 1€ filtering here would double-smooth and add rubber-banding.
   bool get _allowsStrokeStabilizationAndPrediction =>
       toolId == ToolId.ballpointPen ||
       toolId == ToolId.calligraphyPen ||
@@ -1715,10 +1833,41 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _packedPoints = null;
   }
 
+  /// Snapshot of the Google Ink brush for this stroke. Experimental pen only;
+  /// other pens ignore it. Size/color mirror [options.size]/[color] so the
+  /// tiled + temporary-raster LOD path (bounds, culling, batching) treats
+  /// experimental ink identically to every other pen.
+  GoogleInkBrushConfig googleInkConfig() {
+    return GoogleInkBrushConfig(
+      family: GoogleInkBrushFamily.parse(googleInkFamily),
+      size: options.size,
+      colorArgb: color.toARGB32(),
+      epsilon: googleInkEpsilon.clamp(0.01, 1.0),
+      smoothingWindowMs: googleInkSmoothingMs.clamp(0.0, 120.0),
+    );
+  }
+
   @protected
   List<Offset> getPolygon({required StrokeQuality quality}) {
     if (!pressureEnabled) {
       options.simulatePressure = false;
+    }
+
+    // Experimental (Google Ink) never touches perfect_freehand: sliding-window
+    // input model + family tip (native InProgressStrokesView live, Dart port
+    // for committed tiles / raster LOD / exports).
+    if (toolId == ToolId.experimentalPen) {
+      final base = _pointsForLiveRender(points);
+      if (base.isEmpty) return const [];
+      final poly = buildGoogleInkPolygon(
+        base,
+        googleInkConfig(),
+        isComplete: options.isComplete,
+      );
+      if (quality == StrokeQuality.high) {
+        _highQualitySpine = base;
+      }
+      return poly;
     }
 
     // 1. Get points WITH the prediction tip appended FIRST
@@ -1755,18 +1904,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     } else if (toolId == ToolId.calligraphyPen ||
         toolId == ToolId.fountainPen ||
         toolId == ToolId.ballpointPen ||
-        toolId == ToolId.laserPointer ||
-        toolId == ToolId.experimentalPen) {
+        toolId == ToolId.laserPointer) {
       if (basePoints.length >= 3 && packedBase != null) {
         final scale = _targetScale.clamp(0.1, 5.0);
-        double toleranceMultiplier = 1.0;
-        if (toolId == ToolId.experimentalPen) {
-          // options.smoothing is [0.0, 1.0]
-          // default 0.5 -> multiplier ~ 1.0
-          // 0.0 -> multiplier ~ 0.1 (less tolerance, more points)
-          // 1.0 -> multiplier ~ 3.0 (more tolerance, smoother/simpler)
-          toleranceMultiplier = math.max(0.1, options.smoothing * 3.0);
-        }
+        const double toleranceMultiplier = 1.0;
         final toleranceSq =
             (0.12 * toleranceMultiplier / scale) *
             (0.12 * toleranceMultiplier / scale);
@@ -2412,7 +2553,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint;
+        ..paint = paint
+        ..googleInkFamily = googleInkFamily
+        ..googleInkEpsilon = googleInkEpsilon
+        ..googleInkSmoothingMs = googleInkSmoothingMs;
 
   /// Freehand ink that can be rewritten as another pen (not shapes).
   bool get canConvertStrokeType =>
@@ -2424,6 +2568,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           toolId == ToolId.calligraphyPen ||
           toolId == ToolId.advancedPen ||
           toolId == ToolId.advancedPencil ||
+          toolId == ToolId.experimentalPen ||
           toolId == ToolId.highlighter);
 
   /// Same path samples/color/page, with a new tool identity and style.
@@ -2448,7 +2593,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ..rotationDeg = rotationDeg
           ..flatEdge = flatEdge
           ..neon = neon
-          ..paint = paint;
+          ..paint = paint
+          ..googleInkFamily = googleInkFamily
+          ..googleInkEpsilon = googleInkEpsilon
+          ..googleInkSmoothingMs = googleInkSmoothingMs;
     rebuilt.markPolygonNeedsUpdating();
     return rebuilt;
   }
@@ -2465,7 +2613,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint;
+        ..paint = paint
+        ..googleInkFamily = googleInkFamily
+        ..googleInkEpsilon = googleInkEpsilon
+        ..googleInkSmoothingMs = googleInkSmoothingMs;
 
   static List<PointVector> _ramerDouglasPeucker(
     List<PointVector> points, {
@@ -2643,9 +2794,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   bool get needsTileMeshWarmup => false;
 
   /// Solid opaque mesh that page/tile batching can `drawVertices`.
+  /// Experimental (Google Ink) is path-only like Advanced Pen: single-source
+  /// geometry (`buildGoogleInkPolygon` -> `highQualityPath`) so tiled Picture
+  /// + temporary-raster LOD bake exactly what the vector path draws.
   bool get canBatchSolidMesh {
     if (toolId == ToolId.highlighter) return false;
     if (toolId == ToolId.advancedPen) return false;
+    if (toolId == ToolId.experimentalPen) return false;
     if (hasNonSolidPaint) return false;
     if (this is ShapeStroke ||
         this is CircleStroke ||
@@ -2939,10 +3094,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (points.length < 2) return null;
 
     // Path-filled tools. Neon ballpoint still builds a mesh via
-    // [ensureMeshVertices] for the core.
+    // [ensureMeshVertices] for the core. Experimental is path-only (Google Ink
+    // polygon) so committed tiles + raster LOD share one geometry source.
     if ((neon && toolId == ToolId.ballpointPen) ||
         toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
+        toolId == ToolId.experimentalPen ||
         toolId == ToolId.highlighter ||
         toolId == ToolId.laserPointer) {
       return null;

@@ -97,9 +97,13 @@ import 'package:saber/data/routes.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
+import 'package:saber/data/tools/google_ink_brush.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/laser_pointer.dart';
 import 'package:saber/data/tools/pen.dart';
+import 'package:saber/components/canvas/google_ink_live_overlay.dart';
+import 'package:saber/services/google_ink_channel.dart'
+    show GoogleInkNative, GoogleInkFinishedStroke;
 import 'package:saber/data/tools/pen_size_preset_support.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/data/tools/shape_geometry.dart';
@@ -112,7 +116,11 @@ import 'package:saber/pages/home/home.dart';
 import 'package:saber/pages/home/note_and_ink_defaults_pages.dart';
 import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/math_solver_service.dart';
+import 'package:saber/services/online/online_transcription_service.dart';
 import 'package:saber/services/recognition_service.dart';
+import 'package:saber/services/vlm/page_image_renderer.dart';
+import 'package:saber/services/vlm/page_latex_vlm_service.dart';
+import 'package:saber/services/vlm/vlm_model_catalog.dart';
 import 'package:saber/services/sba_encryption.dart';
 import 'package:saber/services/thumbnail_cache.dart';
 import 'package:saber/services/vault_adapter.dart';
@@ -163,6 +171,66 @@ class _NoteLinkHistoryEntry {
 
   final String path;
   final int? pageIndex;
+}
+
+/// Blocking progress dialog with live status text and user cancel, shared by
+/// the LaTeX export flows. [show] opens it once; [close] is idempotent and
+/// mount-guarded; [cancelled] flips when the user taps Cancel (which pops
+/// the dialog itself). Disposal is owned by [close].
+class _BlockingProgress {
+  _BlockingProgress(this._context, {required this.title});
+
+  final BuildContext _context;
+  final String title;
+  final ValueNotifier<String> status = ValueNotifier('');
+  bool cancelled = false;
+  bool _open = false;
+
+  void show() {
+    _open = true;
+    unawaited(
+      showDialog<void>(
+        context: _context,
+        barrierDismissible: false,
+        builder: (c) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            title: Text(title),
+            content: Row(
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: status,
+                    builder: (_, value, __) => Text(value),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  cancelled = true;
+                  _open = false;
+                  Navigator.pop(c);
+                },
+                child: Text(t.common.cancel),
+              ),
+            ],
+          ),
+        ),
+      ).then((_) => _open = false),
+    );
+  }
+
+  void close() {
+    if (_open) {
+      _open = false;
+      if (_context.mounted) Navigator.pop(_context);
+    }
+    status.dispose();
+  }
 }
 
 class Editor extends StatefulWidget {
@@ -277,6 +345,7 @@ class EditorState extends State<Editor>
   MediaQueryData? _cachedMediaQuery;
 
   final _canvasGestureDetectorKey = GlobalKey<CanvasGestureDetectorState>();
+  final _googleInkOverlayKey = GlobalKey();
   final _transformationController = TransformationController();
   final _skipTransformClampForExpansion = ValueNotifier<bool>(false);
   final _suppressTransformClamp = ValueNotifier<bool>(false);
@@ -670,7 +739,7 @@ class EditorState extends State<Editor>
         Pen.currentPen = Pen.advancedPencil();
         break;
       case ToolId.experimentalPen:
-        Pen.currentPen = Pen.advancedPen();
+        Pen.currentPen = Pen.experimental();
         break;
       case ToolId.fountainPen:
       default:
@@ -1891,6 +1960,10 @@ class EditorState extends State<Editor>
     NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
 
     PageRasterCacheManager.addLodSettledListener(_onPageRasterLodSettled);
+
+    // Native Google Ink finished-stroke push (experimental pen). Commits a
+    // normal Stroke so tiled + temporary-raster LOD apply unchanged.
+    GoogleInkNative.setFinishedStrokeHandler(_commitNativeGoogleInkStroke);
 
     if (coreInfo.pages.isNotEmpty) {
     } else {}
@@ -4986,8 +5059,10 @@ class EditorState extends State<Editor>
             );
             break;
           case ToolId.experimentalPen:
-            stows.lastAdvancedPenOptions.value = pen.options;
-            stows.lastAdvancedPenColor.value = pen.color.toARGB32();
+            // Size/color mirror the Google Ink brush; the brush itself is
+            // persisted live by the experimental panel (lastExperimentalInkBrush).
+            stows.lastExperimentalPenColor.value = pen.color.toARGB32();
+            stows.lastExperimentalInkBrush.value = pen.inkBrush.copy();
             break;
           default:
             break;
@@ -5289,6 +5364,139 @@ class EditorState extends State<Editor>
     );
   }
 
+  /// Commits a finished Google Ink (experimental pen) stroke pushed by Android.
+  ///
+  /// Samples arrive in overlay-local (screen) coordinates. They are mapped to
+  /// global via the overlay RenderBox, then to page-local via
+  /// [_safelyGetLocalPosition], and committed as a normal
+  /// `Stroke(toolId: experimentalPen)`. From here the stroke flows through the
+  /// identical tiled Picture + temporary-raster LOD pipeline as every other
+  /// pen (blit-during-motion, HQ bake on settle); the native PlatformView only
+  /// ever owns the live stroke.
+  Future<void> _commitNativeGoogleInkStroke(
+    GoogleInkFinishedStroke finished,
+  ) async {
+    if (!mounted || coreInfo.pages.isEmpty) return;
+    if (finished.samples.length < 1) return;
+
+    final overlayBox = _googleInkOverlayKey.currentContext
+        ?.findRenderObject() as RenderBox?;
+    if (overlayBox == null || !overlayBox.attached) return;
+
+    Offset toGlobal(Offset local) {
+      try {
+        return overlayBox.localToGlobal(local);
+      } catch (_) {
+        return local;
+      }
+    }
+
+    final firstGlobal = toGlobal(
+      Offset(finished.samples.first.x, finished.samples.first.y),
+    );
+    var pageIndex = onWhichPageIsFocalPoint(firstGlobal);
+    pageIndex ??= dragPageIndex;
+    if (pageIndex == null ||
+        pageIndex < 0 ||
+        pageIndex >= coreInfo.pages.length) {
+      return;
+    }
+    final page = coreInfo.pages[pageIndex];
+
+    // Sync the live pen brush to the snapshot the native engine actually used,
+    // so committed ink + future strokes agree (and the modal shows the truth).
+    GoogleInkBrushConfig brush = finished.brush;
+    if (currentTool is Pen &&
+        (currentTool as Pen).toolId == ToolId.experimentalPen) {
+      final pen = currentTool as Pen;
+      pen.inkBrush
+        ..family = brush.family
+        ..size = brush.size
+        ..colorArgb = brush.colorArgb
+        ..epsilon = brush.epsilon;
+      pen.options.size = brush.size.clamp(pen.sizeMin, pen.sizeMax);
+      pen.color = Color(brush.colorArgb);
+    } else {
+      brush = GoogleInkBrushConfig(
+        family: brush.family,
+        size: brush.size,
+        colorArgb: brush.colorArgb,
+        epsilon: brush.epsilon,
+      );
+    }
+
+    final stroke = Stroke(
+      color: Color(brush.colorArgb),
+      pressureEnabled: true,
+      options: Pen.experimentalPenOptions.copyWith(
+        size: brush.size,
+        isComplete: false,
+      ),
+      pageIndex: pageIndex,
+      page: page,
+      toolId: ToolId.experimentalPen,
+    )
+      ..googleInkFamily = brush.family.id
+      ..googleInkEpsilon = brush.epsilon
+      ..googleInkSmoothingMs =
+          (currentTool is Pen &&
+                  (currentTool as Pen).toolId == ToolId.experimentalPen)
+              ? (currentTool as Pen).inkBrush.smoothingWindowMs
+              : 16.0;
+    stroke.resetStabilization();
+    for (final s in finished.samples) {
+      final global = toGlobal(Offset(s.x, s.y));
+      final local = _safelyGetLocalPosition(pageIndex, global);
+      final clamped = Offset(
+        local.dx.clamp(0.0, page.size.width),
+        local.dy.clamp(0.0, page.size.height),
+      );
+      stroke.addPoint(
+        clamped,
+        s.pressure.clamp(0.0, 1.0),
+        Duration(milliseconds: s.timeMs.round()),
+      );
+    }
+    if (stroke.length == 1) {
+      final p = stroke.points.first;
+      stroke.addPoint(
+        Offset(p.x + 0.1, p.y + 0.1),
+        p.pressure,
+        null,
+      );
+    }
+    if (stroke.isEmpty) return;
+    stroke.options.isComplete = true;
+    stroke.clearLivePrediction();
+    stroke.finishLiveGeometry();
+
+    setState(() {
+      createPage(stroke.pageIndex);
+      page.insertStroke(stroke);
+      page.strokeSpatialIndex?.insert(stroke);
+      history.recordChange(
+        EditorHistoryItem(
+          type: .draw,
+          pageIndex: pageIndex!,
+          strokes: [stroke],
+          images: [],
+        ),
+      );
+      stows.lastExperimentalPenColor.value = brush.colorArgb;
+      if (currentTool is Pen &&
+          (currentTool as Pen).toolId == ToolId.experimentalPen) {
+        stows.lastExperimentalInkBrush.value =
+            (currentTool as Pen).inkBrush.copy();
+      }
+    });
+    _pageRasterCache.invalidateInk(pageIndex);
+    _maintainPageRasterBand(pageIndex, pageIndex, forceSchedule: true);
+    autosaveAfterDelay();
+    // Native keeps rendering the finished mesh until Dart commits; now drop it
+    // so committed tiles own the pixels (no double-draw, no ghost).
+    GoogleInkNative.clearLive();
+  }
+
   Future<bool> _trySolveMath(Stroke lastStroke, EditorPage page) async {
     if (coreInfo.readOnly) return false;
 
@@ -5315,29 +5523,14 @@ class EditorState extends State<Editor>
 
     if (candidateStrokes.isEmpty) return false;
 
-    final resultStrokes = await _mathSolver.processStrokes(
+    final outcome = await _mathSolver.processStrokes(
       candidateStrokes,
       page,
       dragPageIndex!,
     );
 
-    if (resultStrokes != null && resultStrokes.isNotEmpty) {
-      page.strokes.addAll(resultStrokes);
-
-      if (page.strokeSpatialIndex != null) {
-        for (final s in resultStrokes) {
-          page.strokeSpatialIndex!.insert(s);
-        }
-      }
-
-      history.recordChange(
-        EditorHistoryItem(
-          type: .draw,
-          pageIndex: dragPageIndex!,
-          strokes: resultStrokes,
-          images: [],
-        ),
-      );
+    if (outcome != null && outcome.hasChanges) {
+      _applyMathSolveOutcome(outcome, page, dragPageIndex!);
 
       if (coreInfo.isInfinite) {
         _fitInfiniteCanvasToContent(page);
@@ -5347,6 +5540,47 @@ class EditorState extends State<Editor>
     }
 
     return false;
+  }
+
+  /// Applies a math solve: drops consumed previous-answer strokes, then adds
+  /// the new answer. Erase is recorded before draw so undo/redo round-trips.
+  void _applyMathSolveOutcome(
+    MathSolveOutcome outcome,
+    EditorPage page,
+    int pageIndex,
+  ) {
+    for (final s in outcome.removedStrokes) {
+      page.removeStrokeFromAnyLayer(s);
+      page.strokeSpatialIndex?.remove(s);
+    }
+    page.strokes.addAll(outcome.addedStrokes);
+
+    if (page.strokeSpatialIndex != null) {
+      for (final s in outcome.addedStrokes) {
+        page.strokeSpatialIndex!.insert(s);
+      }
+    }
+
+    if (outcome.removedStrokes.isNotEmpty) {
+      history.recordChange(
+        EditorHistoryItem(
+          type: .erase,
+          pageIndex: pageIndex,
+          strokes: outcome.removedStrokes,
+          images: [],
+        ),
+      );
+    }
+    if (outcome.addedStrokes.isNotEmpty) {
+      history.recordChange(
+        EditorHistoryItem(
+          type: .draw,
+          pageIndex: pageIndex,
+          strokes: outcome.addedStrokes,
+          images: [],
+        ),
+      );
+    }
   }
 
   bool moveStrokeToPage(Stroke stroke, int pageIndexOrig, int pageIndexDest) {
@@ -6420,8 +6654,11 @@ class EditorState extends State<Editor>
           stows.lastCalligraphyPenOptions.value = pen.options;
           break;
         case ToolId.advancedPen:
-        case ToolId.experimentalPen:
           stows.lastAdvancedPenOptions.value = pen.options;
+          break;
+        case ToolId.experimentalPen:
+          stows.lastExperimentalPenColor.value = pen.color.toARGB32();
+          stows.lastExperimentalInkBrush.value = pen.inkBrush.copy();
           break;
         case ToolId.advancedPencil:
           stows.lastAdvancedPencilOptions.value = pen.options;
@@ -8528,7 +8765,7 @@ class EditorState extends State<Editor>
     );
 
     try {
-      final resultStrokes = await _mathSolver.processStrokes(
+      final outcome = await _mathSolver.processStrokes(
         select.selectResult.strokes,
         page,
         select.selectResult.pageIndex,
@@ -8536,20 +8773,16 @@ class EditorState extends State<Editor>
 
       if (mounted) Navigator.pop(context);
 
-      if (resultStrokes != null && resultStrokes.isNotEmpty) {
+      if (outcome != null && outcome.hasChanges) {
         setState(() {
-          page.strokes.addAll(resultStrokes);
+          _applyMathSolveOutcome(
+            outcome,
+            page,
+            select.selectResult.pageIndex,
+          );
         });
-        history.recordChange(
-          EditorHistoryItem(
-            type: .draw,
-            pageIndex: select.selectResult.pageIndex,
-            strokes: resultStrokes,
-            images: [],
-          ),
-        );
         autosaveAfterDelay();
-      } else {
+      } else if (outcome == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -8603,101 +8836,540 @@ class EditorState extends State<Editor>
         return;
       }
       if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) {
-          final textCtrl = TextEditingController(text: result);
-          return Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-              child: Container(
-                width: 520,
-                constraints: const BoxConstraints(maxHeight: 620),
-                padding: const EdgeInsets.all(32),
-                decoration: BoxDecoration(
-                  color: Theme.of(
-                    dialogContext,
-                  ).colorScheme.surface.withOpacity(0.65),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(
-                    color: Colors.grey.withOpacity(0.3),
-                    width: 1.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 40,
-                      offset: const Offset(0, 10),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      dialogTitle ?? t.editor.recognizedLatexTitle,
-                      style: Theme.of(dialogContext).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w600),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 24),
-                    TextField(
-                      controller: textCtrl,
-                      maxLines: null,
-                      autofocus: true,
-                      decoration: InputDecoration(
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        filled: true,
-                        fillColor: Colors.grey.withOpacity(0.1),
-                      ),
-                    ),
-                    const SizedBox(height: 32),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: () {
-                            if (mounted) Navigator.pop(dialogContext);
-                          },
-                          child: Text(t.common.cancel),
-                        ),
-                        const SizedBox(width: 12),
-                        ElevatedButton(
-                          onPressed: () {
-                            Clipboard.setData(
-                              ClipboardData(text: textCtrl.text),
-                            );
-                            if (mounted) {
-                              Navigator.pop(dialogContext);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(t.editor.copyToClipboard),
-                                ),
-                              );
-                            }
-                          },
-                          child: Text(t.editor.copy),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      );
+      await _showLatexResultDialog(result: result, title: dialogTitle);
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(t.editor.recognitionError(error: e))),
         );
+      }
+    }
+  }
+
+  /// Copyable result dialog shared by the ML Kit and on-device VLM export
+  /// flows. The caller owns any progress UI (already dismissed on entry).
+  /// [inputPreviewPng] (VLM flow) offers a "what the AI saw" check, which is
+  /// the fastest way to tell a bad render from a bad generation.
+  Future<void> _showLatexResultDialog({
+    required String result,
+    String? title,
+    Uint8List? inputPreviewPng,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final textCtrl = TextEditingController(text: result);
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+            child: Container(
+              width: 520,
+              constraints: const BoxConstraints(maxHeight: 620),
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  dialogContext,
+                ).colorScheme.surface.withOpacity(0.65),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: Colors.grey.withOpacity(0.3),
+                  width: 1.5,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 40,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    title ?? t.editor.recognizedLatexTitle,
+                    style: Theme.of(dialogContext).textTheme.headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: textCtrl,
+                    maxLines: null,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.withOpacity(0.1),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        if (inputPreviewPng != null)
+                          TextButton(
+                            onPressed: () {
+                              showDialog<void>(
+                                context: dialogContext,
+                                builder: (imageContext) => Dialog(
+                                  child: SingleChildScrollView(
+                                    child: Image.memory(inputPreviewPng),
+                                  ),
+                                ),
+                              );
+                            },
+                            child: Text(
+                              t.editor.vlmModels.viewInputImage,
+                            ),
+                          ),
+                        TextButton(
+                          onPressed: () {
+                            if (mounted) Navigator.pop(dialogContext);
+                          },
+                          child: Text(t.common.cancel),
+                        ),
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: () {
+                          Clipboard.setData(
+                            ClipboardData(text: textCtrl.text),
+                          );
+                          if (mounted) {
+                            Navigator.pop(dialogContext);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(t.editor.copyToClipboard),
+                              ),
+                            );
+                          }
+                        },
+                        child: Text(t.editor.copy),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  VlmModelEntry _vlmPreferredModel = PageLatexVlmService.preferredEntry();
+
+  /// Renders one LaTeX-export target (hydrate, skip blanks, rasterize) and
+  /// computes its cheap ML Kit draft. Returns null for blank pages (caller
+  /// skips). Throws hydrate/render errors for damaged pages — callers report
+  /// (single target) or skip (multi page).
+  Future<({Uint8List png, String? draft, int pageIndex})?>
+  _prepareLatexTarget({
+    required ({int pageIndex, Rect? crop, List<Stroke>? hintStrokes}) target,
+    required ThemeData theme,
+    required bool invert,
+    required Color backgroundColor,
+    required ValueNotifier<String> status,
+    required int index,
+    required int total,
+    required String lang,
+  }) async {
+    coreInfo.ensurePageHydrated(target.pageIndex);
+    final page = coreInfo.pages[target.pageIndex];
+    // Blank pages carry no signal; transcribing them only burns time
+    // and risks hallucinations.
+    if (target.crop == null &&
+        page.allStrokesInDrawOrder.isEmpty &&
+        page.allImagesInDrawOrder.isEmpty &&
+        page.quill.controller.document.isEmpty()) {
+      return null;
+    }
+    status.value = total > 1
+        ? t.editor.vlmModels.renderingPage(current: index + 1, total: total)
+        : t.editor.vlmModels.rendering;
+    final png = await PageImageRenderer.renderPagePng(
+      page: page,
+      pageIndex: target.pageIndex,
+      totalPages: coreInfo.pages.length,
+      invert: invert,
+      backgroundColor: backgroundColor,
+      backgroundPattern: coreInfo.backgroundPattern,
+      lineHeight: coreInfo.lineHeight,
+      lineThickness: coreInfo.lineThickness.toDouble(),
+      primaryColor: theme.colorScheme.primary,
+      secondaryColor: theme.colorScheme.secondary,
+      crop: target.crop,
+    );
+    // Cheap ML Kit draft grounds small/remote models (fewer hallucinations,
+    // shorter outputs); the image stays the source of truth.
+    String? draft;
+    try {
+      final hintStrokes =
+          target.hintStrokes ??
+          page.allStrokesInDrawOrder.toList(growable: false);
+      if (hintStrokes.isNotEmpty) {
+        draft = await _recognitionService.plainTextForStrokes(
+          hintStrokes,
+          languageCode: lang,
+        );
+      }
+    } catch (_) {
+      draft = null;
+    }
+    return (png: png, draft: draft, pageIndex: target.pageIndex);
+  }
+
+  /// On-device VLM transcription for page targets (full pages or a selection
+  /// crop). [hintStrokes] vendors optional ink for the cheap ML Kit draft
+  /// that guides the model; note pages derive it from the hydrated page.
+  /// Returns true when the flow finished (result shown, cancelled, or failed
+  /// with its own message); false when the caller should use the legacy ML
+  /// Kit path instead (unsupported device, render failure).
+  Future<bool> _runVlmLatexExport({
+    required List<
+      ({int pageIndex, Rect? crop, List<Stroke>? hintStrokes})
+    >
+    targets,
+    required String title,
+  }) async {
+    if (!mounted || targets.isEmpty) return true;
+    final svc = PageLatexVlmService();
+
+    final readiness = await svc.readiness(_vlmPreferredModel);
+    if (!mounted) return true;
+    if (readiness == VlmReadiness.unsupported) return false;
+
+    var entry = _vlmPreferredModel;
+    if (readiness == VlmReadiness.needsDownload) {
+      final picked = await _promptVlmModelDownload();
+      if (!mounted) return true;
+      if (picked == null) return true;
+      if (picked == 'classic') return false;
+      entry = picked == qwen2Vl2b.id ? qwen2Vl2b : smolVlm2;
+      _vlmPreferredModel = entry;
+      stows.vlmPreferredModelId.value = entry.id;
+      final downloaded = await _downloadVlmModel(svc, entry);
+      if (!mounted || !downloaded) return true;
+    }
+
+    // Snapshot style once; rendering/generation outlive frames.
+    final theme = Theme.of(context);
+    final overrides = stows.noteInvertInDarkModeOverrides.value;
+    final invert = theme.brightness == Brightness.dark
+        ? (overrides[coreInfo.filePath] == 1)
+        : false;
+    final backgroundColor = InnerCanvas.getBackgroundColor(
+      context,
+      coreInfo.backgroundColor,
+    );
+
+    final progress = _BlockingProgress(context, title: title);
+    progress.status.value = t.editor.vlmModels.preparing;
+    progress.show();
+
+    try {
+      final parts = <String>[];
+      final lang = _digitalInkLanguageCodeForAppLocale();
+      Uint8List? firstPng;
+      for (var n = 0; n < targets.length; n++) {
+        if (progress.cancelled) return true;
+        final target = targets[n];
+        // Hydration/render can throw on damaged page payloads; never let
+        // one bad page crash the export (single-target flow reports).
+        ({Uint8List png, String? draft, int pageIndex})? prepared;
+        try {
+          prepared = await _prepareLatexTarget(
+            target: target,
+            theme: theme,
+            invert: invert,
+            backgroundColor: backgroundColor,
+            status: progress.status,
+            index: n,
+            total: targets.length,
+            lang: lang,
+          );
+        } catch (e) {
+          log.warning('Skipping unreadable page ${target.pageIndex}: $e');
+          if (targets.length == 1 && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+            );
+            return true;
+          }
+          continue;
+        }
+        if (prepared == null) continue;
+        if (progress.cancelled || !mounted) return true;
+        firstPng ??= prepared.png;
+        progress.status.value = targets.length > 1
+            ? t.editor.vlmModels.transcribingPage(
+                current: n + 1,
+                total: targets.length,
+              )
+            : t.editor.vlmModels.transcribing;
+        try {
+          final latex = await svc.transcribePngBytes(
+            prepared.png,
+            model: entry,
+            prompt: buildLatexPrompt(ocrDraft: prepared.draft),
+          );
+          parts.add(
+            targets.length > 1
+                ? '% Page ${prepared.pageIndex + 1}\n$latex'
+                : latex,
+          );
+        } on VlmException catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(e.message)));
+          }
+          return true;
+        }
+      }
+      if (progress.cancelled || !mounted) return true;
+      if (parts.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+        );
+        return true;
+      }
+      await _showLatexResultDialog(
+        result: parts.join('\n\n'),
+        title: title,
+        inputPreviewPng: firstPng,
+      );
+      return true;
+    } catch (e) {
+      // Last-resort firewall: export must never crash the editor (e.g. a
+      // damaged page payload or a renderer edge case). The failure is
+      // reported; the note itself is untouched (this flow only reads).
+      log.warning('VLM LaTeX export failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+        );
+      }
+      return true;
+    } finally {
+      progress.close();
+    }
+  }
+
+  /// Online-provider transcription for page targets. Unlike the on-device
+  /// flow there is nothing to download; a misconfigured provider reports
+  /// guidance instead. Returns true when finished; the online backend owns
+  /// the flow, so callers do not fall through to other backends.
+  Future<bool> _runOnlineLatexExport({
+    required List<
+      ({int pageIndex, Rect? crop, List<Stroke>? hintStrokes})
+    >
+    targets,
+    required String title,
+  }) async {
+    if (!mounted || targets.isEmpty) return true;
+    final svc = OnlineTranscriptionService();
+
+    final theme = Theme.of(context);
+    final overrides = stows.noteInvertInDarkModeOverrides.value;
+    final invert = theme.brightness == Brightness.dark
+        ? (overrides[coreInfo.filePath] == 1)
+        : false;
+    final backgroundColor = InnerCanvas.getBackgroundColor(
+      context,
+      coreInfo.backgroundColor,
+    );
+
+    final progress = _BlockingProgress(context, title: title);
+    progress.status.value = t.editor.vlmModels.preparing;
+    progress.show();
+
+    try {
+      final parts = <String>[];
+      final lang = _digitalInkLanguageCodeForAppLocale();
+      Uint8List? firstPng;
+      for (var n = 0; n < targets.length; n++) {
+        if (progress.cancelled) return true;
+        final target = targets[n];
+        ({Uint8List png, String? draft, int pageIndex})? prepared;
+        try {
+          prepared = await _prepareLatexTarget(
+            target: target,
+            theme: theme,
+            invert: invert,
+            backgroundColor: backgroundColor,
+            status: progress.status,
+            index: n,
+            total: targets.length,
+            lang: lang,
+          );
+        } catch (e) {
+          log.warning('Skipping unreadable page ${target.pageIndex}: $e');
+          if (targets.length == 1 && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+            );
+            return true;
+          }
+          continue;
+        }
+        if (prepared == null) continue;
+        if (progress.cancelled || !mounted) return true;
+        firstPng ??= prepared.png;
+        progress.status.value = targets.length > 1
+            ? t.editor.vlmModels.transcribingPage(
+                current: n + 1,
+                total: targets.length,
+              )
+            : t.editor.vlmModels.transcribing;
+        try {
+          final latex = await svc.transcribePngBytes(
+            prepared.png,
+            prompt: buildLatexPrompt(ocrDraft: prepared.draft),
+          );
+          parts.add(
+            targets.length > 1
+                ? '% Page ${prepared.pageIndex + 1}\n$latex'
+                : latex,
+          );
+        } on OnlineTranscriptionException catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(e.message)));
+          }
+          return true;
+        }
+      }
+      if (progress.cancelled || !mounted) return true;
+      if (parts.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+        );
+        return true;
+      }
+      await _showLatexResultDialog(
+        result: parts.join('\n\n'),
+        title: title,
+        inputPreviewPng: firstPng,
+      );
+      return true;
+    } catch (e) {
+      log.warning('Online LaTeX export failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.editor.couldNotRecognizeText)),
+        );
+      }
+      return true;
+    } finally {
+      progress.close();
+      svc.dispose();
+    }
+  }
+
+  /// Offers the one-time vision-model download. Returns the picked model id,
+  /// `'classic'` for the legacy ML Kit path, or null when dismissed.
+  Future<String?> _promptVlmModelDownload() async {
+    if (!mounted) return null;
+    return showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: Text(t.editor.vlmModels.promptTitle),
+        content: Text(t.editor.vlmModels.promptMessage),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, 'classic'),
+            child: Text(t.editor.vlmModels.useClassic),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(c, qwen2Vl2b.id),
+            child: Text(qwen2Vl2b.displayName),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, smolVlm2.id),
+            child: Text(smolVlm2.displayName),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Downloads [entry] with determinate progress and user cancel. Returns
+  /// true on success; false on cancel. Errors show their own snackbar.
+  Future<bool> _downloadVlmModel(
+    PageLatexVlmService svc,
+    VlmModelEntry entry,
+  ) async {
+    if (!mounted) return false;
+    final progress = ValueNotifier<int>(0);
+    var progressOpen = false;
+    VlmDownloadHandle? handle;
+    try {
+      progressOpen = true;
+      unawaited(
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (c) => PopScope(
+            canPop: false,
+            child: AlertDialog(
+              title: Text(
+                t.editor.vlmModels.downloadingTitle(name: entry.displayName),
+              ),
+              content: Row(
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: progress,
+                      builder: (_, value, __) => Text('$value%'),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    handle?.cancel();
+                    progressOpen = false;
+                    Navigator.pop(c);
+                  },
+                  child: Text(t.common.cancel),
+                ),
+              ],
+            ),
+          ),
+        ).then((_) => progressOpen = false),
+      );
+      handle = svc.downloadModel(
+        entry,
+        onProgress: (p) => progress.value = p.clamp(0, 100),
+      );
+      await handle.done;
+      return true;
+    } catch (e) {
+      if (!isVlmDownloadCancelled(e) && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(t.editor.vlmModels.downloadFailed(error: e)),
+          ),
+        );
+      }
+      return false;
+    } finally {
+      progress.dispose();
+      if (progressOpen && mounted) {
+        progressOpen = false;
+        Navigator.pop(context);
       }
     }
   }
@@ -8721,6 +9393,32 @@ class EditorState extends State<Editor>
     if (!select.doneSelecting || select.selectResult.strokes.isEmpty) return;
     if (coreInfo.readOnly) return;
     final strokes = List<Stroke>.from(select.selectResult.strokes);
+    final pageIndex = select.selectResult.pageIndex;
+    if (stows.latexBackend.value == 'online') {
+      await _runOnlineLatexExport(
+        targets: [
+          (
+            pageIndex: pageIndex,
+            crop: select.selectResult.getBounds().inflate(24),
+            hintStrokes: strokes,
+          ),
+        ],
+        title: t.editor.recognizedLatexTitle,
+      );
+      return;
+    }
+    if (await _runVlmLatexExport(
+      targets: [
+        (
+          pageIndex: pageIndex,
+          crop: select.selectResult.getBounds().inflate(24),
+          hintStrokes: strokes,
+        ),
+      ],
+      title: t.editor.recognizedLatexTitle,
+    )) {
+      return;
+    }
     await _presentHandwritingLatexExport(
       compute: () => _recognitionService.strokesToCombinedLatexText(
         strokes: strokes,
@@ -8731,15 +9429,38 @@ class EditorState extends State<Editor>
 
   Future<void> _exportNoteHandwritingToLatex() async {
     if (coreInfo.readOnly) return;
+    if (stows.latexBackend.value == 'online') {
+      await _runOnlineLatexExport(
+        targets: [
+          for (var i = 0; i < coreInfo.pages.length; i++)
+            (pageIndex: i, crop: null, hintStrokes: null),
+        ],
+        title: t.editor.recognizedLatexTitle,
+      );
+      return;
+    }
+    if (await _runVlmLatexExport(
+      targets: [
+        for (var i = 0; i < coreInfo.pages.length; i++)
+          (pageIndex: i, crop: null, hintStrokes: null),
+      ],
+      title: t.editor.recognizedLatexTitle,
+    )) {
+      return;
+    }
     await _presentHandwritingLatexExport(
       compute: () async {
         final lang = _digitalInkLanguageCodeForAppLocale();
         final parts = <String>[];
         for (var i = 0; i < coreInfo.pages.length; i++) {
+          // Export the complete page: hydrate lazy pages first and read all
+          // layers in draw order (page.strokes alone is only the active layer).
+          coreInfo.ensurePageHydrated(i);
           final page = coreInfo.pages[i];
-          if (page.strokes.isEmpty) continue;
+          final strokes = page.allStrokesInDrawOrder.toList(growable: false);
+          if (strokes.isEmpty) continue;
           final chunk = await _recognitionService.strokesToCombinedLatexText(
-            strokes: page.strokes,
+            strokes: strokes,
             textLanguageCode: lang,
           );
           if (chunk != null && chunk.trim().isNotEmpty) {
@@ -9426,6 +10147,22 @@ class EditorState extends State<Editor>
             );
           },
         ),
+        // Experimental Google Ink live layer (Android PlatformView). Mounted
+        // only for the experimental pen so other tools never pay hit-test or
+        // composition cost. Native owns the live stroke; committed ink flows
+        // through the standard tiled + temporary-raster LOD below.
+        if (currentTool is Pen &&
+            (currentTool as Pen).toolId == ToolId.experimentalPen &&
+            !_regionScreenshotMode)
+          Positioned.fill(
+            child: SizedBox.expand(
+              key: _googleInkOverlayKey,
+              child: GoogleInkLiveOverlay(
+                brush: (currentTool as Pen).inkBrush,
+                enabled: true,
+              ),
+            ),
+          ),
         if (_regionScreenshotMode)
           Positioned.fill(
             child: RegionScreenshotOverlay(
@@ -11631,6 +12368,7 @@ class EditorState extends State<Editor>
 
   @override
   void dispose() {
+    GoogleInkNative.setFinishedStrokeHandler(null);
     WidgetsBinding.instance.removeObserver(this);
 
     if (identical(

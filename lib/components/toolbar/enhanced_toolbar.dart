@@ -12,6 +12,7 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:saber/components/toolbar/advanced_pen_panel.dart';
 import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/color_toolbar.dart';
+import 'package:saber/components/toolbar/experimental_pen_panel.dart';
 import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/pen_size_preset_toolbar.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
@@ -786,8 +787,10 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
           _selectedPen = Pen.ballpointPen();
           break;
         case ToolId.advancedPen:
-        case ToolId.experimentalPen:
           _selectedPen = Pen.advancedPen();
+          break;
+        case ToolId.experimentalPen:
+          _selectedPen = Pen.experimental();
           break;
         case ToolId.advancedPencil:
           _selectedPen = Pen.advancedPencil();
@@ -981,6 +984,18 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
             },
           ),
         ],
+        if (activePen.toolId == ToolId.experimentalPen) ...[
+          const Divider(height: 32),
+          ExperimentalPenPresets(
+            pen: activePen,
+            onChanged: () => setState(() {}),
+          ),
+          const Divider(height: 32),
+          ExperimentalPenSettings(
+            pen: activePen,
+            onChanged: () => setState(() {}),
+          ),
+        ],
       ],
     );
   }
@@ -996,6 +1011,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     Pen.fountainPen(),
     Pen.advancedPencil(),
     Pen.advancedPen(),
+    Pen.experimental(),
   ];
 
   IconData _penStyleSymbol(ToolId id) {
@@ -1005,6 +1021,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       ToolId.fountainPen => Symbols.stylus_fountain_pen,
       ToolId.advancedPencil => Symbols.stylus_pencil,
       ToolId.advancedPen => Symbols.draw,
+      ToolId.experimentalPen => Symbols.science,
       _ => Symbols.ink_pen,
     };
   }
@@ -1093,6 +1110,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       case ToolId.fountainPen:
       case ToolId.advancedPen:
       case ToolId.advancedPencil:
+      case ToolId.experimentalPen:
       case ToolId.shapePen:
         return true;
       default:

@@ -20,6 +20,22 @@ class MainActivity: FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // See MlKitInkCompat: the ML Kit digital ink handler can throw while
+        // the engine auto-registers plugins (leaving its channel dead), so a
+        // lazily-built delegate is installed here as a safety net.
+        try {
+            MlKitInkCompat.registerLazy(flutterEngine)
+        } catch (e: Throwable) {
+            android.util.Log.w("MainActivity", "MlKitInkCompat install failed", e)
+        }
+        // Experimental Google Ink PlatformView (InProgressStrokesView + Brush).
+        // Isolated try/catch: the test bench must never break engine startup
+        // when androidx.ink artifacts are stripped or the device blocks them.
+        try {
+            GoogleInkPlugin.register(flutterEngine)
+        } catch (e: Throwable) {
+            android.util.Log.w("MainActivity", "GoogleInk install failed", e)
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.resendeghf.notes/vault_crypto",

@@ -31,6 +31,8 @@ import 'package:saber/components/settings/settings_switch.dart';
 import 'package:saber/components/settings/vault_pdf_load_settings.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/components/theming/adaptive_toggle_buttons.dart';
+import 'package:saber/pages/home/online_models_section.dart';
+import 'package:saber/pages/home/vlm_models_section.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'dart:math';
 import 'package:saber/data/backup/incremental_backup_core.dart';
@@ -1140,6 +1142,16 @@ class _SettingsPageState extends State<SettingsPage> {
                     icon: Icons.numbers,
                     pref: stows.printPageIndicators,
                   ),
+                ]),
+
+                buildSection(t.settings.prefCategories.aiModels, [
+                  ListTile(
+                    leading: const Icon(Icons.psychology_outlined),
+                    title: Text(t.editor.recognizedLatexTitle),
+                    subtitle: Text(t.editor.vlmModels.sectionSubtitle),
+                  ),
+                  const VlmModelTiles(),
+                  const OnlineModelTiles(),
                 ]),
 
                 buildSection(t.settings.prefCategories.performance, [

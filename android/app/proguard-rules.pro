@@ -29,3 +29,14 @@
 # Fix for flutter_local_notifications Gson TypeToken bug in Android R8
 -keep class com.google.gson.reflect.TypeToken { *; }
 -keep class * extends com.google.gson.reflect.TypeToken
+
+# ML Kit Digital Ink (google_mlkit_digital_ink_recognition 0.16.x): its
+# handler builds the GMS RemoteModelManager eagerly at plugin registration.
+# Under R8 full mode the GMS client classes it touches must not be stripped,
+# renamed or inlined, otherwise registration throws inside Play Services init
+# and the method channel is left with no handler (every Dart call then fails
+# with MissingPluginException).
+-keep class com.google_mlkit_digital_ink_recognition.** { *; }
+-keep class com.google_mlkit_commons.** { *; }
+-keep class com.google.mlkit.vision.digitalink.** { *; }
+-keep class com.google.mlkit.common.** { *; }

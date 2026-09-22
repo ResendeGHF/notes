@@ -5,10 +5,13 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_digital_ink_recognition/google_mlkit_digital_ink_recognition.dart'
     as ml;
 import 'package:logging/logging.dart';
 import 'package:saber/components/canvas/_stroke.dart';
+import 'package:saber/services/math_text_utils.dart';
 import 'package:saber/services/stroke_ink_clusters.dart';
 
 class RecognitionService {
@@ -30,6 +33,25 @@ class RecognitionService {
 
   static final log = Logger('RecognitionService');
 
+  /// ML Kit digital ink is implemented natively on Android/iOS only. On
+  /// desktop/web the method channel has no handler, so skip silently instead
+  /// of spamming MissingPluginException warnings.
+  static bool get isSupported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// Latched when the method channel has no native handler (e.g. plugin
+  /// registration failed at startup). Skips all further channel calls so one
+  /// broken environment cannot spam the log on every recognition attempt.
+  bool _channelDead = false;
+
+  void _noteChannelDead(Object e) {
+    if (_channelDead) return;
+    _channelDead = true;
+    log.info('Digital ink plugin unavailable, recognition disabled: $e');
+  }
+
   ml.Ink _buildMlInk(List<Stroke> saberStrokes) {
     final ink = ml.Ink();
     for (final stroke in saberStrokes) {
@@ -48,12 +70,30 @@ class RecognitionService {
     return ink;
   }
 
+  /// In-flight background downloads by language code. Single-flight so
+  /// repeated recognition attempts while offline never stack downloads.
+  final Map<String, Future<void>> _pendingEnsures = {};
+
+  /// Ensures [languageCode] is downloaded, sharing one attempt between
+  /// concurrent callers.
+  Future<void> ensureModel(String languageCode) {
+    final existing = _pendingEnsures[languageCode];
+    if (existing != null) return existing;
+    final fut = _ensureModelDownloaded(languageCode);
+    _pendingEnsures[languageCode] = fut;
+    fut.whenComplete(() => _pendingEnsures.remove(languageCode));
+    return fut;
+  }
+
   Future<void> _ensureModelDownloaded(String languageCode) async {
     final isDownloaded = await _modelManager.isModelDownloaded(languageCode);
     if (!isDownloaded) {
       log.info('Downloading OCR model: $languageCode...');
+      // NB: isWifiRequired defaults to true upstream, which makes every
+      // download fail on mobile data ("conditions not met"). These models
+      // are small, so allow any connection here.
       await _modelManager
-          .downloadModel(languageCode)
+          .downloadModel(languageCode, isWifiRequired: false)
           .timeout(downloadTimeout);
     }
   }
@@ -73,13 +113,24 @@ class RecognitionService {
     List<Stroke> saberStrokes,
     String languageCode,
   ) async {
-    if (saberStrokes.isEmpty) return null;
+    if (!isSupported || _channelDead || saberStrokes.isEmpty) return null;
 
     try {
       if (!await _modelManager.isModelDownloaded(languageCode)) {
-        log.warning('Cannot recognize: Model $languageCode not downloaded.');
+        log.info(
+          'Model $languageCode missing, downloading in background for a later attempt.',
+        );
+        unawaited(
+          ensureModel(languageCode).catchError((Object e) {
+            if (e is MissingPluginException) _noteChannelDead(e);
+            log.info('Background model download failed ($languageCode): $e.');
+          }),
+        );
         return null;
       }
+    } on MissingPluginException catch (e) {
+      _noteChannelDead(e);
+      return null;
     } catch (_) {
       return null;
     }
@@ -97,18 +148,43 @@ class RecognitionService {
     } on TimeoutException catch (e) {
       log.warning('Recognition timed out ($languageCode): $e');
       return null;
+    } on MissingPluginException catch (e) {
+      _noteChannelDead(e);
+      return null;
     } catch (e) {
       log.warning('Error during recognition ($languageCode): $e');
       return null;
     }
   }
 
-  /// Per-line transcript using the **text** ink model only.
-  ///
-  /// The ML Kit math symbol model (`zxx-Zsym-x-math`) is for specialized notation
-  /// and often mis-reads simple arithmetic (e.g. "space shuttle"). Export uses the
-  /// same text locale as Stroke to Text so results are usable; users can edit to
-  /// LaTeX manually if needed.
+  /// Plain-text transcript of one writing line. Solver-generated answer
+  /// strokes contribute their known text (never re-recognized); each
+  /// handwriting run goes to ML Kit separately, spliced in x-order.
+  Future<String?> _plainTextForLine(
+    List<Stroke> line,
+    String languageCode,
+  ) async {
+    final tokens = splitLineTokens(line);
+    if (tokens.isEmpty) return null;
+    final parts = <String>[];
+    for (final token in tokens) {
+      if (token.isKnown) {
+        parts.add(token.knownText!);
+        continue;
+      }
+      final c = await recognizeCandidate(token.run!, languageCode);
+      final piece = c?.text.trim();
+      if (piece != null && piece.isNotEmpty) parts.add(piece);
+    }
+    if (parts.isEmpty) return null;
+    return parts.join(' ');
+  }
+
+  /// Layout-aware LaTeX fragment for whole-page export: lines stay in
+  /// top-to-bottom order with coarse indent, equations become `\[...\]`
+  /// blocks, inline math `\(...\)`, and running text is escaped.
+  /// Recognition stays fully on-device (text ink model); no network model
+  /// beyond the regular ML Kit download, no cloud, no LLM runtime.
   Future<String?> strokesToCombinedLatexText({
     required List<Stroke> strokes,
     required String textLanguageCode,
@@ -117,24 +193,30 @@ class RecognitionService {
     final lines = clusterStrokesIntoWritingLines(strokes);
     final out = <String>[];
     for (final line in lines) {
-      final c = await recognizeCandidate(line, textLanguageCode);
-      final piece = c?.text;
-      if (piece != null) {
-        final t = piece.trim();
-        if (t.isNotEmpty) out.add(t);
-      }
+      if (line.isEmpty) continue;
+      final text = await _plainTextForLine(line, textLanguageCode);
+      if (text == null || text.trim().isEmpty) continue;
+      final latex = latexLineForRecognizedText(
+        text,
+        indent: indentLevelForMinX(minXOfStrokes(line)),
+      );
+      if (latex.isNotEmpty) out.add(latex);
     }
     if (out.isEmpty) return null;
-    return out.join('\n');
+    return out.join('\n\n');
   }
 
   Future<void> init({String languageCode = 'en-US'}) async {
+    if (!isSupported) return;
     try {
-      await _ensureModelDownloaded(languageCode);
+      await ensureModel(languageCode);
+      await _recognizerFor(languageCode);
     } catch (e) {
-      log.warning('Failed to prepare OCR model ($languageCode): $e');
+      log.warning(
+        'Failed to prepare OCR model ($languageCode, ${e.runtimeType}): $e. '
+        'Check the network connection and Google Play Services.',
+      );
     }
-    await _recognizerFor(languageCode);
   }
 
   Future<String?> recognizeStrokes(List<Stroke> saberStrokes) async {
@@ -152,14 +234,38 @@ class RecognitionService {
     List<Stroke> saberStrokes, {
     String languageCode = 'en-US',
   }) async {
-    final c = await recognizeCandidate(saberStrokes, languageCode);
-    return c?.text;
+    return plainTextForStrokes(saberStrokes, languageCode: languageCode);
+  }
+
+  /// Plain-text transcript of arbitrary ink (selection or page), lines
+  /// joined with newlines. Also used as the cheap OCR draft that guides the
+  /// vision model in page-to-LaTeX transcription.
+  Future<String?> plainTextForStrokes(
+    List<Stroke> saberStrokes, {
+    String languageCode = 'en-US',
+  }) async {
+    if (saberStrokes.isEmpty) return null;
+    final lines = clusterStrokesIntoWritingLines(saberStrokes);
+    final out = <String>[];
+    for (final line in lines) {
+      if (line.isEmpty) continue;
+      final text = await _plainTextForLine(line, languageCode);
+      if (text != null && text.trim().isNotEmpty) out.add(text.trim());
+    }
+    if (out.isEmpty) return null;
+    return out.join('\n');
   }
 
   Future<void> dispose() async {
+    if (!isSupported || _channelDead) {
+      _recognizers.clear();
+      return;
+    }
     for (final r in _recognizers.values) {
       try {
         await r.close();
+      } on MissingPluginException catch (e) {
+        _noteChannelDead(e);
       } catch (e) {
         log.warning('Failed to close OCR recognizer: $e');
       }

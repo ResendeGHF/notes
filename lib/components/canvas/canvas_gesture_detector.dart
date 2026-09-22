@@ -463,6 +463,15 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   bool _isClamping = false;
 
+  /// Live viewport page range (±1 page margin) refreshed on every transform
+  /// change. The page list below rebuilds on a bucket-throttled viewport, so
+  /// without this a page edge crossing inside one bucket would leave the
+  /// entering page unbuilt until the next throttle window (dark gap flash).
+  /// [_PagesBuilder] unions this live range with its own render zone, and
+  /// rebuilds here only fire when the range actually changes.
+  int? _liveRangeStart;
+  int? _liveRangeEnd;
+
   void onTransformChanged() {
     if (_isClamping) return;
 
@@ -470,11 +479,11 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     // the transform listener, before the frame builds. The idle hydrate loop
     // lags a frame behind, so without this a fast pan could render a shell
     // placeholder for one frame. Cheap: binary search over page offsets.
-    if (widget.tryHydratePage != null &&
-        Pen.currentStroke == null &&
+    if (Pen.currentStroke == null &&
         Eraser.isDragging == false &&
         _pageVerticalOffsets.isNotEmpty &&
-        containerBounds.maxHeight > 0) {
+        containerBounds.maxHeight > 0 &&
+        widget.pages.isNotEmpty) {
       final transform = widget._transformationController.value;
       final scale = transform.approxScale;
       if (scale > 0) {
@@ -490,14 +499,30 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
           scrollY: contentBottom,
           pageOffsets: _pageVerticalOffsets,
         );
+        final firstClamped =
+            first.clamp(0, widget.pages.length - 1);
         final lastClamped =
             last.clamp(0, widget.pages.length - 1);
-        for (var i = first.clamp(0, widget.pages.length - 1);
-            i <= lastClamped;
-            i++) {
-          if (widget.pages[i].isLazyShell) {
+        var hydratedSync = false;
+        for (var i = firstClamped; i <= lastClamped; i++) {
+          if (widget.pages[i].isLazyShell &&
+              widget.tryHydratePage != null) {
             widget.tryHydratePage!(i);
+            // A synchronous replacement still shows the placeholder until
+            // the page list rebuilds, so request one below.
+            if (!widget.pages[i].isLazyShell) hydratedSync = true;
           }
+        }
+        // Prebuild one page beyond each viewport edge so the entering page
+        // widget (and its first paint) exists before its pixels scroll in.
+        final liveStart = (firstClamped - 1).clamp(0, widget.pages.length - 1);
+        final liveEnd = (lastClamped + 1).clamp(0, widget.pages.length - 1);
+        if (hydratedSync ||
+            _liveRangeStart != liveStart ||
+            _liveRangeEnd != liveEnd) {
+          _liveRangeStart = liveStart;
+          _liveRangeEnd = liveEnd;
+          if (mounted) setState(() {});
         }
       }
     }
@@ -782,6 +807,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                       onMaintainPageRasterBand:
                           widget.onMaintainPageRasterBand,
                       onPrefetchNearbyPages: widget.onPrefetchNearbyPages,
+                      forcedStartPage: _liveRangeStart,
+                      forcedEndPage: _liveRangeEnd,
                     );
                   },
                 );
@@ -856,6 +883,8 @@ class _PagesBuilder extends StatefulWidget {
     this.tryHydratePage,
     this.onMaintainPageRasterBand,
     this.onPrefetchNearbyPages,
+    this.forcedStartPage,
+    this.forcedEndPage,
   });
 
   final List<EditorPage> pages;
@@ -870,13 +899,24 @@ class _PagesBuilder extends StatefulWidget {
   onMaintainPageRasterBand;
   final int Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
 
+  /// Live viewport page range from the transform listener. Unioned with the
+  /// render zone below so an entering page is built before its pixels scroll
+  /// into view, even though the [boundingBox] viewport itself is
+  /// bucket-throttled.
+  final int? forcedStartPage;
+  final int? forcedEndPage;
+
   @override
   State<_PagesBuilder> createState() => _PagesBuilderState();
 }
 
 class _PagesBuilderState extends State<_PagesBuilder> {
   static const double _renderCacheExtent = 500;
-  static const double _pdfRenderCacheExtent = 120;
+  // Same prebuild margin as stroke notes: the viewport driving the render
+  // zone is bucket-throttled, so a smaller PDF margin routinely left the
+  // entering page unbuilt (dark flash). Building the widget early is cheap;
+  // bitmap budgets are still owned by the raster band logic.
+  static const double _pdfRenderCacheExtent = 500;
   static const int _minHydrateRadius = 2;
   static const int _maxShellsPerIdleFrame = 3;
   // Parse-ahead horizon for the aggressive warmer: scrolls land inside it.
@@ -1184,7 +1224,7 @@ class _PagesBuilderState extends State<_PagesBuilder> {
         : _renderCacheExtent;
     final renderZone = widget.boundingBox.inflate(renderCacheExtent);
 
-    final startIndex = _findFirstVisiblePageIndex(renderZone.top);
+    var startIndex = _findFirstVisiblePageIndex(renderZone.top);
     var endIndex = startIndex;
 
     for (int i = startIndex; i < widget.pages.length; i++) {
@@ -1192,7 +1232,29 @@ class _PagesBuilderState extends State<_PagesBuilder> {
 
       if (offset > renderZone.bottom) break;
       endIndex = i;
+    }
 
+    // Union with the live transform range: the render zone above is derived
+    // from a bucket-throttled viewport, so without this an entering page
+    // would stay unbuilt (dark gap) until the next throttle window, even
+    // though its edge is already on screen.
+    final forcedStart = widget.forcedStartPage;
+    final forcedEnd = widget.forcedEndPage;
+    if (forcedStart != null &&
+        forcedEnd != null &&
+        widget.pages.isNotEmpty) {
+      startIndex = min(
+        startIndex,
+        forcedStart.clamp(0, widget.pages.length - 1),
+      );
+      endIndex = max(
+        endIndex,
+        forcedEnd.clamp(0, widget.pages.length - 1),
+      );
+    }
+
+    for (int i = startIndex; i <= endIndex && i < widget.pages.length; i++) {
+      final offset = _pageOffsets[i];
       final height = _pageHeights[i];
       final width = _pageWidths[i];
 

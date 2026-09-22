@@ -68,10 +68,8 @@ enum ToolId {
         penType == 'HorizontalSpacePen') {
       return .ballpointPen;
     }
-    // Legacy experimental pen maps to Advanced.
-    if (penType == ToolId.experimentalPen.id) {
-      return .advancedPen;
-    }
+    // Experimental pen is a first-class Google Ink test pen (own prefs +
+    // brush config). Legacy notes that stored it keep working as-is.
     for (final toolId in ToolId.values) {
       if (penType == toolId.id) {
         return toolId;
@@ -113,7 +111,7 @@ class _ToolIdPrefCodec extends AbstractCodec<ToolId, Object?> {
       ToolId.ballpointPen, // 5 was verticalSpacePen
       ToolId.ballpointPen, // 6 was horizontalSpacePen
       ToolId.advancedPen, // 7
-      ToolId.advancedPen, // 8 experimental → advanced
+      ToolId.experimentalPen, // 8 experimental (Google Ink test pen)
       ToolId.shapeTool, // 9
       ToolId.eraser, // 10
       ToolId.select, // 11

@@ -7,6 +7,7 @@ common:
   done: Feito
   continueBtn: Continuar
   cancel: Cancelar
+  save: Salvar
 home:
   folderColor:
     changeColor: Alterar cor
@@ -218,6 +219,7 @@ settings:
     general: Geral
     writing: Escrita
     editor: Editor
+    aiModels: Modelos de IA
     performance: Desempenho
     advanced: Avançado
   noteInkDefaults:
@@ -416,26 +418,6 @@ editor:
     changeStrokeType: Alterar tipo de traço
     changeStrokeTypeTitle: Alterar tipo de traço
     changeStrokeTypeHint: Converter os traços selecionados para outra caneta.
-  toolbar:
-    toggleColors: Alternar cores
-    select: Selecionar
-    toggleEraser: Alternar borracha
-    photo: Imagens
-    text: Texto
-    toggleFingerDrawing: Alternar desenho com dedo
-    undo: Desfazer
-    redo: Refazer
-    export: Exportar
-    exportAs: "Exportar como:"
-    fullscreen: Tela cheia (F11)
-    regionScreenshot: Captura de região
-    regionScreenshotHint: Arraste para selecionar uma área
-    regionScreenshotTitle: Compartilhar ou copiar a captura?
-    regionScreenshotBody: Compartilhe com outro app, ou copie a imagem para a área de transferência.
-    regionScreenshotShare: Compartilhar
-    regionScreenshotCopy: Copiar para a área de transferência
-    regionScreenshotTooSmall: Seleção muito pequena
-    regionScreenshotFailed: Falha ao capturar a tela
   penOptions:
     size: Tamanho
     opacity: Opacidade
@@ -566,6 +548,51 @@ editor:
   selectionToLatex: Seleção para LaTeX
   noteHandwritingToLatex: Traços da nota para LaTeX
   recognizedLatexTitle: LaTeX reconhecido
+  vlmModels:
+    sectionSubtitle: Modelos de visão no dispositivo para manuscrito para LaTeX
+    notInstalled: 'Não instalado · $size'
+    installed: 'Instalado · $size'
+    downloading: 'Baixando… $progress%'
+    download: Baixar
+    uninstall: Desinstalar
+    uninstallTitle: Desinstalar modelo?
+    uninstallMessage: '$name será apagado deste aparelho. Você pode baixá-lo de novo depois.'
+    delete: Excluir
+    isDefault: Modelo padrão
+    setAsDefault: Definir como padrão
+    unsupported: Transcrição no dispositivo exige Android 11 ou mais recente
+    downloadFailed: 'Falha no download do modelo: $error'
+    promptTitle: Transcrever com IA no dispositivo
+    promptMessage: 'Converta manuscrito para LaTeX com um modelo de visão que roda inteiramente neste aparelho (privado, funciona offline após o download).\n\nDownload único, mantido no aparelho.'
+    useClassic: Usar clássico
+    downloadingTitle: 'Baixando $name'
+    preparing: Preparando…
+    rendering: Renderizando…
+    renderingPage: 'Renderizando página $current de $total…'
+    readingDraft: Lendo rascunho…
+    transcribing: Transcrevendo…
+    transcribingPage: 'Transcrevendo página $current de $total…'
+    viewInputImage: Ver imagem de entrada
+  onlineModels:
+    backendTitle: Mecanismo de transcrição
+    backendOnDevice: Modelo de visão no dispositivo
+    backendOnDeviceSubtitle: Privado, funciona offline após um download único
+    backendOnline: Provedor online
+    backendOnlineSubtitle: Modelos de ponta via HTTPS (usa seu plano de dados)
+    provider: Provedor
+    apiKey: Chave de API
+    apiKeySet: Chave salva neste aparelho
+    apiKeyMissing: Nenhuma chave salva
+    editKeyTitle: Chave de API
+    keyFieldHint: Cole a chave (guardada criptografada no aparelho)
+    model: Modelo
+    modelHint: Vazio usa o padrão do preset
+    baseUrl: URL do endpoint
+    baseUrlHint: Vazio usa o padrão do preset
+    customUrlRequired: Um endpoint personalizado precisa de URL acima
+    keySaved: Chave salva
+    keyCleared: Chave removida
+    retentionTitle: Uso de dados
   calculate: Calcular
   lockImage: Bloquear imagem
   unlockImage: Desbloquear imagem
@@ -607,6 +634,70 @@ editor:
   noNotesMatchSearch: Nenhuma nota corresponde à pesquisa
   pickFile: Escolher arquivo
   editorTitle: Editor
+  toolbar:
+    toggleColors: Alternar cores
+    select: Selecionar
+    toggleEraser: Alternar borracha
+    photo: Imagens
+    text: Texto
+    toggleFingerDrawing: Alternar desenho com dedo
+    undo: Desfazer
+    redo: Refazer
+    export: Exportar
+    exportAs: "Exportar como:"
+    fullscreen: Tela cheia (F11)
+    regionScreenshot: Captura de região
+    regionScreenshotHint: Arraste para selecionar uma área
+    regionScreenshotTitle: Compartilhar ou copiar a captura?
+    regionScreenshotBody: "Compartilhe com outro app, ou copie a imagem para a área de transferência."
+    regionScreenshotShare: Compartilhar
+    regionScreenshotCopy: Copiar para a área de transferência
+    regionScreenshotTooSmall: Seleção muito pequena
+    regionScreenshotFailed: Falha ao capturar a tela
+toolbar:
+  derivative: Derivada
+  integral: Integral
+  mode2d: 2D
+  mode3d: 3D
+  calculusGraphSaved: "Gráfico de cálculo com legenda salvo!"
+  addNewSurface: Adicionar nova superfície
+  addNewField: Adicionar novo campo
+  addNewFunction: Adicionar nova função
+  system2d: "Sistema 2D (x, y)"
+  system3d: "Sistema 3D (x, y, z)"
+  play: Reproduzir
+  stop: Parar
+  clear: Limpar
+  copyValues: Copiar valores
+  saveImage: Salvar imagem
+  saveImageMetadata: Salvar imagem + metadados
+  start: Início
+  startCap: Tampa inicial
+  end: Fim
+  endCap: Tampa final
+  simulatePressure: Simular pressão
+  complete: Concluir
+  savePreset: Salvar predefinição
+  updatePreset: Atualizar predefinição
+  deletePreset: Excluir predefinição
+  fill: Preencher
+  mode: Modo
+  eraseStroke: Apagar traço
+  eraseArea: Apagar área
+  plot: Plotar
+  plot2dCartesian: 2D (Cartesiano)
+  plot2dPolar: 2D (Polar)
+  plot3dSurface: Superfície 3D (Cartesiano)
+  plot3dSpherical: Superfície 3D (Esférico)
+  vectorField2d: Campo vetorial 2D
+  vectorField3d: Campo vetorial 3D (fatia)
+  findRoots: Encontrar raízes
+  findMin: Encontrar mínimo
+  findMax: Encontrar máximo
+  showAsymptotes: Mostrar assíntotas
+  findSaddle: Encontrar ponto de sela
+  f2d: 2D f(x)
+  f3d: "3D f(x,y)"
 export:
   noValidPagesSelected: Nenhuma página válida selecionada
   exportFailed: "Falha na exportação: $error"
@@ -714,47 +805,4 @@ vault:
   restoreDataConfirm: "Isso substituirá suas notas, configurações e metadados atuais pelo conteúdo do backup. Continuar?"
   restoreVaultConfirm: "Isso substituirá seu cofre atual pelo conteúdo do backup. Continuar?"
   fileName: Nome do arquivo
-toolbar:
-  derivative: Derivada
-  integral: Integral
-  mode2d: "2D"
-  mode3d: "3D"
-  calculusGraphSaved: Gráfico de cálculo com legenda salvo!
-  addNewSurface: Adicionar nova superfície
-  addNewField: Adicionar novo campo
-  addNewFunction: Adicionar nova função
-  system2d: "Sistema 2D (x, y)"
-  system3d: "Sistema 3D (x, y, z)"
-  play: Reproduzir
-  stop: Parar
-  clear: Limpar
-  copyValues: Copiar valores
-  saveImage: Salvar imagem
-  saveImageMetadata: Salvar imagem + metadados
-  start: Início
-  startCap: Tampa inicial
-  end: Fim
-  endCap: Tampa final
-  simulatePressure: Simular pressão
-  complete: Concluir
-  savePreset: Salvar predefinição
-  updatePreset: Atualizar predefinição
-  deletePreset: Excluir predefinição
-  fill: Preencher
-  mode: Modo
-  eraseStroke: Apagar traço
-  eraseArea: Apagar área
-  plot: Plotar
-  plot2dCartesian: "2D (Cartesiano)"
-  plot2dPolar: "2D (Polar)"
-  plot3dSurface: "Superfície 3D (Cartesiano)"
-  plot3dSpherical: "Superfície 3D (Esférico)"
-  vectorField2d: Campo vetorial 2D
-  vectorField3d: Campo vetorial 3D (fatia)
-  findRoots: Encontrar raízes
-  findMin: Encontrar mínimo
-  findMax: Encontrar máximo
-  showAsymptotes: Mostrar assíntotas
-  findSaddle: Encontrar ponto de sela
-  f2d: "2D f(x)"
   f3d: "3D f(x,y)"

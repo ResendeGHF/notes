@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:saber/components/toolbar/advanced_pen_panel.dart';
 import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
+import 'package:saber/components/toolbar/experimental_pen_panel.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
 import 'package:saber/data/extensions/axis_extensions.dart';
 import 'package:saber/data/prefs.dart';
@@ -467,6 +468,32 @@ class _PenModalState extends State<PenModal> {
                   : ColorScheme.of(context).onSurface,
             ),
           ),
+          const SizedBox.square(dimension: 8),
+          IconButton(
+            onPressed: () => setState(() {
+              final p = Pen.experimental();
+              Pen.currentPen = p;
+              widget.setTool(p);
+            }),
+            style: TextButton.styleFrom(
+              foregroundColor: Pen.currentPen.icon == Pen.experimentalPenIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+              backgroundColor: Pen.currentPen.icon == Pen.experimentalPenIcon
+                  ? Theme.of(
+                      context,
+                    ).colorScheme.secondary.withValues(alpha: 0.1)
+                  : Colors.transparent,
+              shape: const CircleBorder(),
+            ),
+            tooltip: 'Experimental pen (Google Ink)',
+            icon: Icon(
+              Icons.science_outlined,
+              color: Pen.currentPen.icon == Pen.experimentalPenIcon
+                  ? ColorScheme.of(context).secondary
+                  : ColorScheme.of(context).onSurface,
+            ),
+          ),
         ],
         if (currentPen.toolId == ToolId.advancedPen) ...[
           const SizedBox.square(dimension: 12),
@@ -488,6 +515,18 @@ class _PenModalState extends State<PenModal> {
           ),
           const SizedBox.square(dimension: 12),
           AdvancedPencilSettings(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
+        ],
+        if (currentPen.toolId == ToolId.experimentalPen) ...[
+          const SizedBox.square(dimension: 12),
+          ExperimentalPenPresets(
+            pen: currentPen,
+            onChanged: () => setState(() {}),
+          ),
+          const SizedBox.square(dimension: 12),
+          ExperimentalPenSettings(
             pen: currentPen,
             onChanged: () => setState(() {}),
           ),
