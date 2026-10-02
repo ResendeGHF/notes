@@ -9,11 +9,24 @@ import 'package:saber/data/prefs.dart';
 const double kSaberContainerRadius = 12.0;
 
 abstract class SaberTheme {
+  /// Sentinel accent seed that selects a true Material 3 monochrome scheme
+  /// (only grays, white and black — no hue). Pure black is not part of the
+  /// regular accent palette, so it can never be picked by accident.
+  static const monoAccentSeed = Color(0xFF000000);
+
+  static bool isMonoSeed(Color seed) =>
+      seed.toARGB32() == monoAccentSeed.toARGB32();
+
   static ThemeData createTheme(
     ColorScheme colorScheme,
-    TargetPlatform platform,
-  ) {
-    colorScheme = _adjustColorScheme(colorScheme, platform);
+    TargetPlatform platform, {
+    bool pureBlack = false,
+  }) {
+    if (pureBlack && colorScheme.brightness == Brightness.dark) {
+      colorScheme = _applyPureBlack(colorScheme);
+    } else {
+      colorScheme = _adjustColorScheme(colorScheme, platform);
+    }
 
     return ThemeData(
       useMaterial3: true,
@@ -31,17 +44,50 @@ abstract class SaberTheme {
     Color seedColor,
     Brightness brightness,
     TargetPlatform platform, {
+    bool pureBlack = false,
     @Deprecated(
       'High contrast is not implemented here. '
       'Use ColorScheme.withHighContrast() instead',
     )
     bool highContrast = false,
   }) {
-    final ColorScheme colorScheme = ColorScheme.fromSeed(
-      brightness: brightness,
-      seedColor: seedColor,
+    // Grayscale-only option: Material 3 monochrome variant has zero chroma,
+    // so buttons/surfaces stay gray/white/black instead of picking up the
+    // blue/green tint that `tonalSpot` derives even from neutral gray seeds.
+    final ColorScheme colorScheme = isMonoSeed(seedColor)
+        ? ColorScheme.fromSeed(
+            brightness: brightness,
+            seedColor: seedColor,
+            dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
+          )
+        : ColorScheme.fromSeed(
+            brightness: brightness,
+            seedColor: seedColor,
+          );
+    return createTheme(colorScheme, platform, pureBlack: pureBlack);
+  }
+
+  /// AMOLED / pure black variant for the dark theme.
+  ///
+  /// Keeps the seeded accent ([primary], [secondary], etc.) untouched so any
+  /// accent color — including neutrals/greys — stays legible, but replaces
+  /// every dark surface with true black (or near-black for elevation levels)
+  /// so pixels can turn off on OLED screens.
+  static ColorScheme _applyPureBlack(ColorScheme colorScheme) {
+    return colorScheme.copyWith(
+      surface: Colors.black,
+      surfaceDim: Colors.black,
+      surfaceContainerLowest: Colors.black,
+      surfaceContainerLow: Colors.black,
+      surfaceContainer: Colors.black,
+      surfaceContainerHigh: const Color(0xFF0E0E0E),
+      surfaceContainerHighest: const Color(0xFF141414),
+      surfaceBright: const Color(0xFF3A3A3A),
+      // Keep inverseSurface light so tooltips/snackbars still contrast.
+      inverseSurface: const Color(0xFFE6E6E6),
+      inversePrimary: colorScheme.primary,
+      scrim: Colors.black,
     );
-    return createTheme(colorScheme, platform);
   }
 
   static ColorScheme _adjustColorScheme(

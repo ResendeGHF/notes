@@ -168,7 +168,6 @@ class CanvasPainter extends CustomPainter {
               stroke.toolId == ToolId.highlighter ||
               stroke.toolId == ToolId.advancedPen ||
               stroke.toolId == ToolId.advancedPencil ||
-              stroke.toolId == ToolId.experimentalPen ||
               stroke.toolId == ToolId.calligraphyPen ||
               stroke is ShapeStroke;
           if ((overlaps || (!boundsFinite && forceRecentSensitiveStroke)) &&
@@ -505,7 +504,8 @@ class CanvasPainter extends CustomPainter {
       if (preferPathFill) {
         _sharedPaint.style = PaintingStyle.fill;
         _sharedPaint.isAntiAlias = true;
-        canvas.drawPath(_selectPath(stroke), _sharedPaint);
+        final path = _selectPath(stroke);
+        canvas.drawPath(path, _sharedPaint);
         continue;
       }
 
@@ -525,8 +525,10 @@ class CanvasPainter extends CustomPainter {
         if (picture != null) {
           canvas.drawPicture(picture);
         } else {
+          final path = _selectPath(stroke);
           _sharedPaint.style = PaintingStyle.fill;
-          canvas.drawPath(_selectPath(stroke), _sharedPaint);
+          _sharedPaint.isAntiAlias = true;
+          canvas.drawPath(path, _sharedPaint);
         }
       }
     }
@@ -672,6 +674,11 @@ class CanvasPainter extends CustomPainter {
     _sharedPaint.blendMode = BlendMode.srcOver;
     _sharedPaint.maskFilter = null;
     _sharedPaint.isAntiAlias = true;
+    // A stale shader/colorFilter from an earlier textured/pencil draw would
+    // tint the live stroke (e.g. semi-transparent grain); the branches below
+    // set their own. Cheap insurance for the whole live path.
+    _sharedPaint.shader = null;
+    _sharedPaint.colorFilter = null;
 
     if (currentStroke is ShapeStroke) {
       final shape = currentStroke as ShapeStroke;
@@ -816,11 +823,10 @@ class CanvasPainter extends CustomPainter {
 
     if (currentStroke!.length == 1) {
       final p = currentStroke!.pointsForEraser.first;
-      canvas.drawCircle(
-        Offset(p.x, p.y),
-        (currentStroke!.options.size / 2).clamp(0.5, 999.0),
-        _sharedPaint,
-      );
+      final center = Offset(p.x, p.y);
+      final radius =
+          (currentStroke!.options.size / 2).clamp(0.5, 999.0);
+      canvas.drawCircle(center, radius, _sharedPaint);
     } else {
       canvas.drawPath(currentStroke!.highQualityPath, _sharedPaint);
     }

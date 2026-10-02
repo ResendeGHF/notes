@@ -31,6 +31,7 @@ import 'package:saber/components/settings/settings_switch.dart';
 import 'package:saber/components/settings/vault_pdf_load_settings.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/components/theming/adaptive_toggle_buttons.dart';
+import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/pages/home/online_models_section.dart';
 import 'package:saber/pages/home/vlm_models_section.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
@@ -533,6 +534,13 @@ class _SettingsPageState extends State<SettingsPage> {
                     valueListenable: stows.localEncryptionEnabled,
                     builder: (context, encryptionEnabled, _) {
                       if (!encryptionEnabled) return const SizedBox.shrink();
+                      return const _VaultAutoLockTimeoutTile();
+                    },
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: stows.localEncryptionEnabled,
+                    builder: (context, encryptionEnabled, _) {
+                      if (!encryptionEnabled) return const SizedBox.shrink();
                       return const VaultPdfLoadSettings();
                     },
                   ),
@@ -876,14 +884,26 @@ class _SettingsPageState extends State<SettingsPage> {
                     builder: (context, accentValue, _) {
                       final colors = [
                         Colors.deepPurple,
+                        Colors.indigo,
                         Colors.blue,
+                        Colors.cyan,
                         Colors.teal,
                         Colors.green,
+                        Colors.lightGreen,
                         Colors.yellow.shade700,
+                        Colors.amber,
                         Colors.orange,
+                        Colors.deepOrange,
                         Colors.red,
                         Colors.pink,
+                        Colors.purple,
+                        Colors.brown,
                         Colors.grey,
+                        Colors.blueGrey,
+                        // Neutral grey tuned for AMOLED/pure black: readable
+                        // as dark grey on light theme and light grey on
+                        // dark/pure black theme.
+                        const Color(0xFF9AA0A6),
                       ];
                       return Padding(
                         padding: const EdgeInsets.symmetric(
@@ -910,47 +930,127 @@ class _SettingsPageState extends State<SettingsPage> {
                             SingleChildScrollView(
                               scrollDirection: Axis.horizontal,
                               child: Row(
-                                children: colors.map((c) {
-                                  final isSelected =
-                                      accentValue == c.toARGB32();
-                                  return GestureDetector(
-                                    onTap: () => stows.appAccentColor.value = c
-                                        .toARGB32(),
-                                    child: Container(
-                                      margin: const EdgeInsets.only(right: 12),
-                                      width: 36,
-                                      height: 36,
-                                      decoration: BoxDecoration(
-                                        color: c,
-                                        shape: BoxShape.circle,
-                                        border: isSelected
-                                            ? Border.all(
-                                                color: colorScheme.onSurface,
-                                                width: 2,
+                                children: [
+                                  ...colors.map((c) {
+                                    final isSelected =
+                                        accentValue == c.toARGB32();
+                                    return GestureDetector(
+                                      onTap: () => stows.appAccentColor.value =
+                                          c.toARGB32(),
+                                      child: Container(
+                                        margin: const EdgeInsets.only(
+                                          right: 12,
+                                        ),
+                                        width: 36,
+                                        height: 36,
+                                        decoration: BoxDecoration(
+                                          color: c,
+                                          shape: BoxShape.circle,
+                                          border: isSelected
+                                              ? Border.all(
+                                                  color: colorScheme.onSurface,
+                                                  width: 2,
+                                                )
+                                              : Border.all(
+                                                  color: Colors.transparent,
+                                                  width: 2,
+                                                ),
+                                        ),
+                                        child: isSelected
+                                            ? Icon(
+                                                Icons.check,
+                                                size: 20,
+                                                color:
+                                                    c.computeLuminance() > 0.5
+                                                    ? Colors.black
+                                                    : Colors.white,
                                               )
-                                            : Border.all(
-                                                color: Colors.transparent,
-                                                width: 2,
-                                              ),
+                                            : null,
                                       ),
-                                      child: isSelected
-                                          ? Icon(
-                                              Icons.check,
-                                              size: 20,
-                                              color: c.computeLuminance() > 0.5
-                                                  ? Colors.black
-                                                  : Colors.white,
-                                            )
-                                          : null,
-                                    ),
-                                  );
-                                }).toList(),
+                                    );
+                                  }),
+                                  // Mono accent: true Material 3 monochrome
+                                  // (grays/white/black only, no blue/green
+                                  // tint). Rendered as a split black/white
+                                  // circle since a plain swatch can't convey it.
+                                  Builder(
+                                    builder: (context) {
+                                      final isSelected =
+                                          accentValue ==
+                                          SaberTheme.monoAccentSeed
+                                              .toARGB32();
+                                      return Tooltip(
+                                        message:
+                                            'Mono (grays and white only)',
+                                        child: GestureDetector(
+                                          onTap: () =>
+                                              stows.appAccentColor.value =
+                                                  SaberTheme.monoAccentSeed
+                                                      .toARGB32(),
+                                          child: Container(
+                                            margin: const EdgeInsets.only(
+                                              right: 12,
+                                            ),
+                                            width: 36,
+                                            height: 36,
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              gradient:
+                                                  const LinearGradient(
+                                                    begin: Alignment.topLeft,
+                                                    end: Alignment.bottomRight,
+                                                    colors: [
+                                                      Colors.black,
+                                                      Colors.black,
+                                                      Colors.white,
+                                                      Colors.white,
+                                                    ],
+                                                    stops: [0.0, 0.5, 0.5, 1.0],
+                                                  ),
+                                              border: isSelected
+                                                  ? Border.all(
+                                                      color:
+                                                          colorScheme.onSurface,
+                                                      width: 2,
+                                                    )
+                                                  : Border.all(
+                                                      color: colorScheme
+                                                          .outlineVariant,
+                                                      width: 1,
+                                                    ),
+                                            ),
+                                            child: isSelected
+                                                ? const Icon(
+                                                    Icons.check,
+                                                    size: 20,
+                                                    color: Colors.grey,
+                                                    shadows: [
+                                                      Shadow(
+                                                        color: Colors.black,
+                                                        blurRadius: 3,
+                                                      ),
+                                                    ],
+                                                  )
+                                                : null,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
                       );
                     },
+                  ),
+                  SettingsSwitch(
+                    title: 'Pure black',
+                    subtitle:
+                        'Use a pure black background in dark mode (AMOLED).',
+                    icon: Icons.dark_mode_outlined,
+                    pref: stows.pureBlack,
                   ),
                   SettingsDropdown(
                     title: t.settings.prefLabels.locale,
@@ -2412,6 +2512,64 @@ class _VaultPasswordDialogState extends State<_VaultPasswordDialog> {
           child: Text(MaterialLocalizations.of(context).okButtonLabel),
         ),
       ],
+    );
+  }
+}
+
+class _VaultAutoLockTimeoutTile extends StatelessWidget {
+  const _VaultAutoLockTimeoutTile();
+
+  static String _labelFor(int minutes) {
+    if (minutes <= 0) return 'Immediately';
+    if (minutes == 1) return 'After 1 min';
+    return 'After $minutes mins';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: stows.vaultAutoLockTimeoutMinutes,
+      builder: (context, timeout, _) {
+        final effective = timeout.clamp(0, 30);
+        return ListTile(
+          contentPadding: const EdgeInsets.symmetric(
+            vertical: 4,
+            horizontal: 16,
+          ),
+          leading: const Icon(Icons.timer_outlined),
+          title: const Text(
+            'Vault auto-lock timeout',
+            style: TextStyle(fontSize: 18),
+          ),
+          subtitle: const Text(
+            'Grace period in background before locking (max 30 min). '
+            'Locking the device or closing the app always locks immediately.',
+            style: TextStyle(fontSize: 13),
+          ),
+          trailing: DropdownButton<int>(
+            value: vaultAutoLockTimeoutOptionsMinutes.contains(effective)
+                ? effective
+                : 0,
+            items: [
+              for (final minutes in vaultAutoLockTimeoutOptionsMinutes)
+                DropdownMenuItem(
+                  value: minutes,
+                  child: Text(_labelFor(minutes)),
+                ),
+            ],
+            onChanged: (int? v) {
+              if (v != null) stows.vaultAutoLockTimeoutMinutes.value = v;
+            },
+          ),
+          onLongPress: () {
+            SettingsPage.showResetDialog(
+              context: context,
+              pref: stows.vaultAutoLockTimeoutMinutes,
+              prefTitle: 'Vault auto-lock timeout',
+            );
+          },
+        );
+      },
     );
   }
 }

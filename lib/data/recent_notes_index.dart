@@ -14,6 +14,7 @@ class RecentNotesIndex {
     : sort = sort ?? SortOverride() {
     if (notes != null) {
       for (final note in notes) {
+        if (!_isVisibleHomeNote(note.path)) continue;
         _byPath[note.path] = note;
       }
     }
@@ -22,23 +23,37 @@ class RecentNotesIndex {
   final SortOverride sort;
   final Map<String, NoteIndexEntry> _byPath = {};
 
-  int get length => _byPath.length;
-  bool get isEmpty => _byPath.isEmpty;
-  bool get isNotEmpty => _byPath.isNotEmpty;
-  Iterable<String> get paths => _byPath.keys;
-  bool contains(String path) => _byPath.containsKey(path);
-  NoteIndexEntry? operator [](String path) => _byPath[path];
+  int get length => _byPath.values
+      .where((e) => _isVisibleHomeNote(e.path))
+      .length;
+  bool get isEmpty => !_byPath.values.any((e) => _isVisibleHomeNote(e.path));
+  bool get isNotEmpty => _byPath.values.any((e) => _isVisibleHomeNote(e.path));
+  Iterable<String> get paths =>
+      _byPath.keys.where((p) => _isVisibleHomeNote(p));
+  bool contains(String path) =>
+      _byPath.containsKey(path) && _isVisibleHomeNote(path);
+  NoteIndexEntry? operator [](String path) {
+    final e = _byPath[path];
+    if (e == null || !_isVisibleHomeNote(path)) return null;
+    return e;
+  }
 
-  List<NoteIndexEntry> get entries => _byPath.values.toList(growable: false);
+  List<NoteIndexEntry> get entries => _byPath.values
+      .where((e) => _isVisibleHomeNote(e.path))
+      .toList(growable: false);
 
   List<String> sortedPaths() {
-    final copy = _byPath.values.toList();
+    final copy = _byPath.values
+        .where((e) => _isVisibleHomeNote(e.path))
+        .toList();
     SortNotes.sortNoteIndex(copy, sort);
     return [for (final e in copy) e.path];
   }
 
   /// Merge a disk/vault snapshot. Local notes are never dropped unless
   /// [dropMissing] is true (pull-to-refresh / user-confirmed delete reload).
+  /// Scratch / crash leftovers (`TmPmP_`, `tmp…`, `tpm…`, … in any case) are
+  /// never merged – they show up as empty cards until the next refresh.
   void mergeFromDisk(
     Iterable<NoteIndexEntry> disk, {
     bool dropMissing = false,
@@ -47,7 +62,10 @@ class RecentNotesIndex {
       final keep = <String>{for (final e in disk) e.path};
       _byPath.removeWhere((path, _) => !keep.contains(path));
     }
+    // Purge any scratch entries that slipped in via instant prefs render.
+    _byPath.removeWhere((path, _) => !_isVisibleHomeNote(path));
     for (final e in disk) {
+      if (!_isVisibleHomeNote(e.path)) continue;
       final prev = _byPath[e.path];
       if (prev == null) {
         _byPath[e.path] = e;
@@ -64,6 +82,10 @@ class RecentNotesIndex {
   }
 
   void upsert(NoteIndexEntry entry) {
+    if (!_isVisibleHomeNote(entry.path)) {
+      _byPath.remove(entry.path);
+      return;
+    }
     _byPath[entry.path] = entry;
   }
 
@@ -79,6 +101,8 @@ class RecentNotesIndex {
     Iterable<FileOperation> ops, {
     int? nowMillis,
   }) {
+    // Drop any scratch leftovers that slipped in via instant prefs render.
+    _byPath.removeWhere((path, _) => !_isVisibleHomeNote(path));
     final writes = <String>{};
     final deletes = <String, FileRemovalCause?>{};
 
@@ -131,6 +155,10 @@ class RecentNotesIndex {
 
   /// Prefer peeked mtime/size without moving a note backward in time.
   void applyPeekedMeta(NoteIndexEntry peeked) {
+    if (!_isVisibleHomeNote(peeked.path)) {
+      _byPath.remove(peeked.path);
+      return;
+    }
     final prev = _byPath[peeked.path];
     if (prev == null) return;
     final merged = NoteIndexEntry(
@@ -148,11 +176,7 @@ class RecentNotesIndex {
   }
 
   static bool _isVisibleHomeNote(String path) {
-    final name = path.split('/').last;
-    return name.isNotEmpty &&
-        !name.startsWith('.') &&
-        !name.startsWith('TmPmP_') &&
-        !name.contains('.sbn2.');
+    return FileManager.isVisibleHomeNotePath(path);
   }
 }
 

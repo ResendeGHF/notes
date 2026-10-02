@@ -250,8 +250,8 @@ class App extends StatefulWidget {
                       : Axis.horizontal,
                   secondaryInitialPageIndex: secondaryInitialPageIndex,
                 )
-              : Editor(
-                  path: path,
+              : EditorWithTabs(
+                  initialPath: path,
                   pdfPath: pdfPath,
                   initialPageIndexOverride: initialPageIndexOverride,
                 );
@@ -385,6 +385,13 @@ class App extends StatefulWidget {
 class _AppState extends State<App> with WidgetsBindingObserver {
   StreamSubscription? _intentDataStreamSubscription;
 
+  /// Native device-lock signal (Android SCREEN_OFF). See MainActivity and
+  /// [VaultAdapter.onDeviceLocked]. Platforms without a native sender simply
+  /// never invoke it.
+  static const _vaultLockChannel = MethodChannel(
+    'com.resendeghf.notes/vault_lock',
+  );
+
   void _checkAutoBackup() {
     final interval = stows.autoBackupIntervalMinutes.value;
     if (interval <= 0) return;
@@ -401,6 +408,11 @@ class _AppState extends State<App> with WidgetsBindingObserver {
     super.initState();
     VaultAdapter.bindRouter(App._router);
     WidgetsBinding.instance.addObserver(this);
+    _vaultLockChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onDeviceLocked') {
+        VaultAdapter.onDeviceLocked();
+      }
+    });
     if (Platform.isAndroid || Platform.isIOS) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_applyMobileSystemChrome());
@@ -415,31 +427,31 @@ class _AppState extends State<App> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // SECURITY: Lock vault when app leaves the foreground (unless file picker/share is open)
+    // SECURITY: Vault auto-lock with a user-configurable background grace
+    // timeout (see settings). File picker/share flows set
+    // [VaultAdapter.preventLock] and are skipped inside [onAppBackgrounded].
+    // `inactive` alone (keyboard, transient overlays) never locks.
     if (state == AppLifecycleState.resumed) {
       if (Platform.isAndroid || Platform.isIOS) {
         unawaited(_applyMobileSystemChrome());
       }
-      // Redirect may have been skipped while backgrounded; enforce login now.
-      VaultAdapter.ensureLoginRouteIfLocked();
+      // Cancels a still-valid grace period, locks when the timeout elapsed
+      // while suspended, or enforces the login route when already locked.
+      VaultAdapter.onAppResumed();
+      return;
+    }
+    if (state == AppLifecycleState.detached) {
+      // App closed: always lock immediately, even within the grace period.
+      VaultAdapter.onAppDetached();
+      return;
     }
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.detached) {
-      if (VaultAdapter.preventLock) {
-        VaultAdapter.log.info(
-          'Vault auto-lock prevented due to active file operation',
-        );
-        return;
-      }
-      if (stows.localEncryptionEnabled.value && VaultAdapter.isUnlocked) {
-        unawaited(
-          VaultAdapter.instance.lock().then((_) {
-            // Prefer navigating once locked so editor/home cannot linger.
-            VaultAdapter.ensureLoginRouteIfLocked();
-          }),
-        );
-      }
+        state == AppLifecycleState.hidden) {
+      // Backgrounded (off-screen): lock now when timeout is 0, otherwise
+      // schedule a lock after the timeout unless resumed first.
+      // Device screen-off is pushed natively via `onDeviceLocked` and locks
+      // immediately regardless of this timeout.
+      VaultAdapter.onAppBackgrounded();
     }
   }
 

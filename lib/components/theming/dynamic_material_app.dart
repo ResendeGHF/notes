@@ -62,6 +62,7 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
   @override
   void initState() {
     stows.appTheme.addListener(onChanged);
+    stows.pureBlack.addListener(onChanged);
     stows.hyperlegibleFont.addListener(onChanged);
     stows.appAccentColor.addListener(onChanged);
 
@@ -95,17 +96,20 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
   @override
   Widget build(BuildContext context) {
     final seedColor = Color(stows.appAccentColor.value);
+    final pureBlack = stows.pureBlack.value;
     final platform = Theme.of(context).platform;
 
     final lightTheme = SaberTheme.createThemeFromSeed(
       seedColor,
       Brightness.light,
       platform,
+      pureBlack: pureBlack,
     );
     final darkTheme = SaberTheme.createThemeFromSeed(
       seedColor,
       Brightness.dark,
       platform,
+      pureBlack: pureBlack,
     );
 
     return ExplicitlyThemedApp(
@@ -120,6 +124,7 @@ class DynamicMaterialAppState extends State<DynamicMaterialApp>
   @override
   void dispose() {
     stows.appTheme.removeListener(onChanged);
+    stows.pureBlack.removeListener(onChanged);
     stows.hyperlegibleFont.removeListener(onChanged);
     stows.appAccentColor.removeListener(onChanged);
 

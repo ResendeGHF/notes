@@ -12,10 +12,8 @@ import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/stroke_paint.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
-import 'package:saber/data/tools/google_ink_brush.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/i18n/strings.g.dart';
-import 'package:saber/services/google_ink_channel.dart';
 
 class Pen extends Tool {
   @protected
@@ -96,28 +94,6 @@ class Pen extends Tool {
         : loaded.copyWith(mode: StrokePaintMode.pencilNoise);
   }
 
-  /// Google Ink test pen. Geometry comes from the native
-  /// `InProgressStrokesView` / `Brush` stack on Android (see
-  /// `GoogleInkViews.kt`) with a pure-Dart stroke-modeler fallback elsewhere.
-  /// Never uses `perfect_freehand`.
-  Pen.experimental({GoogleInkBrushConfig? brush})
-    : name = 'Experimental pen',
-      sizeMin = 0.5,
-      sizeMax = 48.0,
-      sizeStep = 0.5,
-      icon = experimentalPenIcon,
-      options = _experimentalOptionsFromPrefs(brush),
-      pressureEnabled = true,
-      color = Color(stows.lastExperimentalPenColor.value),
-      toolId = .experimentalPen {
-    paint = const StrokePaint();
-    inkBrush = brush ?? stows.lastExperimentalInkBrush.value.copy();
-    // Keep size + color in sync with the Google Ink brush for the raster/LOD
-    // path (bounds, culling, tile batching all read StrokeOptions.size).
-    options.size = inkBrush.size.clamp(sizeMin, sizeMax);
-    color = Color(inkBrush.colorArgb);
-  }
-
   final String name;
   final double sizeMin, sizeMax, sizeStep;
   late final int sizeStepsBetweenMinAndMax = ((sizeMax - sizeMin) / sizeStep)
@@ -132,17 +108,12 @@ class Pen extends Tool {
   static const FaIconData calligraphyPenIcon = FontAwesomeIcons.penNib;
   static const FaIconData advancedPenIcon = FontAwesomeIcons.sliders;
   static const FaIconData advancedPencilIcon = FontAwesomeIcons.pencil;
-  static const FaIconData experimentalPenIcon = FontAwesomeIcons.flask;
 
   static Stroke? currentStroke;
   Color color;
   bool pressureEnabled;
   StrokeOptions options;
   StrokePaint paint = const StrokePaint();
-
-  /// Live Google Ink brush config. Only meaningful for [ToolId.experimentalPen];
-  /// other pens ignore it. Pushed to Android via [GoogleInkNative.setBrush].
-  GoogleInkBrushConfig inkBrush = GoogleInkBrushConfig();
 
   static var _currentPen = Pen.ballpointPen();
   static Pen get currentPen => _currentPen;
@@ -177,18 +148,6 @@ class Pen extends Tool {
       currentStroke?.paint = paint.usesPencilNoise
           ? paint
           : paint.copyWith(mode: StrokePaintMode.pencilNoise);
-    }
-    if (toolId == ToolId.experimentalPen) {
-      // Snapshot the live brush onto the stroke so committed ink remembers
-      // the test config even if the user keeps tweaking the modal.
-      // Size/color stay mirrored for bounds + LOD culling.
-      inkBrush.size = options.size.clamp(sizeMin, sizeMax);
-      inkBrush.colorArgb = color.toARGB32();
-      currentStroke?.googleInkFamily = inkBrush.family.id;
-      currentStroke?.googleInkEpsilon = inkBrush.epsilon;
-      currentStroke?.googleInkSmoothingMs = inkBrush.smoothingWindowMs;
-      // Push to the native InProgressStrokesView (no-op off Android).
-      GoogleInkNative.setBrush(inkBrush);
     }
     currentStroke?.resetStabilization();
     onDragUpdate(position, pressure, timestamp);
@@ -234,19 +193,22 @@ class Pen extends Tool {
     simulatePressure: false,
   );
 
+  /// Apple-Notes-style fountain pen: lively pressure response with hairline
+  /// lows, short elegant tapers (no long needle tails) and smooth tips.
   static StrokeOptions get fountainPenOptions => defaultOptions.copyWith(
     size: 2,
 
     smoothing: 0.42,
     streamline: 0.18,
-    thinning: 0.35,
+    thinning: 0.55,
+    minSizeRatio: 0.07,
     simulatePressure: true,
     start: StrokeEndOptions.start(
       taperEnabled: true,
-      customTaper: 12,
+      customTaper: 6,
       cap: false,
     ),
-    end: StrokeEndOptions.end(taperEnabled: true, customTaper: 12, cap: false),
+    end: StrokeEndOptions.end(taperEnabled: true, customTaper: 6, cap: false),
   );
 
   static StrokeOptions get ballpointPenOptions => defaultOptions.copyWith(
@@ -375,26 +337,6 @@ class Pen extends Tool {
     );
   }
 
-  /// Prefs-backed geometry shell for the experimental pen. The Google Ink
-  /// brush owns size/color/epsilon; StrokeOptions only carries LOD-relevant
-  /// size + a neutral smoothing/streamline so bounds/culling stay correct.
-  /// Smoothing itself happens in the native input model / Dart fallback.
-  static StrokeOptions get experimentalPenOptions => defaultOptions.copyWith(
-        size: 4.0,
-        thinning: 0.0,
-        smoothing: 0.35,
-        streamline: 0.15,
-        simulatePressure: false,
-      );
-
-  static StrokeOptions _experimentalOptionsFromPrefs(
-      GoogleInkBrushConfig? brush) {
-    final b = brush ?? stows.lastExperimentalInkBrush.value;
-    return experimentalPenOptions.copyWith(
-      size: b.size.clamp(0.5, 48.0),
-    );
-  }
-
   /// Built-in fast noise preset (not shared with Advanced Pen presets).
   static Map<String, dynamic> defaultAdvancedPencilPresetPayload() {
     final opts = advancedPencilOptions;
@@ -433,7 +375,6 @@ class Pen extends Tool {
     ToolId.calligraphyPen,
     ToolId.advancedPen,
     ToolId.advancedPencil,
-    ToolId.experimentalPen,
     ToolId.highlighter,
   ];
 
@@ -448,7 +389,6 @@ class Pen extends Tool {
       ToolId.calligraphyPen => Pen.calligraphyPen(),
       ToolId.advancedPen => Pen.advancedPen(),
       ToolId.advancedPencil => Pen.advancedPencil(),
-      ToolId.experimentalPen => Pen.experimental(),
       ToolId.highlighter => Highlighter.currentHighlighter,
       _ => null,
     };
@@ -461,7 +401,6 @@ class Pen extends Tool {
       ToolId.calligraphyPen => t.editor.pens.calligraphyPen,
       ToolId.advancedPen => t.editor.pens.advancedPen,
       ToolId.advancedPencil => t.editor.pens.advancedPencil,
-      ToolId.experimentalPen => 'Experimental pen',
       ToolId.highlighter => t.editor.pens.highlighter,
       _ => id.id,
     };
@@ -474,7 +413,6 @@ class Pen extends Tool {
       ToolId.calligraphyPen => calligraphyPenIcon,
       ToolId.advancedPen => advancedPenIcon,
       ToolId.advancedPencil => advancedPencilIcon,
-      ToolId.experimentalPen => experimentalPenIcon,
       ToolId.highlighter => Highlighter.highlighterIcon,
       _ => FontAwesomeIcons.pen,
     };
@@ -522,11 +460,6 @@ class Pen extends Tool {
           ? (stroke.flatEdge || stows.highlighterFlatEdge.value)
           : false,
     );
-    if (newToolId == ToolId.experimentalPen) {
-      rebuilt.googleInkFamily = template.inkBrush.family.id;
-      rebuilt.googleInkEpsilon = template.inkBrush.epsilon;
-      rebuilt.googleInkSmoothingMs = template.inkBrush.smoothingWindowMs;
-    }
     return rebuilt;
   }
 }

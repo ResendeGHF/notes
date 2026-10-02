@@ -597,7 +597,7 @@ class _BrowsePageState extends State<BrowsePage> {
     Map<String, int> folderCounts = const {};
     if (rawChildren != null) {
       var filteredDirs = rawChildren.directories
-          .where((d) => !d.startsWith('.'))
+          .where((d) => !FileManager.isTempSystemFileName(d))
           .toList();
 
       List<String> dirPaths = filteredDirs
@@ -636,9 +636,7 @@ class _BrowsePageState extends State<BrowsePage> {
       children = DirectoryChildren(
         filteredDirs,
         rawChildren.files.where((f) {
-          return !f.startsWith('.') &&
-              !f.startsWith('TmPmP_') &&
-              !f.contains('.sbn2.');
+          return FileManager.isVisibleHomeNotePath('/$f');
         }).toList(),
         linkedDirectories: linkedDirs,
         linkedFiles: linkedFiles,
@@ -2159,7 +2157,7 @@ class _AddLinkDialogState extends State<AddLinkDialog> {
         if (children == null) continue;
 
         for (final dir in children.directories) {
-          if (dir.startsWith('.')) continue;
+          if (FileManager.isTempSystemFileName(dir)) continue;
 
           final p = current == '/' ? '/$dir' : '$current/$dir';
           dirs.add(p);
@@ -2171,7 +2169,7 @@ class _AddLinkDialogState extends State<AddLinkDialog> {
           }
         }
         for (final file in children.files) {
-          if (file.startsWith('.')) continue;
+          if (FileManager.isTempSystemFileName(file)) continue;
           final p = current == '/' ? '/$file' : '$current/$file';
           paths.add(p);
         }

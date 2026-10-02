@@ -26,11 +26,9 @@ import 'package:saber/data/extensions/point_extensions.dart';
 import 'package:saber/data/extensions/svg_path_formatting.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
-import 'package:saber/data/stroke_geometry/google_ink_geometry.dart'
-    show buildGoogleInkPath, buildGoogleInkPolygon;
+import 'package:saber/data/stroke_geometry/motion_event_predictor.dart'
+    show MotionEventPredictor;
 import 'package:saber/data/tools/_tool.dart';
-import 'package:saber/data/tools/google_ink_brush.dart'
-    show GoogleInkBrushConfig, GoogleInkBrushFamily;
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/services/display_ink_feel.dart';
 
@@ -347,14 +345,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// may still carry the flag on other tools and are drawn without neon.
   bool neon = false;
 
-  /// Google Ink brush snapshot per stroke (experimental pen only). Persisted
-  /// so committed ink remembers the test config used at draw time. Rendered
-  /// by the Dart stroke-modeler fallback (`google_ink_geometry.dart`) and by
-  /// the native `Brush` while live. Ignored by all other pens.
-  String googleInkFamily = 'pressurePen';
-  double googleInkEpsilon = 0.1;
-  double googleInkSmoothingMs = 16.0;
-
   Path? _neonInnerPath;
 
   /// Bright neon core (ballpoint-style inset).
@@ -421,16 +411,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   int get geometricFingerprint {
-    // Experimental ink geometry depends on the Google Ink brush snapshot, not
-    // just size/color: include family + epsilon so tile / raster / mesh caches
-    // invalidate when the test bench changes brushes.
-    final giExtra = toolId == ToolId.experimentalPen
-        ? Object.hash(
-            googleInkFamily,
-            (googleInkEpsilon * 1000).round(),
-            (googleInkSmoothingMs * 10).round(),
-          )
-        : 0;
     if (points.isEmpty) {
       return Object.hash(
         color,
@@ -438,7 +418,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         toolId.index,
         0,
         options.isComplete,
-        giExtra,
       );
     }
     final first = points.first;
@@ -453,7 +432,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       (options.size * 1000).round(),
       toolId.index,
       options.isComplete,
-      giExtra,
     );
   }
 
@@ -492,34 +470,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   Path? _lowQualityPath;
   Path get lowQualityPath {
-    // Experimental paints its authored path (ovals for dashed) at every
-    // quality: the polygon form cannot represent disjoint dots.
-    if (toolId == ToolId.experimentalPen) return highQualityPath;
     return _lowQualityPath ??= getPath(lowQualityPolygon, smooth: true);
   }
 
   Path get highQualityPath {
     if (_cachedPath != null && _cachedPathValid) return _cachedPath!;
-
-    // Experimental (Google Ink) fills its authored path directly: ribbon
-    // polygon with travel-aware round caps, or one oval subpath per dot for
-    // the dashed family (never a concatenated dot-polygon — its bridges are
-    // bow-ties that cancel fill).
-    if (toolId == ToolId.experimentalPen) {
-      final base = _pointsForLiveRender(points);
-      if (base.isEmpty) {
-        _cachedPathValid = true;
-        return _cachedPath ??= Path();
-      }
-      _cachedPath = buildGoogleInkPath(
-        base,
-        googleInkConfig(),
-        isComplete: options.isComplete,
-      );
-      _cachedPath!.fillType = PathFillType.nonZero;
-      _cachedPathValid = true;
-      return _cachedPath!;
-    }
 
     _cachedPath ??= Path();
     _cachedPath!.reset();
@@ -553,16 +508,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // Path-outline pens already include round joins/caps. Midpoint smoothing of
     // the outline polygon creates self-intersections near returns and chipped caps.
     // Fountain keeps the previous smoothed-path look (mesh tips are separate).
-    // Experimental (Google Ink) authors its own caps/joins in
-    // buildGoogleInkPolygon; smoothing them again pinches the tips into
-    // bow-ties whose nonzero winding cancels out (holes at start/end caps and
-    // erased patches at stroke intersections).
     final bool preserveAuthoredOutline =
         toolId == ToolId.highlighter ||
         toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
         toolId == ToolId.ballpointPen ||
-        toolId == ToolId.experimentalPen ||
         toolId == ToolId.laserPointer;
 
     if (toolId == ToolId.calligraphyPen &&
@@ -586,7 +536,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (toolId == ToolId.calligraphyPen ||
         toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
-        toolId == ToolId.experimentalPen ||
         toolId == ToolId.highlighter ||
         toolId == ToolId.ballpointPen) {
       _cachedPath!.fillType = PathFillType.nonZero;
@@ -985,14 +934,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..paint = json['sp'] is Map
           ? StrokePaint.fromJson(Map<String, dynamic>.from(json['sp'] as Map))
           : const StrokePaint();
-    // Google Ink snapshot (experimental pen only; defaults keep old notes valid).
-    if (json['giF'] is String) stroke.googleInkFamily = json['giF'] as String;
-    final giE = toDoubleSafe(json['giE']);
-    if (giE != null && giE.isFinite) stroke.googleInkEpsilon = giE.clamp(0.01, 1.0);
-    final giS = toDoubleSafe(json['giS']);
-    if (giS != null && giS.isFinite) {
-      stroke.googleInkSmoothingMs = giS.clamp(0.0, 120.0);
-    }
+    // Removed Google Ink snapshot keys (giF/giE/giS) are ignored so old
+    // notes keep loading; their strokes arrive as fountain pen (see
+    // ToolId.parsePenType).
     return stroke;
   }
   Map<String, dynamic> toJson() {
@@ -1015,9 +959,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       'rot': rotationDeg,
       if (neon) 'n': true,
       if (!paint.isSolid) 'sp': paint.toJson(),
-      if (toolId == ToolId.experimentalPen) 'giF': googleInkFamily,
-      if (toolId == ToolId.experimentalPen) 'giE': googleInkEpsilon,
-      if (toolId == ToolId.experimentalPen) 'giS': googleInkSmoothingMs,
     }..addAll(options.toJson());
   }
 
@@ -1059,14 +1000,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       writer.writeString(
         StrokeBinaryKeys.strokePaint,
         jsonEncode(paint.toJson()),
-      );
-    }
-    if (toolId == ToolId.experimentalPen) {
-      writer.writeString(StrokeBinaryKeys.googleInkFamily, googleInkFamily);
-      writer.writeFloat(StrokeBinaryKeys.googleInkEpsilon, googleInkEpsilon);
-      writer.writeFloat(
-        StrokeBinaryKeys.googleInkSmoothingMs,
-        googleInkSmoothingMs,
       );
     }
 
@@ -1202,22 +1135,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       } catch (_) {}
       key = reader.readKey();
     }
-    var googleInkFamily = 'pressurePen';
-    var googleInkEpsilon = 0.1;
-    var googleInkSmoothingMs = 16.0;
-    // Google Ink snapshot sits between paint and options (experimental only).
-    // Loop so any subset / order stays forward-compatible.
+    // Removed Google Ink snapshot keys sit between paint and options in old
+    // files. Drain (and discard) them so any subset / order stays readable.
     var giGuard = 0;
     while ((key == StrokeBinaryKeys.googleInkFamily ||
             key == StrokeBinaryKeys.googleInkEpsilon ||
             key == StrokeBinaryKeys.googleInkSmoothingMs) &&
         giGuard++ < 4) {
       if (key == StrokeBinaryKeys.googleInkFamily) {
-        googleInkFamily = reader.readStringNoKey();
+        reader.readStringNoKey();
       } else if (key == StrokeBinaryKeys.googleInkEpsilon) {
-        googleInkEpsilon = reader.readFloat();
+        reader.readFloat();
       } else {
-        googleInkSmoothingMs = reader.readFloat();
+        reader.readFloat();
       }
       key = reader.readKey();
     }
@@ -1248,9 +1178,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..flatEdge = !options.start.cap
       ..neon = neon
       ..paint = paint
-      ..googleInkFamily = googleInkFamily
-      ..googleInkEpsilon = googleInkEpsilon.clamp(0.01, 1.0)
-      ..googleInkSmoothingMs = googleInkSmoothingMs.clamp(0.0, 120.0)
       .._cachedBounds = parsedBounds
       ..points.addAll(
         points.where(
@@ -1355,23 +1282,35 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   List<PointVector>? _predictedTail;
 
-  /// Raw pointer kinematics for live stroke prediction (not affected by stabilization).
-  Offset? _predPrevRawPos;
-  double? _predPrevRawTimeSec;
-  Offset? _predEmaVelocity;
-  Offset? _predEmaAcceleration;
-  Offset? _predInstantVelPrev;
-  Offset? _predInstantVelLast;
+  /// Live-tip predictor: faithful Dart port of the `EventMotionPredictor`
+  /// used with Google Ink (`androidx.input.motionprediction` Kalman stack).
+  /// Fed with every raw input sample; its transient tip is appended to live
+  /// renders only — never committed, replaced by the next real sample.
+  /// Replaces the former EMA velocity/acceleration kinematics.
+  final MotionEventPredictor _motionPredictor = MotionEventPredictor();
 
-  /// Stroke stabilization / prediction apply only to these ink tools.
-  /// Experimental (Google Ink) is intentionally excluded: smoothing +
-  /// prediction live in the native `InProgressStrokesView` input model /
-  /// MotionEventPredictor (or the Dart stroke-modeler fallback), so Flutter
-  /// 1€ filtering here would double-smooth and add rubber-banding.
+  /// Tool accuracy for the predictor's confidence ranges (stylus predicts at
+  /// full speed factor; finger ramps over 0–2 dp/ms). Written per sample by
+  /// [recordPredictionSample]; defaults to stylus.
+  bool predictionAccurateTool = true;
+
+  /// Stroke stabilization applies only to these ink tools. Brush,
+  /// highlighter and laser keep their raw input feel.
   bool get _allowsStrokeStabilizationAndPrediction =>
       toolId == ToolId.ballpointPen ||
       toolId == ToolId.calligraphyPen ||
       toolId == ToolId.fountainPen ||
+      toolId == ToolId.advancedPen ||
+      toolId == ToolId.advancedPencil;
+
+  /// Motion prediction (EventMotionPredictor) applies to every freehand ink
+  /// pen. Highlighter with straight-line assist opts out per stroke (a tip
+  /// would drag the end chord off the snapped line).
+  bool get _allowsMotionPrediction =>
+      toolId == ToolId.ballpointPen ||
+      toolId == ToolId.calligraphyPen ||
+      toolId == ToolId.fountainPen ||
+      toolId == ToolId.highlighter ||
       toolId == ToolId.advancedPen ||
       toolId == ToolId.advancedPencil;
 
@@ -1389,10 +1328,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final double eventTimeSec = timestamp != null
         ? timestamp.inMicroseconds / 1e6
         : (_drawSampleTimeSec ?? 0.0) + 1.0 / 60.0;
-
-    if (_allowsStrokeStabilizationAndPrediction) {
-      _updateRawPredictionKinematics(point, eventTimeSec);
-    }
 
     if (toolId == ToolId.highlighter && Highlighter.straightLine.value) {
       if (points.isEmpty) {
@@ -1419,6 +1354,32 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     } else {
       _commitStabilizedSampleWithGapFill(samplePoint, pressure, eventTimeSec);
     }
+  }
+
+  /// Feeds one raw pointer sample to the live-tip predictor, mirroring
+  /// upstream `record(event)` for every received MotionEvent.
+  ///
+  /// Call ONLY with raw (uncoalesced) pointer positions in page-local
+  /// coordinates — never with gesture-arena focal points, gap-fill
+  /// midpoints or committed geometry. Mixing coalesced samples into the
+  /// stream fabricates teleports that the filter turns into flying tangent
+  /// tips. The editor calls this from the raw-move path (plus one seed on
+  /// pen-down); [addPoint] never records.
+  void recordPredictionSample(
+    Offset pageLocal,
+    double? pressure,
+    Duration timestamp, {
+    required bool accurateTool,
+  }) {
+    if (!_allowsMotionPrediction) return;
+    if (!stows.strokePrediction.value) return;
+    predictionAccurateTool = accurateTool;
+    _motionPredictor.record(
+      pageLocal.dx,
+      pageLocal.dy,
+      pressure ?? 0.5,
+      timestamp.inMicroseconds / 1000.0,
+    );
   }
 
   void _commitStabilizedSampleWithGapFill(
@@ -1521,46 +1482,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     markPolygonNeedsUpdating(preserveBounds: true);
   }
 
-  void _updateRawPredictionKinematics(Offset rawPosition, double timeSec) {
-    if (_predPrevRawPos != null && _predPrevRawTimeSec != null) {
-      final dt = (timeSec - _predPrevRawTimeSec!).clamp(1e-4, 0.25);
-      final ix = (rawPosition.dx - _predPrevRawPos!.dx) / dt;
-      final iy = (rawPosition.dy - _predPrevRawPos!.dy) / dt;
-      final instant = Offset(ix, iy);
-      // At ~60 Hz samples arrive near 16 ms; use a faster EMA so direction
-      // changes reach the tip lead within one frame.
-      final lowHz = DisplayInkFeel.instance.isLowRefresh;
-      final beta = lowHz
-          ? (dt < 0.020 ? 0.74 : 0.62)
-          : (dt < 0.011 ? 0.68 : 0.56);
-          
-      if (_predEmaVelocity != null) {
-        final accelX = (instant.dx - _predEmaVelocity!.dx) / dt;
-        final accelY = (instant.dy - _predEmaVelocity!.dy) / dt;
-        final instantAccel = Offset(accelX, accelY);
-        
-        final betaA = lowHz ? 0.5 : 0.4;
-        _predEmaAcceleration = _predEmaAcceleration == null
-            ? instantAccel
-            : Offset(
-                _predEmaAcceleration!.dx * (1 - betaA) + instantAccel.dx * betaA,
-                _predEmaAcceleration!.dy * (1 - betaA) + instantAccel.dy * betaA,
-              );
-      }
-      
-      _predEmaVelocity = _predEmaVelocity == null
-          ? instant
-          : Offset(
-              _predEmaVelocity!.dx * (1 - beta) + instant.dx * beta,
-              _predEmaVelocity!.dy * (1 - beta) + instant.dy * beta,
-            );
-      _predInstantVelPrev = _predInstantVelLast;
-      _predInstantVelLast = instant;
-    }
-    _predPrevRawPos = rawPosition;
-    _predPrevRawTimeSec = timeSec;
-  }
-
   Offset? _filteredPoint;
   Offset? _filteredVelocity;
   double? _lastTimestampSeconds;
@@ -1633,12 +1554,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _drawSampleTimeSec = null;
     _prevDrawSampleTimeSec = null;
     _predictedTail = null;
-    _predPrevRawPos = null;
-    _predPrevRawTimeSec = null;
-    _predEmaVelocity = null;
-    _predEmaAcceleration = null;
-    _predInstantVelPrev = null;
-    _predInstantVelLast = null;
+    _motionPredictor.reset();
+    predictionAccurateTool = true;
   }
 
   void clearLivePrediction() {
@@ -1647,131 +1564,81 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   void _recomputePredictionTail() {
     _predictedTail = null;
-    if (!_allowsStrokeStabilizationAndPrediction) return;
+    if (!_allowsMotionPrediction) return;
     if (options.isComplete || !stows.strokePrediction.value) return;
     if (points.length < 2) return;
-
-    Offset v;
-    Offset a = Offset.zero;
-
-    if (_predEmaVelocity != null && _predEmaVelocity!.distance > 1e-3) {
-      v = _predEmaVelocity!;
-      if (_predEmaAcceleration != null) {
-        a = _predEmaAcceleration!;
-      }
-    } else if (_drawSampleTimeSec != null && _prevDrawSampleTimeSec != null) {
-      final dt = (_drawSampleTimeSec! - _prevDrawSampleTimeSec!).clamp(
-        1.2e-3,
-        0.12,
-      );
-      final prev = points[points.length - 2];
-      final last = points.last;
-      v = Offset((last.x - prev.x) / dt, (last.y - prev.y) / dt);
-    } else {
+    // Straight-line assist snaps to committed samples only: a predicted tip
+    // would drag the end chord (and its cap) off the snapped line.
+    if (toolId == ToolId.highlighter && Highlighter.straightLine.value) {
       return;
     }
-
-    if (stows.strokeStabilization.value &&
-        _filteredVelocity != null &&
-        _filteredVelocity!.distance > 18 &&
-        !DisplayInkFeel.instance.isLowRefresh) {
-      final f = _filteredVelocity!;
-      v = Offset(v.dx * 0.52 + f.dx * 0.48, v.dy * 0.52 + f.dy * 0.48);
+    // Turning tip: the filter velocity still points along the old travel
+    // while committed samples already turned. Projecting now spikes a kink
+    // across the bend — a bow-tie whose winding cancels into a white hole,
+    // and end caps leaning off-axis. Like a real pen, show ink exactly
+    // under the tip through turns; lead resumes on straight runs.
+    if (points.length >= 3) {
+      final vel = _motionPredictor.velocity;
+      final vl = vel.distance;
+      if (vl > 1e-6) {
+        final a = points[points.length - 3];
+        final b = points.last;
+        final dx = b.x - a.x;
+        final dy = b.y - a.y;
+        final l = math.sqrt(dx * dx + dy * dy);
+        if (l > 1e-6) {
+          final cos = (dx * vel.dx + dy * vel.dy) / (l * vl);
+          if (cos < 0.5) return;
+        }
+      }
     }
 
-    final speed = v.distance;
-    if (speed < 2.5) return;
-
+    // Horizon mirrors upstream's PredictionEstimator: the predicted samples
+    // land when the next frame renders — one display frame, scaled by the
+    // user amount. Short by design: the tip cancels pipeline latency under
+    // the stylus instead of overshooting past it as a tangent ruler.
     final amount = stows.strokePredictionAmount.value.clamp(0.0, 1.0);
+    final refreshHz = DisplayInkFeel.instance.refreshHz;
+    final frameMs = refreshHz > 1 ? 1000.0 / refreshHz : 16.7;
+    final targetMs = (frameMs * amount).clamp(
+      0.0,
+      MotionEventPredictor.maxPredictionMs,
+    );
 
-    var turnFactor = 1.0;
-    if (_predInstantVelPrev != null && _predInstantVelLast != null) {
-      final va = _predInstantVelPrev!;
-      final vb = _predInstantVelLast!;
-      final la = va.distance;
-      final lb = vb.distance;
-      if (la > 2.0 && lb > 2.0) {
-        final cos = (va.dx * vb.dx + va.dy * vb.dy) / (la * lb);
-        turnFactor = (0.22 + 0.78 * ((cos + 1) * 0.5)).clamp(0.18, 1.0);
+    final tips = _motionPredictor.predictPolyline(
+      predictionTargetMs: targetMs,
+      accurateTool: predictionAccurateTool,
+    );
+    if (tips.isEmpty) return;
+    final anchor = _motionPredictor.lastRecordedPosition;
+    if (anchor == null) return;
+
+    // Anchor the Kalman displacement onto the COMMITTED tip: the tail
+    // extends the visible ink C0-continuously instead of hanging a
+    // separately-fitted raw tip off a stabilized (lagging) base, which
+    // kinks at the junction and reads as a tangent ruler. Direction and
+    // length still come from the filter; only the origin is re-based.
+    final base = points.last;
+    _predictedTail = [
+      for (final tip in tips)
+        PointVector(
+          base.x + (tip.x - anchor.dx),
+          base.y + (tip.y - anchor.dy),
+          tip.pressure.isFinite ? tip.pressure : base.pressure,
+        ),
+    ];
+    if (_cachedBounds != null) {
+      final double r = options.size / 2;
+      var bounds = _cachedBounds!;
+      for (final tip in tips) {
+        bounds = Rect.fromLTRB(
+          math.min(bounds.left, tip.x - r),
+          math.min(bounds.top, tip.y - r),
+          math.max(bounds.right, tip.x + r),
+          math.max(bounds.bottom, tip.y + r),
+        );
       }
-    } else if (points.length >= 3) {
-      final p0 = points[points.length - 3];
-      final prev = points[points.length - 2];
-      final last = points.last;
-      final v0dx = prev.x - p0.x;
-      final v0dy = prev.y - p0.y;
-      final v1dx = last.x - prev.x;
-      final v1dy = last.y - prev.y;
-      final len0 = math.sqrt(v0dx * v0dx + v0dy * v0dy);
-      final len1 = math.sqrt(v1dx * v1dx + v1dy * v1dy);
-      if (len0 > 1e-4 && len1 > 1e-4) {
-        final cos = (v0dx * v1dx + v0dy * v1dy) / (len0 * len1);
-        if (cos < 0.2) {
-          turnFactor = 0.26;
-        } else if (cos < 0.5) {
-          turnFactor = 0.5;
-        } else if (cos < 0.72) {
-          turnFactor = 0.76;
-        }
-      }
-    }
-
-    final speedNorm = (speed / (speed + 88.0)).clamp(0.0, 1.0);
-    final feel = DisplayInkFeel.instance;
-    final lookaheadSec =
-        (0.016 + 0.08 * amount + feel.predictionLookaheadBoostSec) *
-        turnFactor *
-        speedNorm;
-
-    // Kinematics limitation for smooth curvature
-    final accelMagnitude = a.distance;
-    final maxAccel = speed * 18.0; 
-    if (accelMagnitude > maxAccel && accelMagnitude > 0) {
-        final scale = maxAccel / accelMagnitude;
-        a = Offset(a.dx * scale, a.dy * scale);
-    }
-    
-    // Dampen acceleration further based on turn factor
-    final dampening = turnFactor;
-    a = Offset(a.dx * dampening, a.dy * dampening);
-
-    final last = points.last;
-    final raw = _predPrevRawPos;
-    final blend = feel.rawTipBlend;
-    final originX = raw == null || blend <= 0
-        ? last.x
-        : last.x * (1.0 - blend) + raw.dx * blend;
-    final originY = raw == null || blend <= 0
-        ? last.y
-        : last.y * (1.0 - blend) + raw.dy * blend;
-        
-    final maxDist =
-        (options.size * (2.6 + 3.6 * amount) * feel.predictionDistanceScale)
-            .clamp(6.0, 72.0);
-
-    _predictedTail = [];
-    
-    // Generate multiple points for the prediction tail to form a kinematic curve
-    const int numPredictionPoints = 2;
-    for (int i = 1; i <= numPredictionPoints; i++) {
-        final t = lookaheadSec * (i / numPredictionPoints);
-        var dx = v.dx * t + 0.5 * a.dx * t * t;
-        var dy = v.dy * t + 0.5 * a.dy * t * t;
-        
-        var dist = math.sqrt(dx * dx + dy * dy);
-        if (dist > maxDist && dist > 0) {
-          final s = maxDist / dist;
-          dx *= s;
-          dy *= s;
-          dist = maxDist;
-        }
-        
-        if (dist < 0.28 && i == numPredictionPoints) {
-            if (_predictedTail!.isEmpty) _predictedTail = null;
-            return;
-        }
-        
-        _predictedTail!.add(PointVector(originX + dx, originY + dy, last.pressure));
+      _cachedBounds = bounds;
     }
   }
 
@@ -1779,7 +1646,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     List<PointVector> source, {
     bool reuseBuffer = false,
   }) {
-    if (!_allowsStrokeStabilizationAndPrediction ||
+    if (!_allowsMotionPrediction ||
         options.isComplete ||
         !stows.strokePrediction.value ||
         _predictedTail == null || _predictedTail!.isEmpty) {
@@ -1833,41 +1700,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _packedPoints = null;
   }
 
-  /// Snapshot of the Google Ink brush for this stroke. Experimental pen only;
-  /// other pens ignore it. Size/color mirror [options.size]/[color] so the
-  /// tiled + temporary-raster LOD path (bounds, culling, batching) treats
-  /// experimental ink identically to every other pen.
-  GoogleInkBrushConfig googleInkConfig() {
-    return GoogleInkBrushConfig(
-      family: GoogleInkBrushFamily.parse(googleInkFamily),
-      size: options.size,
-      colorArgb: color.toARGB32(),
-      epsilon: googleInkEpsilon.clamp(0.01, 1.0),
-      smoothingWindowMs: googleInkSmoothingMs.clamp(0.0, 120.0),
-    );
-  }
-
   @protected
   List<Offset> getPolygon({required StrokeQuality quality}) {
     if (!pressureEnabled) {
       options.simulatePressure = false;
-    }
-
-    // Experimental (Google Ink) never touches perfect_freehand: sliding-window
-    // input model + family tip (native InProgressStrokesView live, Dart port
-    // for committed tiles / raster LOD / exports).
-    if (toolId == ToolId.experimentalPen) {
-      final base = _pointsForLiveRender(points);
-      if (base.isEmpty) return const [];
-      final poly = buildGoogleInkPolygon(
-        base,
-        googleInkConfig(),
-        isComplete: options.isComplete,
-      );
-      if (quality == StrokeQuality.high) {
-        _highQualitySpine = base;
-      }
-      return poly;
     }
 
     // 1. Get points WITH the prediction tip appended FIRST
@@ -1956,12 +1792,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     if (toolId == ToolId.fountainPen) {
       var strokePoints = sourcePoints;
-      if (strokePoints.length == 1)
+      if (strokePoints.length == 1) {
         strokePoints = [strokePoints.first, strokePoints.first];
+      }
+      // Tap/dot: coincident samples have no travel — collapse to one point
+      // so the outline builds a true circle instead of a sliver.
+      if (strokePoints.length == 2) {
+        final dx = strokePoints[1].x - strokePoints[0].x;
+        final dy = strokePoints[1].y - strokePoints[0].y;
+        if (dx * dx + dy * dy <= 1.0) strokePoints = [strokePoints.first];
+      }
+      // Mature the width profile (pressure jitter only, never positions).
+      strokePoints = _smoothPressureProfile(strokePoints);
 
       final minChord = math.max(3.0, options.size * 0.4);
       (double, double)? startTravel;
-      if (options.start.cap && strokePoints.length >= 2) {
+      if (strokePoints.length >= 2) {
         final a = strokePoints.first;
         // Skip micro-jitter points at pen down to get a stable chord direction
         double dx = 0, dy = 0, len = 0;
@@ -1976,7 +1822,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
 
       (double, double)? endTravel;
-      if (options.end.cap && strokePoints.length >= 2) {
+      if (strokePoints.length >= 2) {
         final b = strokePoints.last;
         // Skip micro-jitter points at pen up to get a stable chord direction
         double dx = 0, dy = 0, len = 0;
@@ -2003,7 +1849,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ),
         ),
         rememberSimulatedPressure: false,
-        preserveLegacyTips: true,
+        // Tapered nib ends keep their look, but ride jitter-stable chord
+        // tangents with blended tip radii — first/last-segment tangents
+        // swing with every jitter sample and misalign the nib.
+        preserveLegacyTips: false,
         startTravelTangent: startTravel,
         endTravelTangent: endTravel,
       );
@@ -2032,8 +1881,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       return _advancedOutlineFromSpine(sourcePoints);
     }
 
-    final useFullOptions =
-        quality == StrokeQuality.high || toolId != ToolId.experimentalPen;
+    final useFullOptions = quality == StrokeQuality.high;
     StrokeOptions effectiveOptions = useFullOptions
         ? options
         : options.copyWith(
@@ -2099,6 +1947,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           tanDx = strokePoints[1].x - px;
           tanDy = strokePoints[1].y - py;
         }
+        if (tanDx * tanDx + tanDy * tanDy < 1e-6) {
+          // Short/jittered stroke: the scan above found nothing stable.
+          // Fall back to the jitter-stable arc chord (never a raw
+          // micro-segment or a bare +x default that would lay the cap
+          // sideways).
+          final chord = localOpeningChordTangent(
+            strokePoints,
+            baseSize: size / 2,
+          );
+          tanDx = chord.$1;
+          tanDy = chord.$2;
+        }
         startDirX = tanDx;
         startDirY = tanDy;
       } else if (i == len - 1) {
@@ -2110,6 +1970,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         if (tanDx == 0 && tanDy == 0 && len > 1) {
           tanDx = px - strokePoints[len - 2].x;
           tanDy = py - strokePoints[len - 2].y;
+        }
+        if (tanDx * tanDx + tanDy * tanDy < 1e-6) {
+          final chord = localClosingChordTangent(
+            strokePoints,
+            baseSize: size / 2,
+          );
+          tanDx = chord.$1;
+          tanDy = chord.$2;
         }
         endDirX = tanDx;
         endDirY = tanDy;
@@ -2190,7 +2058,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    const int ellipseSegments = 6;
+    const int baseEllipseSegments = 6;
+    // Nib caps stay circular at broad sizes instead of faceting.
+    final int ellipseSegments =
+        (baseEllipseSegments + (size / 2).round()).clamp(6, 20);
     final List<Offset> result = [];
 
     void addEllipticalCap(
@@ -2220,17 +2091,68 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    if (len >= 2) {
+    // Tip pressure blended toward its neighbor so a landing/lift spike
+    // can't balloon or pinch the cap radii (the cap mouths ride these).
+    double stableTipPressure(int tipIndex) {
+      final p =
+          (strokePoints[tipIndex].pressure ?? 0.5).clamp(0.0, 1.0);
+      if (strokePoints.length < 3) return p;
+      final j = tipIndex == 0 ? 1 : strokePoints.length - 2;
+      final q = (strokePoints[j].pressure ?? 0.5).clamp(0.0, 1.0);
+      return (p * 0.35 + q * 0.65).clamp(0.0, 1.0);
+    }
+
+    // Start cap: semicircle bulging BACKWARD from the true mouth corners.
+    // A forward fan can't work here — the nib mouth is broad while any
+    // tip-centered fan is narrow, so the tip falls outside the fill (notch),
+    // and overlapping the stem forward cancels fill by winding opposition.
+    // Anchoring exactly on leftSide[0]/rightSide[0] closes the mouth with no
+    // gaps and no overlap: the pen-down dwell bulb, like a real nib touch.
+    void addStartMouthCap() {
+      if (leftSide.isEmpty || rightSide.isEmpty) return;
+      final ax = leftSide[0].dx, ay = leftSide[0].dy;
+      final bx = rightSide[0].dx, by = rightSide[0].dy;
+      var mx = (ax + bx) / 2, my = (ay + by) / 2;
+      var cx = (bx - ax) / 2, cy = (by - ay) / 2;
+      final halfLen = math.sqrt(cx * cx + cy * cy);
+      if (halfLen < 1e-6) return;
+      cx /= halfLen;
+      cy /= halfLen;
+      // Backward direction: opposite of the opening travel.
+      var tx = startDirX, ty = startDirY;
+      final tl = math.sqrt(tx * tx + ty * ty);
+      if (tl < 1e-6) {
+        tx = 1;
+        ty = 0;
+      } else {
+        tx /= tl;
+        ty /= tl;
+      }
       final p0 = strokePoints[0];
-      final pressure0 = (p0.pressure ?? 0.5).clamp(0.0, 1.0);
-      final r0 = size * 0.65 * (0.5 + pressure0 * 0.5);
-      final r0y = size * 0.12 * (0.5 + pressure0 * 0.5);
-      addEllipticalCap(p0.x, p0.y, startDirX, startDirY, r0, r0y, true);
+      final pressure0 = stableTipPressure(0);
+      final rx0 = size * 0.65 * (0.5 + pressure0 * 0.5);
+      final h = (halfLen).clamp(size * 0.12 * (0.5 + pressure0 * 0.5), rx0);
+      final segs = (ellipseSegments + 2).clamp(6, 24);
+      for (int k = 0; k <= segs; k++) {
+        // theta = pi -> A (left mouth), theta = 0 -> B (right mouth),
+        // bulging backward (-travel) through theta = pi/2.
+        final theta = math.pi - math.pi * (k / segs);
+        final cosT = math.cos(theta);
+        final sinT = math.sin(theta);
+        result.add(Offset(
+          mx + cx * halfLen * cosT - tx * h * sinT,
+          my + cy * halfLen * cosT - ty * h * sinT,
+        ));
+      }
+    }
+
+    if (len >= 2) {
+      addStartMouthCap();
 
       for (int i = 1; i < len; i++) result.add(rightSide[i]);
 
       final pLast = strokePoints[len - 1];
-      final pressureN = (pLast.pressure ?? 0.5).clamp(0.0, 1.0);
+      final pressureN = stableTipPressure(len - 1);
       final rN = size * 0.65 * (0.5 + pressureN * 0.5);
       final rNy = size * 0.12 * (0.5 + pressureN * 0.5);
       addEllipticalCap(pLast.x, pLast.y, endDirX, endDirY, rN, rNy, false);
@@ -2350,6 +2272,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             easing: StrokeOptions.defaultEasing,
           ),
         ),
+        // Round both sides of hairpin returns into tip bulbs; the legacy
+        // single-sided bevel reads square-ish at sharp U-turns.
+        dualSidedReturnJoins: true,
       );
     } catch (e, st) {
       log.warning('getStroke crashed in buildBallpointStyleOutline: $e', e, st);
@@ -2553,10 +2478,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint
-        ..googleInkFamily = googleInkFamily
-        ..googleInkEpsilon = googleInkEpsilon
-        ..googleInkSmoothingMs = googleInkSmoothingMs;
+        ..paint = paint;
 
   /// Freehand ink that can be rewritten as another pen (not shapes).
   bool get canConvertStrokeType =>
@@ -2568,7 +2490,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           toolId == ToolId.calligraphyPen ||
           toolId == ToolId.advancedPen ||
           toolId == ToolId.advancedPencil ||
-          toolId == ToolId.experimentalPen ||
           toolId == ToolId.highlighter);
 
   /// Same path samples/color/page, with a new tool identity and style.
@@ -2593,10 +2514,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ..rotationDeg = rotationDeg
           ..flatEdge = flatEdge
           ..neon = neon
-          ..paint = paint
-          ..googleInkFamily = googleInkFamily
-          ..googleInkEpsilon = googleInkEpsilon
-          ..googleInkSmoothingMs = googleInkSmoothingMs;
+          ..paint = paint;
     rebuilt.markPolygonNeedsUpdating();
     return rebuilt;
   }
@@ -2613,10 +2531,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint
-        ..googleInkFamily = googleInkFamily
-        ..googleInkEpsilon = googleInkEpsilon
-        ..googleInkSmoothingMs = googleInkSmoothingMs;
+        ..paint = paint;
 
   static List<PointVector> _ramerDouglasPeucker(
     List<PointVector> points, {
@@ -2744,8 +2659,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   int get visualFingerprint {
-    // Cheap-pen live mesh and path tools both append [_predictionTip].
-    final inkUsesPredictionInPath = _allowsStrokeStabilizationAndPrediction;
+    // Cheap-pen live mesh and path tools both append the prediction tip.
+    final inkUsesPredictionInPath = _allowsMotionPrediction;
     return Object.hash(
       geometricFingerprint,
       toolId == ToolId.highlighter ? flatEdge : null,
@@ -2794,13 +2709,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   bool get needsTileMeshWarmup => false;
 
   /// Solid opaque mesh that page/tile batching can `drawVertices`.
-  /// Experimental (Google Ink) is path-only like Advanced Pen: single-source
-  /// geometry (`buildGoogleInkPolygon` -> `highQualityPath`) so tiled Picture
-  /// + temporary-raster LOD bake exactly what the vector path draws.
   bool get canBatchSolidMesh {
     if (toolId == ToolId.highlighter) return false;
     if (toolId == ToolId.advancedPen) return false;
-    if (toolId == ToolId.experimentalPen) return false;
     if (hasNonSolidPaint) return false;
     if (this is ShapeStroke ||
         this is CircleStroke ||
@@ -2832,11 +2743,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   /// Records a solid `drawPath` once when the outline mesh is unavailable
   /// (failed ear-clip, or translucent ink that cannot use `drawVertices`).
+  /// Replaying one baked picture per frame is far cheaper than
+  /// re-rasterizing paths during scroll/zoom.
   ui.Picture? ensureSolidPathPicture({
     required bool invert,
     required Color color,
   }) {
-    if (toolId != ToolId.advancedPen || !paint.isSolid || neon) return null;
+    // Solid ink pens only (extended beyond advancedPen for the same
+    // replay saving); neon renders through its own glow path.
+    final isSolidInkPen =
+        !neon &&
+        paint.isSolid &&
+        (toolId == ToolId.ballpointPen ||
+            toolId == ToolId.fountainPen ||
+            toolId == ToolId.calligraphyPen ||
+            toolId == ToolId.advancedPen);
+    if (!isSolidInkPen) return null;
     final hash = Object.hash(visualFingerprint, invert, color.toARGB32());
     if (_solidPathPicture != null && _solidPathPictureHash == hash) {
       return _solidPathPicture;
@@ -2902,9 +2824,29 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return _vectorFillPicture;
   }
 
+  /// Gentle 3-tap smoothing of sample pressures (positions untouched).
+  /// Stylus pressure jitters sample-to-sample; without this the nib edge
+  /// wobbles and looks handmade in the bad sense. Caps, tangents and the
+  /// centerline are unaffected — only the width profile matures.
+  /// Deterministic: identical live and committed.
+  List<PointVector> _smoothPressureProfile(List<PointVector> spine) {
+    if (spine.length < 3) return spine;
+    final out = List<PointVector>.of(spine);
+    for (var i = 1; i < spine.length - 1; i++) {
+      final p0 = spine[i - 1].pressure ?? 0.5;
+      final p1 = spine[i].pressure ?? 0.5;
+      final p2 = spine[i + 1].pressure ?? 0.5;
+      out[i] = PointVector(
+        spine[i].x,
+        spine[i].y,
+        (p0 * 0.25 + p1 * 0.5 + p2 * 0.25).clamp(0.0, 1.0),
+      );
+    }
+    return out;
+  }
+
   List<PointVector> _prepareAdvancedSpine(
-    List<PointVector> basePoints, {
-    bool stabilizeStart = true,
+    List<PointVector> basePoints, {    bool stabilizeStart = true,
     bool stabilizeEnd = true,
     bool flattenEnds = true,
   }) {
@@ -3094,12 +3036,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (points.length < 2) return null;
 
     // Path-filled tools. Neon ballpoint still builds a mesh via
-    // [ensureMeshVertices] for the core. Experimental is path-only (Google Ink
-    // polygon) so committed tiles + raster LOD share one geometry source.
+    // [ensureMeshVertices] for the core.
     if ((neon && toolId == ToolId.ballpointPen) ||
         toolId == ToolId.advancedPen ||
         toolId == ToolId.advancedPencil ||
-        toolId == ToolId.experimentalPen ||
         toolId == ToolId.highlighter ||
         toolId == ToolId.laserPointer) {
       return null;
@@ -3540,9 +3480,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         : _capSegments;
 
     double toleranceMultiplier = 1.0;
-    if (toolId == ToolId.experimentalPen) {
-      toleranceMultiplier = math.max(0.1, smoothing * 3.0);
-    }
 
     // Same spine simplification live and committed — divergent tolerances popped
     // the mesh (especially caps / tips) between preview and finalized ink.
@@ -3617,12 +3554,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final double calliSin = isCalligraphy ? math.sin(-40 * math.pi / 180) : 0.0;
     final bool highlighterWantsCaps = isHighlighter && !flatEdge;
 
-    /// Round mesh caps: ballpoint always; advanced/experimental when [cap] is on
+    /// Round mesh caps: ballpoint always; advanced when [cap] is on
     /// (even with taper — round bulb instead of jittery chisel tips).
     final bool roundCapOverridesTaper =
         toolId == ToolId.advancedPen ||
-        toolId == ToolId.advancedPencil ||
-        toolId == ToolId.experimentalPen;
+        toolId == ToolId.advancedPencil;
 
     var generateStartCap =
         targetCapSegments > 0 &&
@@ -3744,7 +3680,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final double outwardDy = -startTy;
       final nx = -startTy, ny = startTx;
 
-      // Taper+cap couldn't both be true historically; Advanced/Experimental
+      // Taper+cap couldn't both be true historically; Advanced pens
       // allow both — do not multiply pressure away or the hemisphere is ~minimal
       // while the stem stays thick (strip blows up / gaps / pinhole lifts).
       double hemisP0 = usePressure ? p0p : 0.5;
@@ -3790,8 +3726,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       );
       taperLenEndMesh = (endCustomTaper ?? 12).round().clamp(4, 64);
     } else if (toolId == ToolId.advancedPen ||
-        toolId == ToolId.advancedPencil ||
-        toolId == ToolId.experimentalPen) {
+        toolId == ToolId.advancedPencil) {
       taperLenStartMesh = (startCustomTaper ?? 10).round().clamp(
         4,
         64,

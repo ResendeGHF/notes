@@ -16,7 +16,6 @@ import 'package:saber/data/editor/stroke_paint.dart';
 import 'package:saber/data/flavor_config.dart';
 import 'package:saber/data/pen_stroke_preset_scaling.dart';
 import 'package:saber/data/tools/_tool.dart';
-import 'package:saber/data/tools/google_ink_brush.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:stow/stow.dart';
 import 'package:stow_codecs/stow_codecs.dart';
@@ -63,6 +62,12 @@ class Stows {
     'appTheme',
     ThemeMode.system,
     codec: const EnumCodec(ThemeMode.values),
+    volatile: !_isOnMainIsolate,
+  );
+
+  final pureBlack = PlainStow(
+    'pureBlack',
+    false,
     volatile: !_isOnMainIsolate,
   );
 
@@ -544,7 +549,6 @@ class Stows {
       ToolId.fountainPen.id: List<int>.from(modernPalette),
       ToolId.advancedPen.id: List<int>.from(modernPalette),
       ToolId.advancedPencil.id: List<int>.from(modernPalette),
-      ToolId.experimentalPen.id: List<int>.from(modernPalette),
       ToolId.shapePen.id: List<int>.from(modernPalette),
       ToolId.highlighter.id: List<int>.from(highlighterPalette),
       ToolId.laserPointer.id: List<int>.from(laserPalette),
@@ -560,7 +564,6 @@ class Stows {
     ToolId.shapePen,
     ToolId.advancedPen,
     ToolId.advancedPencil,
-    ToolId.experimentalPen,
   ];
 
   static Map<String, List<int>> _penFavoriteColorsFromJson(Object? json) {
@@ -624,38 +627,6 @@ class Stows {
 
   final advancedPencilPresets = PlainStow.json(
     'advancedPencilPresets',
-    <Map<String, dynamic>>[],
-    fromJson: _advancedPenPresetsFromJson,
-    volatile: !_isOnMainIsolate,
-  );
-
-  static GoogleInkBrushConfig _googleInkBrushFromJson(Object? json) {
-    if (json is Map<String, dynamic>) {
-      return GoogleInkBrushConfig.fromJson(json);
-    }
-    if (json is Map) {
-      return GoogleInkBrushConfig.fromJson(Map<String, dynamic>.from(json));
-    }
-    return GoogleInkBrushConfig();
-  }
-
-  /// Experimental (Google Ink) brush config + color + presets. Persisted
-  /// separately from Advanced Pen so the test bench never clobbers user ink.
-  final lastExperimentalInkBrush = PlainStow.json(
-    'lastExperimentalInkBrush',
-    GoogleInkBrushConfig(),
-    fromJson: _googleInkBrushFromJson,
-    volatile: !_isOnMainIsolate,
-  );
-
-  final lastExperimentalPenColor = PlainStow(
-    'lastExperimentalPenColor',
-    Colors.black.toARGB32(),
-    volatile: !_isOnMainIsolate,
-  );
-
-  final experimentalPenPresets = PlainStow.json(
-    'experimentalPenPresets',
     <Map<String, dynamic>>[],
     fromJson: _advancedPenPresetsFromJson,
     volatile: !_isOnMainIsolate,
@@ -852,6 +823,15 @@ class Stows {
     volatile: !_isOnMainIsolate,
   );
 
+  /// Minutes the vault stays unlocked while the app is in the background
+  /// before auto-locking. 0 = lock immediately when backgrounded.
+  /// Clamped to 0..30 (see [vaultAutoLockTimeoutMinutesOrDefault]).
+  final vaultAutoLockTimeoutMinutes = PlainStow(
+    'vaultAutoLockTimeoutMinutes',
+    0,
+    volatile: !_isOnMainIsolate,
+  );
+
   final vaultPdfLoadMode = PlainStow(
     'vaultPdfLoadMode',
     'ram_only',
@@ -1018,6 +998,24 @@ class _MapStringStringDecoder extends Converter<Object?, Map<String, String>> {
 
 String _normalizePathForOverride(String path) {
   return path.replaceAll('\\', '/').replaceFirst(RegExp(r'^/'), '').trim();
+}
+
+/// Max grace period (minutes) the vault may stay unlocked in background.
+const vaultAutoLockTimeoutMaxMinutes = 30;
+
+/// Allowed timeout choices shown in Settings (0 = lock immediately).
+const vaultAutoLockTimeoutOptionsMinutes = [0, 1, 2, 5, 10, 15, 30];
+
+/// Clamped vault auto-lock timeout in minutes (0..30, 0 = immediate).
+int vaultAutoLockTimeoutMinutesOrDefault() {
+  try {
+    return stows.vaultAutoLockTimeoutMinutes.value.clamp(
+      0,
+      vaultAutoLockTimeoutMaxMinutes,
+    );
+  } catch (_) {
+    return 0;
+  }
 }
 
 String getEffectiveVaultPdfLoadMode(String filePath) {

@@ -815,17 +815,31 @@ class _SplitEditorPageState extends State<SplitEditorPage> {
 Future<String?> _pickNotePath(
   BuildContext context, {
   required Set<String> excludePaths,
+  String title = 'Open Second Note',
+  String subtitle =
+      'Browse folders, search names or tags, or create a note for split view.',
 }) async {
   return showDialog<String>(
     context: context,
-    builder: (context) => _NotePickerDialog(excludePaths: excludePaths),
+    builder: (context) => _NotePickerDialog(
+      excludePaths: excludePaths,
+      title: title,
+      subtitle: subtitle,
+    ),
   );
 }
 
 class _NotePickerDialog extends StatefulWidget {
-  const _NotePickerDialog({required this.excludePaths});
+  const _NotePickerDialog({
+    required this.excludePaths,
+    this.title = 'Open Second Note',
+    this.subtitle =
+        'Browse folders, search names or tags, or create a note for split view.',
+  });
 
   final Set<String> excludePaths;
+  final String title;
+  final String subtitle;
 
   @override
   State<_NotePickerDialog> createState() => _NotePickerDialogState();
@@ -931,10 +945,12 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
     if (children == null) return null;
 
     final directories =
-        children.directories.where((name) => !name.startsWith('.')).toList()
+        children.directories
+            .where((name) => !FileManager.isTempSystemFileName(name))
+            .toList()
           ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
     final files = children.files.where((name) {
-      if (name.startsWith('.')) return false;
+      if (FileManager.isTempSystemFileName(name)) return false;
       final path = _joinFile(directory, name);
       return !_excludedNormalized.contains(path);
     }).toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
@@ -1045,14 +1061,14 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          'Open Second Note',
+                          widget.title,
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w700,
                             letterSpacing: -0.35,
                           ),
                         ),
                         Text(
-                          'Browse folders, search names or tags, or create a note for split view.',
+                          widget.subtitle,
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: colorScheme.onSurfaceVariant,
                           ),

@@ -195,8 +195,6 @@ NoteToolSettings captureNoteToolSettings({
   } else if (cp.toolId == ToolId.advancedPen) {
     advancedOpts = cp.options;
     advancedColor = cp.color.value;
-  } else if (cp.toolId == ToolId.experimentalPen) {
-    // Experimental keeps its own brush prefs; do not clobber Advanced Pen.
   }
 
   highlighterOpts = ch.options;
@@ -368,8 +366,6 @@ Pen _penFromType(ToolId id) {
     case ToolId.shapePen:
       return Pen.ballpointPen();
     case ToolId.advancedPen:
-      return Pen.advancedPen();
-    case ToolId.experimentalPen:
       return Pen.advancedPen();
     default:
       return Pen.ballpointPen();

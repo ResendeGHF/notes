@@ -75,7 +75,7 @@ class HomeDataCache {
           path: e['p'] as String,
           modifiedMillis: e['m'] as int,
           sizeBytes: e['s'] as int,
-        )).toList();
+        )).where((e) => FileManager.isVisibleHomeNotePath(e.path)).toList();
         _allNotes = notes;
         _allNotesByPath.clear();
         _allNotesByPath.addEntries(notes.map((e) => MapEntry(e.path, e)));
@@ -87,12 +87,19 @@ class HomeDataCache {
     return FileManager.notePathWithoutExtension(path);
   }
 
+  static bool _isVisibleRecentPath(String path) {
+    return FileManager.isVisibleHomeNotePath(path);
+  }
+
   static List<String> _normalizeNotePaths(Iterable<String> paths) {
     final out = <String>[];
     final seen = <String>{};
     for (final raw in paths) {
       final path = _normalizeNotePath(raw);
       if (path.isEmpty || !seen.add(path)) continue;
+      // Drop scratch / crash leftovers (`TmPmP_`, `tmp…`, `tpm…`, …) so a
+      // hard kill can never pin empty cards into Recent prefs / stale lists.
+      if (!_isVisibleRecentPath(path)) continue;
       out.add(path);
     }
     return out;
@@ -151,17 +158,23 @@ class HomeDataCache {
       if (raw == null || raw.isEmpty) return;
       final path = _normalizeNotePath(raw);
       if (path.isEmpty || !seen.add(path)) return;
+      if (!_isVisibleRecentPath(path)) return;
       normalized.add(path);
     }
 
     for (final p in paths) {
       addPath(p);
     }
-    if (normalized.isEmpty) return;
+    if (normalized.isEmpty) {
+      // Still scrub any scratch entries that may already sit in prefs/stale.
+      _optimisticRecent.removeWhere((p) => !_isVisibleRecentPath(p));
+      return;
+    }
 
     for (final p in normalized) {
       _optimisticRecent.add(p);
     }
+    _optimisticRecent.removeWhere((p) => !_isVisibleRecentPath(p));
 
     final existing =
         _recent ?? _recentStale ?? List<String>.from(stows.recentFiles.value);
@@ -209,6 +222,10 @@ class HomeDataCache {
   void upsertNoteIndex(NoteIndexEntry entry) {
     final path = _normalizeNotePath(entry.path);
     if (path.isEmpty) return;
+    if (!_isVisibleRecentPath(path)) {
+      _removeFromAllNotes(path);
+      return;
+    }
     final stored = path == entry.path
         ? entry
         : NoteIndexEntry(
@@ -260,10 +277,14 @@ class HomeDataCache {
   }
 
   void _setAllNotes(List<NoteIndexEntry> notes) {
-    _allNotes = notes;
+    final visible = [
+      for (final e in notes)
+        if (_isVisibleRecentPath(e.path)) e,
+    ];
+    _allNotes = visible;
     _allNotesByPath
       ..clear()
-      ..addEntries(notes.map((e) => MapEntry(e.path, e)));
+      ..addEntries(visible.map((e) => MapEntry(e.path, e)));
     _saveRecentMetaCache();
   }
 
@@ -349,12 +370,7 @@ class HomeDataCache {
     }
 
     final filtered = normalizedPaths.where((file) {
-      final name = file.split('/').last;
-      return !name.startsWith('.') &&
-          !name.startsWith('TmPmP_') &&
-          !name.contains('.sbn2.') &&
-          !name.endsWith('.sbn2') &&
-          !name.endsWith('.sbn');
+      return FileManager.isVisibleHomeNotePath(file);
     }).toList();
 
     List<String> filesToSort;
@@ -444,10 +460,7 @@ class HomeDataCache {
       return;
     }
     final filtered = children.where((file) {
-      final name = file.split('/').last;
-      return !name.startsWith('.') &&
-          !name.startsWith('TmPmP_') &&
-          !name.contains('.sbn2.');
+      return FileManager.isVisibleHomeNotePath(file);
     }).toList();
     await SortNotes.sortNotes(
       filtered,
@@ -511,12 +524,10 @@ class HomeDataCache {
       return;
     }
     var filteredDirs = rawChildren.directories
-        .where((d) => !d.startsWith('.'))
+        .where((d) => !FileManager.isTempSystemFileName(d))
         .toList();
     final filteredFiles = rawChildren.files.where((f) {
-      return !f.startsWith('.') &&
-          !f.startsWith('TmPmP_') &&
-          !f.contains('.sbn2.');
+      return FileManager.isVisibleHomeNotePath('/$f');
     }).toList();
 
     try {

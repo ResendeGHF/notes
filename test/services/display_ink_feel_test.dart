@@ -16,9 +16,6 @@ void main() {
       final feel = DisplayInkFeel.instance..updateRefreshHz(60);
       expect(feel.isLowRefresh, isTrue);
       expect(feel.stabilizationScale, closeTo(0.32, 0.001));
-      expect(feel.predictionLookaheadBoostSec, closeTo(0.022, 0.001));
-      expect(feel.predictionDistanceScale, greaterThan(1.4));
-      expect(feel.rawTipBlend, closeTo(0.86, 0.001));
       expect(feel.maxGapFills, 2);
       expect(feel.panTouchSlopFactor, closeTo(0.35, 0.001));
       expect(feel.panDeltaGain, greaterThan(1.04));
@@ -33,9 +30,6 @@ void main() {
       final feel = DisplayInkFeel.instance..updateRefreshHz(120);
       expect(feel.isLowRefresh, isFalse);
       expect(feel.stabilizationScale, 1.0);
-      expect(feel.predictionLookaheadBoostSec, 0.0);
-      expect(feel.predictionDistanceScale, 1.0);
-      expect(feel.rawTipBlend, 0.0);
       expect(feel.maxGapFills, 3);
       expect(feel.panTouchSlopFactor, 1.0);
       expect(feel.panDeltaGain, 1.0);

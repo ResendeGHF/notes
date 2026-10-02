@@ -30,7 +30,6 @@ enum ToolId {
   calligraphyPen('calligraphyPen'),
   shapePen('ShapePen'),
   advancedPen('advancedPen'),
-  experimentalPen('experimentalPen'),
   shapeTool('ShapeTool'),
   eraser('Eraser'),
   select('Select'),
@@ -68,8 +67,11 @@ enum ToolId {
         penType == 'HorizontalSpacePen') {
       return .ballpointPen;
     }
-    // Experimental pen is a first-class Google Ink test pen (own prefs +
-    // brush config). Legacy notes that stored it keep working as-is.
+    // Removed experimental (Google Ink test) pen: old notes keep working as
+    // fountain pen (pressure-sensitive round tip, closest look).
+    if (penType == 'experimentalPen') {
+      return .fountainPen;
+    }
     for (final toolId in ToolId.values) {
       if (penType == toolId.id) {
         return toolId;
@@ -111,7 +113,7 @@ class _ToolIdPrefCodec extends AbstractCodec<ToolId, Object?> {
       ToolId.ballpointPen, // 5 was verticalSpacePen
       ToolId.ballpointPen, // 6 was horizontalSpacePen
       ToolId.advancedPen, // 7
-      ToolId.experimentalPen, // 8 experimental (Google Ink test pen)
+      ToolId.fountainPen, // 8 was experimentalPen (removed test pen)
       ToolId.shapeTool, // 9
       ToolId.eraser, // 10
       ToolId.select, // 11

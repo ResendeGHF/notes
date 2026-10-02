@@ -476,6 +476,147 @@ class VaultAdapter {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Background auto-lock with user-configurable grace timeout.
+  //
+  // [stows.vaultAutoLockTimeoutMinutes] (0..30, 0 = immediate) controls how
+  // long the vault may stay unlocked while the app is backgrounded
+  // (paused/hidden). [onAppBackgrounded] schedules a lock after the timeout;
+  // [onAppResumed] cancels it (or locks immediately if the timeout already
+  // elapsed while suspended — Dart timers may not fire when the OS suspends
+  // the app). [onAppDetached] (app closed) and [onDeviceLocked] (screen off)
+  // always lock immediately, even within the grace period.
+  // ---------------------------------------------------------------------------
+  static Timer? _autoLockTimer;
+  static DateTime? _backgroundedAt;
+  static bool _isInBackground = false;
+
+  /// Clamped timeout (minutes). 0 = lock immediately when backgrounded.
+  static int get autoLockTimeoutMinutes {
+    try {
+      final v = stows.vaultAutoLockTimeoutMinutes.value;
+      if (v < 0) return 0;
+      if (v > 30) return 30;
+      return v;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// True while a background grace-period lock is pending.
+  static bool get hasPendingAutoLock => _autoLockTimer?.isActive ?? false;
+
+  static void _cancelPendingAutoLockTimerOnly() {
+    _autoLockTimer?.cancel();
+    _autoLockTimer = null;
+  }
+
+  /// Clears any pending grace-period lock and background state.
+  /// Called on resume, unlock, and after locking.
+  static void cancelPendingAutoLock() {
+    _cancelPendingAutoLockTimerOnly();
+    _backgroundedAt = null;
+    _isInBackground = false;
+  }
+
+  /// Called when the app leaves the foreground (paused/hidden).
+  /// With timeout 0 the vault locks immediately (historic behavior);
+  /// otherwise a lock is scheduled after the timeout unless the app
+  /// resumes first.
+  static void onAppBackgrounded() {
+    if (!stows.localEncryptionEnabled.value) {
+      cancelPendingAutoLock();
+      return;
+    }
+    if (!isUnlocked) {
+      cancelPendingAutoLock();
+      return;
+    }
+    if (preventLock) {
+      log.info(
+        'Vault auto-lock prevented due to active file operation',
+      );
+      return;
+    }
+    final timeout = autoLockTimeoutMinutes;
+    if (timeout <= 0) {
+      cancelPendingAutoLock();
+      unawaited(lockAndGoToLogin());
+      return;
+    }
+    _isInBackground = true;
+    _backgroundedAt = DateTime.now();
+    _cancelPendingAutoLockTimerOnly();
+    _autoLockTimer = Timer(Duration(minutes: timeout), () {
+      if (!_isInBackground) return;
+      if (!isUnlocked) {
+        cancelPendingAutoLock();
+        return;
+      }
+      log.info(
+        'Vault auto-lock timeout expired after $timeout min in background',
+      );
+      unawaited(lockAndGoToLogin());
+    });
+  }
+
+  /// Called when the app returns to the foreground.
+  /// Cancels a still-valid grace period, or locks immediately when the
+  /// timeout already elapsed while the app was suspended.
+  static void onAppResumed() {
+    if (!stows.localEncryptionEnabled.value) {
+      cancelPendingAutoLock();
+      return;
+    }
+    if (!isUnlocked) {
+      cancelPendingAutoLock();
+      ensureLoginRouteIfLocked();
+      return;
+    }
+    final timeout = autoLockTimeoutMinutes;
+    final bgAt = _backgroundedAt;
+    if (_isInBackground && bgAt != null && timeout > 0) {
+      final elapsed = DateTime.now().difference(bgAt);
+      if (elapsed >= Duration(minutes: timeout)) {
+        log.info(
+          'Vault auto-lock timeout elapsed in background '
+          '(${elapsed.inSeconds}s >= ${timeout}m)',
+        );
+        _isInBackground = false;
+        unawaited(lockAndGoToLogin());
+        return;
+      }
+    }
+    cancelPendingAutoLock();
+  }
+
+  /// Called when the app is closing (detached). Always locks immediately,
+  /// even within the grace period.
+  static void onAppDetached() {
+    _isInBackground = false;
+    if (!stows.localEncryptionEnabled.value) {
+      cancelPendingAutoLock();
+      return;
+    }
+    if (!isUnlocked) {
+      cancelPendingAutoLock();
+      return;
+    }
+    cancelPendingAutoLock();
+    unawaited(lockAndGoToLogin());
+  }
+
+  /// Called when the OS reports the device screen was locked.
+  /// Always locks immediately, even within the grace period.
+  /// (Wired via the `com.resendeghf.notes/vault_lock` MethodChannel on
+  /// Android; other platforms simply never invoke it.)
+  static void onDeviceLocked() {
+    if (!stows.localEncryptionEnabled.value) return;
+    if (!isUnlocked) return;
+    log.info('Device locked — locking vault immediately');
+    unawaited(lockAndGoToLogin());
+  }
+
   /// Bound from [App] so lock redirects can navigate without circular imports.
   static GoRouter? _router;
   static void bindRouter(GoRouter router) => _router = router;
@@ -615,6 +756,8 @@ class VaultAdapter {
 
       _isUnlocked = true;
       unlockState.value = true;
+      // Fresh foreground unlock — drop any stale background grace period.
+      cancelPendingAutoLock();
       log.info('Vault unlocked successfully. FBA Ready.');
       _attachSecurePdfPolicyListeners();
       _scheduleIdleGcmMigration();
@@ -2634,6 +2777,8 @@ class VaultAdapter {
     _gcmMigrationTimer?.cancel();
     _gcmMigrationTimer = null;
     _detachSecurePdfPolicyListeners();
+    // A manual or automatic lock ends any background grace period.
+    cancelPendingAutoLock();
 
     // Mark locked immediately so GoRouter can redirect to login before
     // (potentially slow) DB flush / cleanup finishes.

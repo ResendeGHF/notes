@@ -483,7 +483,7 @@ class FileManager {
 
   static bool isCountableFile(String path) {
     final name = p.basename(path);
-    if (name.startsWith('.')) return false;
+    if (isTempSystemFileName(name)) return false;
     if (name.endsWith('.p')) return false;
     if (assetFileRegex.hasMatch(name)) return false;
 
@@ -501,7 +501,7 @@ class FileManager {
 
   static bool isFolderSizeTrackedFile(String path) {
     final name = p.basename(path);
-    if (name.startsWith('.')) return false;
+    if (isTempSystemFileName(name)) return false;
 
     final normalized = path.toLowerCase();
     if (normalized.contains('/data/') ||
@@ -516,6 +516,84 @@ class FileManager {
         path.endsWith(Editor.extensionOldJson) ||
         name.endsWith('.p') ||
         assetFileRegex.hasMatch(name);
+  }
+
+  /// True when [fileName] (basename only) is a scratch / crash leftover that
+  /// must never appear in Home / Search / Browse.
+  ///
+  /// Case-insensitive on purpose: crash leftovers have been seen as `tmp…`,
+  /// `tpm…`, `tptm…` in varying case, plus Saber's own `TmPmP_` scratch prefix
+  /// in any case (`tmpmp_` lowercased).
+  ///
+  /// When [includeAssetSidecars] is false (default) also treats note asset
+  /// sidecars (`note.sbn2.0`, thumbnails) as temp – they are never notes.
+  /// Pass true when listing with `includeAssets` so real `*.sbn2.N` assets are
+  /// kept and only true scratch files are dropped.
+  static bool isTempSystemFileName(
+    String fileName, {
+    bool includeAssetSidecars = false,
+  }) {
+    if (fileName.isEmpty) return true;
+    if (fileName.startsWith('.')) return true;
+    final lower = fileName.toLowerCase();
+    // Saber scratch prefix `TmPmP_` in any case.
+    if (lower.startsWith('tmpmp_') || lower.startsWith('tmpmp')) return true;
+    // Generic crash leftovers reported as `tmp…` / `tpm…` / `tptm…` (any case).
+    if (lower.startsWith('tmp') ||
+        lower.startsWith('tpm') ||
+        lower.startsWith('tptm')) {
+      return true;
+    }
+    // `temp_123`, `temp-foo`, `temp.1`, `temp2` – but not `temperature`.
+    if (lower == 'temp' ||
+        lower.startsWith('temp_') ||
+        lower.startsWith('temp-') ||
+        lower.startsWith('temp.') ||
+        (lower.startsWith('temp') &&
+            lower.length > 4 &&
+            lower.codeUnitAt(4) >= 48 &&
+            lower.codeUnitAt(4) <= 57)) {
+      return true;
+    }
+    // Atomic-write / backup leftovers.
+    if (lower.contains('.tmp_') || lower.contains('.old_')) return true;
+    if (lower.endsWith('.tmp') ||
+        lower.endsWith('.temp') ||
+        lower.endsWith('.bak') ||
+        lower.endsWith('~')) {
+      return true;
+    }
+    if (lower.endsWith('.recovery') || lower.contains('.recovery')) return true;
+    // Note asset sidecars `note.sbn2.0`, `note.sbn.1`, thumbnails `note.sbn2.p`.
+    // Skipped when the caller explicitly lists assets (`includeAssets`).
+    if (!includeAssetSidecars &&
+        (lower.contains('.sbn2.') || lower.contains('.sbn.'))) {
+      return true;
+    }
+    return false;
+  }
+
+  /// True when [path] (note base path, no `.sbn2`) may be shown in Home lists.
+  /// Filters scratch dirs, internal dirs and [isTempSystemFileName] basenames.
+  static bool isVisibleHomeNotePath(String path) {
+    if (path.isEmpty) return false;
+    final forward = path.replaceAll('\\', '/');
+    final lowerPath = forward.toLowerCase();
+    if (lowerPath.contains('/data/') ||
+        lowerPath.startsWith('data/') ||
+        lowerPath == 'data' ||
+        lowerPath.contains('/file_picker/') ||
+        lowerPath.startsWith('file_picker/')) {
+      return false;
+    }
+    // Scratch dir `/.tmpAssets/` – its files are never notes.
+    if (lowerPath.contains('/.tmpassets') ||
+        lowerPath.startsWith('.tmpassets')) {
+      return false;
+    }
+    final name = forward.split('/').last;
+    if (name.isEmpty) return false;
+    return !isTempSystemFileName(name);
   }
 
   static Future<void> init({
@@ -2190,8 +2268,7 @@ class FileManager {
   }
 
   static bool _shouldSkipFolderArchiveFile(String fileName) {
-    if (fileName.startsWith('.')) return true;
-    if (fileName.startsWith('TmPmP_')) return true;
+    if (isTempSystemFileName(fileName)) return true;
     if (fileName.endsWith('.p')) return true;
     return false;
   }
@@ -2962,6 +3039,7 @@ class FileManager {
         final dirName = parts.first;
         if (dirName.isEmpty) continue;
         if (dirName == 'data' || dirName == 'file_picker') continue;
+        if (isTempSystemFileName(dirName)) continue;
         if (!seenDirs.contains(dirName)) {
           directories.add(dirName);
           seenDirs.add(dirName);
@@ -2976,6 +3054,7 @@ class FileManager {
         if (parts.length > 1) {
           final dirName = parts[0];
           if (dirName == 'data' || dirName == 'file_picker') continue;
+          if (isTempSystemFileName(dirName)) continue;
           if (!VaultAdapter.hasConsecutiveDuplicateSegment(
                 '$directory$dirName/',
               ) &&
@@ -2989,6 +3068,28 @@ class FileManager {
           if (fileName == '.nomedia') continue;
 
           if (Editor.isReservedPath('/$fileName')) continue;
+          if (isTempSystemFileName(
+            fileName,
+            includeAssetSidecars: includeAssets,
+          )) {
+            continue;
+          }
+          if (!includeAssets) {
+            // Hide scratch leftovers even when they carry a note extension
+            // (`tmpFoo.sbn2` from a killed save still has no valid body).
+            final baseForVisible = fileName.endsWith(Editor.extension)
+                ? fileName.substring(
+                    0,
+                    fileName.length - Editor.extension.length,
+                  )
+                : fileName.endsWith(Editor.extensionOldJson)
+                ? fileName.substring(
+                    0,
+                    fileName.length - Editor.extensionOldJson.length,
+                  )
+                : fileName;
+            if (!isVisibleHomeNotePath('$directory$baseForVisible')) continue;
+          }
 
           late final isSbn2 = fileName.endsWith(Editor.extension);
           late final isSbn1 = fileName.endsWith(Editor.extensionOldJson);
@@ -3041,6 +3142,12 @@ class FileManager {
       if (name == 'data' || name == 'file_picker' || name == '.nomedia') {
         continue;
       }
+      if (isTempSystemFileName(
+        name,
+        includeAssetSidecars: includeAssets,
+      )) {
+        continue;
+      }
       final filePath = entity.path.substring(documentsDirectory.length);
 
       if (entity is Directory) {
@@ -3052,6 +3159,25 @@ class FileManager {
       }
 
       if (Editor.isReservedPath(filePath)) continue;
+      if (!includeAssets) {
+        final baseForVisible = filePath.endsWith(Editor.extension)
+            ? filePath.substring(
+                0,
+                filePath.length - Editor.extension.length,
+              )
+            : filePath.endsWith(Editor.extensionOldJson)
+            ? filePath.substring(
+                0,
+                filePath.length - Editor.extensionOldJson.length,
+              )
+            : null;
+        // Only note bodies reach Home lists; scratch `.sbn2` leftovers
+        // (`tmpFoo.sbn2`) are dropped even though they carry an extension.
+        if (baseForVisible != null &&
+            !isVisibleHomeNotePath(baseForVisible)) {
+          continue;
+        }
+      }
 
       final isSbn2 = filePath.endsWith(Editor.extension);
       final isSbn1 = filePath.endsWith(Editor.extensionOldJson);
@@ -3100,6 +3226,21 @@ class FileManager {
             normalized.contains('/file_picker/') ||
             normalized.startsWith('file_picker/')) {
           continue;
+        }
+        if (normalized.contains('/.tmpassets') ||
+            normalized.startsWith('.tmpassets')) {
+          continue;
+        }
+        if (isTempSystemFileName(
+          p.basename(path),
+          includeAssetSidecars: includeAssets,
+        )) {
+          continue;
+        }
+        // Scratch note bodies (`tmpFoo.sbn2`) are never real notes.
+        if (!includeAssets) {
+          final base = notePathWithoutExtension(path);
+          if (base != path && !isVisibleHomeNotePath(base)) continue;
         }
         final isSbn2 = path.endsWith(Editor.extension);
         final isSbn1 = path.endsWith(Editor.extensionOldJson);
@@ -3150,11 +3291,7 @@ class FileManager {
   }
 
   static bool _isVisibleHomeNotePath(String path) {
-    final name = path.split('/').last;
-    return name.isNotEmpty &&
-        !name.startsWith('.') &&
-        !name.startsWith('TmPmP_') &&
-        !name.contains('.sbn2.');
+    return isVisibleHomeNotePath(path);
   }
 
   /// Every user note with last-modified and size. Used by Recent (all notes)
@@ -3259,6 +3396,8 @@ class FileManager {
               normalized.startsWith('file_picker/')) {
             return false;
           }
+          final base = notePathWithoutExtension(file);
+          if (!isVisibleHomeNotePath(base)) return false;
           return true;
         })
         .map(notePathWithoutExtension)
@@ -4100,6 +4239,9 @@ class FileManager {
     // thumbnails (`note.sbn2.sbn2.p`) and shows the extension in titles.
     final basePath = notePathWithoutExtension(filePath);
     if (basePath.isEmpty) return;
+    // Never pin scratch / crash leftovers (`TmPmP_`, `tmp…`, `tpm…`, …) into
+    // Recent – they show up as empty cards until the next refresh.
+    if (!isVisibleHomeNotePath(basePath)) return;
 
     // Single path into the Recent window: inserts at front and drops the
     // oldest when at capacity so the home grid never grows a lonely row.

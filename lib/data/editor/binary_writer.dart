@@ -354,7 +354,8 @@ abstract class StrokeBinaryKeys {
   /// JSON string of [StrokePaint] for textured/gradient fills.
   static const int strokePaint = 121;
 
-  /// Google Ink snapshot (experimental pen only).
+  /// Removed Google Ink snapshot (experimental pen). Keys reserved: old
+  /// files still carry them and readers drain-and-discard the values.
   static const int googleInkFamily = 122;
   static const int googleInkEpsilon = 123;
   static const int googleInkSmoothingMs = 124;

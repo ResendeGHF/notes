@@ -12,7 +12,6 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:saber/components/toolbar/advanced_pen_panel.dart';
 import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/color_toolbar.dart';
-import 'package:saber/components/toolbar/experimental_pen_panel.dart';
 import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/pen_size_preset_toolbar.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
@@ -789,9 +788,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
         case ToolId.advancedPen:
           _selectedPen = Pen.advancedPen();
           break;
-        case ToolId.experimentalPen:
-          _selectedPen = Pen.experimental();
-          break;
         case ToolId.advancedPencil:
           _selectedPen = Pen.advancedPencil();
           break;
@@ -863,11 +859,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
           ],
         ),
         const SizedBox(height: 24),
-
-        if (_penHasFavoriteColors(activePen)) ...[
-          _buildPenColorSwatches(context, activePen, colorScheme),
-          const SizedBox(height: 16),
-        ],
 
         SizePicker(axis: Axis.horizontal, pen: activePen),
         const SizedBox(height: 16),
@@ -984,18 +975,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
             },
           ),
         ],
-        if (activePen.toolId == ToolId.experimentalPen) ...[
-          const Divider(height: 32),
-          ExperimentalPenPresets(
-            pen: activePen,
-            onChanged: () => setState(() {}),
-          ),
-          const Divider(height: 32),
-          ExperimentalPenSettings(
-            pen: activePen,
-            onChanged: () => setState(() {}),
-          ),
-        ],
       ],
     );
   }
@@ -1011,7 +990,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     Pen.fountainPen(),
     Pen.advancedPencil(),
     Pen.advancedPen(),
-    Pen.experimental(),
   ];
 
   IconData _penStyleSymbol(ToolId id) {
@@ -1021,7 +999,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       ToolId.fountainPen => Symbols.stylus_fountain_pen,
       ToolId.advancedPencil => Symbols.stylus_pencil,
       ToolId.advancedPen => Symbols.draw,
-      ToolId.experimentalPen => Symbols.science,
       _ => Symbols.ink_pen,
     };
   }
@@ -1101,193 +1078,6 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
         ),
       ),
     );
-  }
-
-  static bool _penHasFavoriteColors(Pen pen) {
-    switch (pen.toolId) {
-      case ToolId.ballpointPen:
-      case ToolId.calligraphyPen:
-      case ToolId.fountainPen:
-      case ToolId.advancedPen:
-      case ToolId.advancedPencil:
-      case ToolId.experimentalPen:
-      case ToolId.shapePen:
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  /// Advanced Pen/Pencil share Ballpoint's ink row so suggestions follow
-  /// the selected color preset.
-  static String _favoriteColorsKey(ToolId id) {
-    switch (id) {
-      case ToolId.advancedPen:
-      case ToolId.advancedPencil:
-        return ToolId.ballpointPen.id;
-      default:
-        return id.id;
-    }
-  }
-
-  Widget _buildPenColorSwatches(
-    BuildContext context,
-    Pen activePen,
-    ColorScheme colorScheme,
-  ) {
-    final favKey = _favoriteColorsKey(activePen.toolId);
-    final favorites =
-        stows.penFavoriteColors.value[favKey] ??
-        stows.penFavoriteColors.value[ToolId.ballpointPen.id];
-    final list = favorites ?? <int>[];
-    final defaultBorderColor = colorScheme.onSurface.withValues(alpha: 0.5);
-    return ValueListenableBuilder<Map<String, List<int>>>(
-      valueListenable: stows.penFavoriteColors,
-      builder: (context, value, child) {
-        final fav =
-            value[favKey] ?? value[ToolId.ballpointPen.id] ?? list;
-        final currentArgb = activePen.color.toARGB32();
-
-        int selectedIndex = 0;
-        for (int i = 0; i < 10 && i < fav.length; i++) {
-          if (fav[i] == currentArgb) {
-            selectedIndex = i + 1;
-            break;
-          }
-        }
-        return Row(
-          children: [
-            _colorSwatch(
-              context,
-              activePen.color.withInversion(widget.invert),
-              onTap: () => _openColorPickerForCurrent(context, activePen),
-              borderColor: selectedIndex == 0
-                  ? activePen.color.withInversion(widget.invert)
-                  : defaultBorderColor,
-            ),
-            ...List.generate(10, (i) {
-              final colorValue = i < fav.length ? fav[i] : 0xFF000000;
-              final color = Color(colorValue).withInversion(widget.invert);
-              final isSelected = selectedIndex == i + 1;
-              return Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: _colorSwatch(
-                  context,
-                  color,
-                  onTap: () => _applyFavoriteColor(activePen, colorValue),
-                  onDoubleTap: () =>
-                      _openColorPickerForFavoriteSlot(context, activePen, i),
-                  borderColor: isSelected ? color : defaultBorderColor,
-                ),
-              );
-            }),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _colorSwatch(
-    BuildContext context,
-    Color color, {
-    required VoidCallback onTap,
-    VoidCallback? onDoubleTap,
-    required Color borderColor,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      onDoubleTap: onDoubleTap,
-      child: SizedBox(
-        width: 28,
-        height: 28,
-        child: CustomPaint(
-          painter: _SmoothCirclePainter(
-            color: color,
-            borderColor: borderColor,
-            borderWidth: 2.0,
-            hasShadow: false,
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _applyFavoriteColor(Pen activePen, int colorValue) {
-    final color = Color(colorValue);
-    setState(() {
-      activePen.color = color;
-    });
-    Future.delayed(Duration.zero, () {
-      if (!mounted) return;
-      widget.setColor(color);
-      widget.setTool(activePen);
-      _persistPenColor(activePen.toolId, colorValue);
-    });
-  }
-
-  void _persistPenColor(ToolId toolId, int colorValue) {
-    switch (toolId) {
-      case ToolId.ballpointPen:
-        stows.lastBallpointPenColor.value = colorValue;
-      case ToolId.calligraphyPen:
-        stows.lastCalligraphyPenColor.value = colorValue;
-      case ToolId.fountainPen:
-        stows.lastFountainPenColor.value = colorValue;
-      case ToolId.advancedPen:
-        stows.lastAdvancedPenColor.value = colorValue;
-      case ToolId.advancedPencil:
-        stows.lastAdvancedPencilColor.value = colorValue;
-      default:
-    }
-  }
-
-  Future<void> _openColorPickerForCurrent(
-    BuildContext context,
-    Pen activePen,
-  ) async {
-    widget.onClose();
-    final pickedColor = await showNotesColorPicker(
-      context,
-      initialColor: activePen.color,
-    );
-    if (pickedColor == null) return;
-    activePen.color = pickedColor;
-    widget.setColor(pickedColor);
-    Pen.currentPen = activePen;
-    widget.setTool(activePen);
-    _persistPenColor(activePen.toolId, pickedColor.toARGB32());
-  }
-
-  Future<void> _openColorPickerForFavoriteSlot(
-    BuildContext context,
-    Pen activePen,
-    int slotIndex,
-  ) async {
-    final favKey = _favoriteColorsKey(activePen.toolId);
-    final favorites = List<int>.from(
-      stows.penFavoriteColors.value[favKey] ??
-          stows.penFavoriteColors.value[ToolId.ballpointPen.id]!,
-    );
-    while (favorites.length < 10) {
-      favorites.add(0xFF000000);
-    }
-    final initial = Color(
-      slotIndex < favorites.length ? favorites[slotIndex] : 0xFF000000,
-    );
-    widget.onClose();
-    final pickedColor = await showNotesColorPicker(
-      context,
-      initialColor: initial,
-    );
-    if (pickedColor == null || slotIndex >= 10) return;
-    favorites[slotIndex] = pickedColor.toARGB32();
-    final updated = Map<String, List<int>>.from(stows.penFavoriteColors.value);
-    updated[favKey] = favorites;
-    if (activePen.toolId == ToolId.advancedPen ||
-        activePen.toolId == ToolId.advancedPencil) {
-      updated[activePen.toolId.id] = List<int>.from(favorites);
-    }
-    stows.penFavoriteColors.value = updated;
   }
 }
 

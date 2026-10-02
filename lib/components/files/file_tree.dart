@@ -28,9 +28,13 @@ DirectoryChildren? _filterChildren(
   required Map<String, String> linkedFiles,
 }) {
   if (raw == null) return null;
-  final directories = raw.directories.where((d) => !d.startsWith('.')).toList()
+  final directories = raw.directories
+      .where((d) => !FileManager.isTempSystemFileName(d))
+      .toList()
     ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-  final files = raw.files.where((f) => !f.startsWith('.')).toList()
+  final files = raw.files
+      .where((f) => FileManager.isVisibleHomeNotePath('/$f'))
+      .toList()
     ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
   final sortedDirs = Map.fromEntries(
     linkedDirs.entries.toList()

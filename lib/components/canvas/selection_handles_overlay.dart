@@ -54,6 +54,14 @@ class SelectionHandlesOverlay extends StatelessWidget {
 
     final bool isActivelyRotating = selectionPreview != null && selectionPreview!.rotationDeltaDeg != 0.0;
 
+    // Badge background follows the accent, so the text color must be derived
+    // from it: with light accents (e.g. white in the Mono theme) fixed white
+    // text would be unreadable.
+    final badgeBackground = primaryColor.withValues(alpha: 0.95);
+    final badgeTextColor = primaryColor.computeLuminance() > 0.5
+        ? Colors.black
+        : Colors.white;
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -100,7 +108,7 @@ class SelectionHandlesOverlay extends StatelessWidget {
                 width: 88,
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 decoration: BoxDecoration(
-                  color: primaryColor.withValues(alpha: 0.95),
+                  color: badgeBackground,
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(color: Colors.black26, blurRadius: 6, offset: const Offset(0, 3))
@@ -108,7 +116,7 @@ class SelectionHandlesOverlay extends StatelessWidget {
                 ),
                 child: Text(
                   '${(rotationDeg % 360).toStringAsFixed(1)}°',
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5),
+                  style: TextStyle(color: badgeTextColor, fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5),
                   textAlign: TextAlign.center,
                 ),
               ),

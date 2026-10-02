@@ -48,35 +48,6 @@ class DisplayInkFeel {
     return 0.65;
   }
 
-  /// Extra seconds of motion-prediction lookahead beyond the user amount curve.
-  double get predictionLookaheadBoostSec {
-    final hz = _refreshHz;
-    if (hz >= 100) return 0.0;
-    if (hz >= 80) return 0.006;
-    // Slightly more than one 60 Hz frame of tip lead.
-    if (hz <= 72) return 0.022;
-    return 0.010;
-  }
-
-  /// Scales max prediction tip distance (page px).
-  double get predictionDistanceScale {
-    final hz = _refreshHz;
-    if (hz >= 100) return 1.0;
-    if (hz >= 80) return 1.15;
-    if (hz <= 72) return 1.55;
-    return 1.3;
-  }
-
-  /// How much the live tip origin leans toward the raw (unfiltered) stylus
-  /// position. At low Hz this hides stabilization lag at the visible tip.
-  double get rawTipBlend {
-    final hz = _refreshHz;
-    if (hz >= 100) return 0.0;
-    if (hz >= 80) return 0.35;
-    if (hz <= 72) return 0.86;
-    return 0.55;
-  }
-
   /// Gap-fill midpoints. At 60 Hz allow one midpoint (`2` with the existing
   /// `gapFillCount > 1` loop) so sparse samples do not leave a rubbery tip.
   int get maxGapFills {

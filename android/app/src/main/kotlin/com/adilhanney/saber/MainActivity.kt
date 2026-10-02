@@ -1,5 +1,9 @@
 package com.resendeghf.notes
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.Intent.FLAG_ACTIVITY_NEW_TASK
 import android.graphics.Color
 import android.os.Build
@@ -11,6 +15,38 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.concurrent.Executors
 
 class MainActivity: FlutterActivity() {
+    // Vault auto-lock: device screen-off must lock immediately even within
+    // the user-configured background grace timeout (see VaultAdapter).
+    // ACTION_SCREEN_OFF can only be received via a dynamically registered
+    // receiver; the event is forwarded to Dart over `vault_lock`.
+    private var vaultLockEngine: FlutterEngine? = null
+    private var screenOffReceiverRegistered = false
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            try {
+                vaultLockEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+                    MethodChannel(messenger, "com.resendeghf.notes/vault_lock")
+                        .invokeMethod("onDeviceLocked", null)
+                }
+            } catch (_: Throwable) {
+                // Engine gone (app closing) — keys die with the process anyway.
+            }
+        }
+    }
+
+    private fun ensureScreenOffReceiver() {
+        if (screenOffReceiverRegistered) return
+        try {
+            applicationContext.registerReceiver(
+                screenOffReceiver,
+                IntentFilter(Intent.ACTION_SCREEN_OFF),
+            )
+            screenOffReceiverRegistered = true
+        } catch (_: Throwable) {
+            // Non-fatal: background timeout + resume check still apply.
+        }
+    }
     // Parallel crypto/IO for vault blobs (reads can overlap; writes are still
     // ordered by Dart-side awaiting). Sized for aarch64 phone cores.
     private val vaultCryptoExecutor = Executors.newFixedThreadPool(
@@ -20,6 +56,8 @@ class MainActivity: FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        vaultLockEngine = flutterEngine
+        ensureScreenOffReceiver()
         // See MlKitInkCompat: the ML Kit digital ink handler can throw while
         // the engine auto-registers plugins (leaving its channel dead), so a
         // lazily-built delegate is installed here as a safety net.
@@ -27,14 +65,6 @@ class MainActivity: FlutterActivity() {
             MlKitInkCompat.registerLazy(flutterEngine)
         } catch (e: Throwable) {
             android.util.Log.w("MainActivity", "MlKitInkCompat install failed", e)
-        }
-        // Experimental Google Ink PlatformView (InProgressStrokesView + Brush).
-        // Isolated try/catch: the test bench must never break engine startup
-        // when androidx.ink artifacts are stripped or the device blocks them.
-        try {
-            GoogleInkPlugin.register(flutterEngine)
-        } catch (e: Throwable) {
-            android.util.Log.w("MainActivity", "GoogleInk install failed", e)
         }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -688,5 +718,17 @@ class MainActivity: FlutterActivity() {
 
         val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
         windowInsetsController.isAppearanceLightNavigationBars = true
+    }
+
+    override fun onDestroy() {
+        if (screenOffReceiverRegistered) {
+            try {
+                applicationContext.unregisterReceiver(screenOffReceiver)
+            } catch (_: Throwable) {
+            }
+            screenOffReceiverRegistered = false
+        }
+        vaultLockEngine = null
+        super.onDestroy()
     }
 }

@@ -97,13 +97,9 @@ import 'package:saber/data/routes.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
-import 'package:saber/data/tools/google_ink_brush.dart';
 import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/laser_pointer.dart';
 import 'package:saber/data/tools/pen.dart';
-import 'package:saber/components/canvas/google_ink_live_overlay.dart';
-import 'package:saber/services/google_ink_channel.dart'
-    show GoogleInkNative, GoogleInkFinishedStroke;
 import 'package:saber/data/tools/pen_size_preset_support.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/data/tools/shape_geometry.dart';
@@ -165,13 +161,6 @@ enum _CropHandle {
 }
 
 enum _EditorDockedSidePanel { none, pages, settings }
-
-class _NoteLinkHistoryEntry {
-  const _NoteLinkHistoryEntry({required this.path, this.pageIndex});
-
-  final String path;
-  final int? pageIndex;
-}
 
 /// Blocking progress dialog with live status text and user cancel, shared by
 /// the LaTeX export flows. [show] opens it once; [close] is idempotent and
@@ -253,6 +242,7 @@ class Editor extends StatefulWidget {
     this.viewportHeightOverride,
     this.initialPageIndexOverride,
     this.onEmbeddedChromeChanged,
+    this.onOpenNoteInNewTab,
   }) : initialPath = path != null
            ? Future.value(path)
            : FileManager.newFilePath('/'),
@@ -281,6 +271,11 @@ class Editor extends StatefulWidget {
 
   /// Split host should rebuild its chrome (app bar) when link-back stack changes.
   final VoidCallback? onEmbeddedChromeChanged;
+
+  /// Tabs host opens a linked note in another tab instead of replacing.
+  /// When null (split view / standalone), falls back to in-place replace.
+  final Future<void> Function(String path, {int? pageIndex})?
+      onOpenNoteInNewTab;
 
   static const extension = '.sbn2';
 
@@ -345,7 +340,6 @@ class EditorState extends State<Editor>
   MediaQueryData? _cachedMediaQuery;
 
   final _canvasGestureDetectorKey = GlobalKey<CanvasGestureDetectorState>();
-  final _googleInkOverlayKey = GlobalKey();
   final _transformationController = TransformationController();
   final _skipTransformClampForExpansion = ValueNotifier<bool>(false);
   final _suppressTransformClamp = ValueNotifier<bool>(false);
@@ -738,9 +732,6 @@ class EditorState extends State<Editor>
       case ToolId.advancedPencil:
         Pen.currentPen = Pen.advancedPencil();
         break;
-      case ToolId.experimentalPen:
-        Pen.currentPen = Pen.experimental();
-        break;
       case ToolId.fountainPen:
       default:
         Pen.currentPen = Pen.fountainPen();
@@ -754,7 +745,6 @@ class EditorState extends State<Editor>
       case .shapePen:
       case .advancedPen:
       case .advancedPencil:
-      case .experimentalPen:
         return Pen.currentPen;
       case .highlighter:
         return Highlighter.currentHighlighter;
@@ -929,9 +919,6 @@ class EditorState extends State<Editor>
   int? _lastPreviewGoToOriginPageIndex;
   bool _showGoBackAfterPreviewJump = false;
 
-  /// Stack of notes replaced by tapping an internal note link. Popping restores
-  /// the previous note in this same editor (single or split pane).
-  final List<_NoteLinkHistoryEntry> _noteLinkBackStack = [];
   bool _noteLinkNavBusy = false;
 
   final _mathSolver = MathSolverService();
@@ -1961,10 +1948,6 @@ class EditorState extends State<Editor>
 
     PageRasterCacheManager.addLodSettledListener(_onPageRasterLodSettled);
 
-    // Native Google Ink finished-stroke push (experimental pen). Commits a
-    // normal Stroke so tiled + temporary-raster LOD apply unchanged.
-    GoogleInkNative.setFinishedStrokeHandler(_commitNativeGoogleInkStroke);
-
     if (coreInfo.pages.isNotEmpty) {
     } else {}
 
@@ -2500,8 +2483,6 @@ class EditorState extends State<Editor>
       case ToolId.advancedPen:
         return Pen.currentPen;
       case ToolId.advancedPencil:
-        return Pen.currentPen;
-      case ToolId.experimentalPen:
         return Pen.currentPen;
       case ToolId.highlighter:
         return Highlighter.currentHighlighter;
@@ -3724,6 +3705,12 @@ class EditorState extends State<Editor>
   double? currentPressure;
   Duration currentTimestamp = Duration.zero;
 
+  /// Upstream predictor confidence ranges: every non-touch tool (stylus,
+  /// mouse, unknown) predicts at full speed factor; touch ramps over
+  /// 0–2 dp/ms.
+  bool get _pointerIsAccurateForPrediction =>
+      currentPointerKind != PointerDeviceKind.touch;
+
   Offset? _lastPenDragUpdatePosition;
   DateTime? _lastPenSignificantMoveAt;
   static const double _penHoldJitterThreshold = 12.0;
@@ -4224,6 +4211,13 @@ class EditorState extends State<Editor>
         dragPageIndex!,
         currentPressure,
         timestamp,
+      );
+      // Seed the predictor with the exact pen-down sample (page-local).
+      Pen.currentStroke?.recordPredictionSample(
+        position,
+        currentPressure,
+        timestamp,
+        accurateTool: _pointerIsAccurateForPrediction,
       );
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragStart(position, page, dragPageIndex!);
@@ -4819,6 +4813,15 @@ class EditorState extends State<Editor>
     if (dx * dx + dy * dy < minDistSq) return;
 
     final timestamp = event.timeStamp;
+    // Raw-only predictor feed (page-local, event clock): never the
+    // gesture-arena focal point — mixing coalesced samples fabricates
+    // teleports that project as tangent tips.
+    Pen.currentStroke?.recordPredictionSample(
+      position,
+      currentPressure,
+      timestamp,
+      accurateTool: event.kind != PointerDeviceKind.touch,
+    );
     _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
     previousPosition = position;
   }
@@ -5057,12 +5060,6 @@ class EditorState extends State<Editor>
             stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
               pen.paint.toJson(embedBytes: false),
             );
-            break;
-          case ToolId.experimentalPen:
-            // Size/color mirror the Google Ink brush; the brush itself is
-            // persisted live by the experimental panel (lastExperimentalInkBrush).
-            stows.lastExperimentalPenColor.value = pen.color.toARGB32();
-            stows.lastExperimentalInkBrush.value = pen.inkBrush.copy();
             break;
           default:
             break;
@@ -5362,139 +5359,6 @@ class EditorState extends State<Editor>
             : Velocity.zero,
       ),
     );
-  }
-
-  /// Commits a finished Google Ink (experimental pen) stroke pushed by Android.
-  ///
-  /// Samples arrive in overlay-local (screen) coordinates. They are mapped to
-  /// global via the overlay RenderBox, then to page-local via
-  /// [_safelyGetLocalPosition], and committed as a normal
-  /// `Stroke(toolId: experimentalPen)`. From here the stroke flows through the
-  /// identical tiled Picture + temporary-raster LOD pipeline as every other
-  /// pen (blit-during-motion, HQ bake on settle); the native PlatformView only
-  /// ever owns the live stroke.
-  Future<void> _commitNativeGoogleInkStroke(
-    GoogleInkFinishedStroke finished,
-  ) async {
-    if (!mounted || coreInfo.pages.isEmpty) return;
-    if (finished.samples.length < 1) return;
-
-    final overlayBox = _googleInkOverlayKey.currentContext
-        ?.findRenderObject() as RenderBox?;
-    if (overlayBox == null || !overlayBox.attached) return;
-
-    Offset toGlobal(Offset local) {
-      try {
-        return overlayBox.localToGlobal(local);
-      } catch (_) {
-        return local;
-      }
-    }
-
-    final firstGlobal = toGlobal(
-      Offset(finished.samples.first.x, finished.samples.first.y),
-    );
-    var pageIndex = onWhichPageIsFocalPoint(firstGlobal);
-    pageIndex ??= dragPageIndex;
-    if (pageIndex == null ||
-        pageIndex < 0 ||
-        pageIndex >= coreInfo.pages.length) {
-      return;
-    }
-    final page = coreInfo.pages[pageIndex];
-
-    // Sync the live pen brush to the snapshot the native engine actually used,
-    // so committed ink + future strokes agree (and the modal shows the truth).
-    GoogleInkBrushConfig brush = finished.brush;
-    if (currentTool is Pen &&
-        (currentTool as Pen).toolId == ToolId.experimentalPen) {
-      final pen = currentTool as Pen;
-      pen.inkBrush
-        ..family = brush.family
-        ..size = brush.size
-        ..colorArgb = brush.colorArgb
-        ..epsilon = brush.epsilon;
-      pen.options.size = brush.size.clamp(pen.sizeMin, pen.sizeMax);
-      pen.color = Color(brush.colorArgb);
-    } else {
-      brush = GoogleInkBrushConfig(
-        family: brush.family,
-        size: brush.size,
-        colorArgb: brush.colorArgb,
-        epsilon: brush.epsilon,
-      );
-    }
-
-    final stroke = Stroke(
-      color: Color(brush.colorArgb),
-      pressureEnabled: true,
-      options: Pen.experimentalPenOptions.copyWith(
-        size: brush.size,
-        isComplete: false,
-      ),
-      pageIndex: pageIndex,
-      page: page,
-      toolId: ToolId.experimentalPen,
-    )
-      ..googleInkFamily = brush.family.id
-      ..googleInkEpsilon = brush.epsilon
-      ..googleInkSmoothingMs =
-          (currentTool is Pen &&
-                  (currentTool as Pen).toolId == ToolId.experimentalPen)
-              ? (currentTool as Pen).inkBrush.smoothingWindowMs
-              : 16.0;
-    stroke.resetStabilization();
-    for (final s in finished.samples) {
-      final global = toGlobal(Offset(s.x, s.y));
-      final local = _safelyGetLocalPosition(pageIndex, global);
-      final clamped = Offset(
-        local.dx.clamp(0.0, page.size.width),
-        local.dy.clamp(0.0, page.size.height),
-      );
-      stroke.addPoint(
-        clamped,
-        s.pressure.clamp(0.0, 1.0),
-        Duration(milliseconds: s.timeMs.round()),
-      );
-    }
-    if (stroke.length == 1) {
-      final p = stroke.points.first;
-      stroke.addPoint(
-        Offset(p.x + 0.1, p.y + 0.1),
-        p.pressure,
-        null,
-      );
-    }
-    if (stroke.isEmpty) return;
-    stroke.options.isComplete = true;
-    stroke.clearLivePrediction();
-    stroke.finishLiveGeometry();
-
-    setState(() {
-      createPage(stroke.pageIndex);
-      page.insertStroke(stroke);
-      page.strokeSpatialIndex?.insert(stroke);
-      history.recordChange(
-        EditorHistoryItem(
-          type: .draw,
-          pageIndex: pageIndex!,
-          strokes: [stroke],
-          images: [],
-        ),
-      );
-      stows.lastExperimentalPenColor.value = brush.colorArgb;
-      if (currentTool is Pen &&
-          (currentTool as Pen).toolId == ToolId.experimentalPen) {
-        stows.lastExperimentalInkBrush.value =
-            (currentTool as Pen).inkBrush.copy();
-      }
-    });
-    _pageRasterCache.invalidateInk(pageIndex);
-    _maintainPageRasterBand(pageIndex, pageIndex, forceSchedule: true);
-    autosaveAfterDelay();
-    // Native keeps rendering the finished mesh until Dart commits; now drop it
-    // so committed tiles own the pixels (no double-draw, no ghost).
-    GoogleInkNative.clearLive();
   }
 
   Future<bool> _trySolveMath(Stroke lastStroke, EditorPage page) async {
@@ -6656,10 +6520,6 @@ class EditorState extends State<Editor>
         case ToolId.advancedPen:
           stows.lastAdvancedPenOptions.value = pen.options;
           break;
-        case ToolId.experimentalPen:
-          stows.lastExperimentalPenColor.value = pen.color.toARGB32();
-          stows.lastExperimentalInkBrush.value = pen.inkBrush.copy();
-          break;
         case ToolId.advancedPencil:
           stows.lastAdvancedPencilOptions.value = pen.options;
           stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
@@ -7319,7 +7179,6 @@ class EditorState extends State<Editor>
   Future<void> _navigateToNoteReplacingCurrent(
     String path, {
     int? pageIndex,
-    required bool pushCurrentToHistory,
   }) async {
     if (_noteLinkNavBusy) return;
     final target = path.trim();
@@ -7333,35 +7192,12 @@ class EditorState extends State<Editor>
 
     _noteLinkNavBusy = true;
     try {
-      if (pushCurrentToHistory) {
-        final current = coreInfo.filePath;
-        if (current.isNotEmpty) {
-          _noteLinkBackStack.add(
-            _NoteLinkHistoryEntry(path: current, pageIndex: currentPageIndex),
-          );
-          _notifyEmbeddedChromeChanged();
-          if (mounted) setState(() {});
-        }
-      }
-
       await saveToFile(force: true);
       if (!mounted) return;
       await _replaceLoadedNote(target, pageIndex: pageIndex);
     } finally {
       _noteLinkNavBusy = false;
     }
-  }
-
-  Future<void> _popNoteLinkHistory() async {
-    if (_noteLinkBackStack.isEmpty || _noteLinkNavBusy) return;
-    final prev = _noteLinkBackStack.removeLast();
-    _notifyEmbeddedChromeChanged();
-    if (mounted) setState(() {});
-    await _navigateToNoteReplacingCurrent(
-      prev.path,
-      pageIndex: prev.pageIndex,
-      pushCurrentToHistory: false,
-    );
   }
 
   Future<void> _replaceLoadedNote(String path, {int? pageIndex}) async {
@@ -7424,11 +7260,25 @@ class EditorState extends State<Editor>
       _onGoToLocation(link.targetPageIndex);
       return;
     }
+    // Mesmo arquivo: apenas pula para a página.
+    if (link.targetPath.trim() == coreInfo.filePath) {
+      _onGoToLocation(link.targetPageIndex);
+      return;
+    }
+    // Comportamento padrão: abrir a nota linkada em outra tab.
+    final openInNewTab = widget.onOpenNoteInNewTab;
+    if (openInNewTab != null) {
+      unawaited(
+        openInNewTab(link.targetPath, pageIndex: link.targetPageIndex),
+      );
+      return;
+    }
+    // Fallback (split view / standalone sem host de tabs): troca in-place
+    // sem histórico/voltar.
     unawaited(
       _navigateToNoteReplacingCurrent(
         link.targetPath,
         pageIndex: link.targetPageIndex,
-        pushCurrentToHistory: true,
       ),
     );
   }
@@ -9474,21 +9324,8 @@ class EditorState extends State<Editor>
   }
 
   List<Widget> _buildNoteLinkBackActions() {
-    if (_noteLinkBackStack.isEmpty) return const [];
-    return [
-      IconButton(
-        icon: const AdaptiveIcon(
-          icon: Icons.arrow_back_rounded,
-          cupertinoIcon: CupertinoIcons.back,
-        ),
-        tooltip: _noteLinkBackStack.length == 1
-            ? 'Back to previous note'
-            : 'Back (${_noteLinkBackStack.length})',
-        onPressed: _noteLinkNavBusy
-            ? null
-            : () => unawaited(_popNoteLinkHistory()),
-      ),
-    ];
+    // Removido: links agora abrem em outra tab, sem histórico/voltar.
+    return const [];
   }
 
   PreferredSizeWidget _buildEditorAppBar(
@@ -9496,6 +9333,7 @@ class EditorState extends State<Editor>
     ValueNotifier<SavingState>? savingStateOverride,
     Future<void> Function({bool force})? triggerSaveOverride,
     List<Widget> extraActions = const [],
+    List<Widget> leadingActions = const [],
     VoidCallback? onBackOverride,
   }) {
     final effectiveSavingState = savingStateOverride ?? savingState;
@@ -9506,10 +9344,12 @@ class EditorState extends State<Editor>
     final actions = <Widget>[
       ..._buildNoteLinkBackActions(),
 
+      ...leadingActions,
+
       if (!coreInfo.isInfinite)
         PopupMenuButton<String>(
-          icon: const Icon(Icons.add_outlined),
-          tooltip: "Insert page",
+          icon: const Icon(Icons.post_add_outlined),
+          tooltip: 'Insert page',
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -9568,8 +9408,8 @@ class EditorState extends State<Editor>
           ],
         ),
 
-      // Botão Pages na AppBar visível APENAS no modo Split View (embedded == true)
-      if (!coreInfo.isInfinite && widget.embedded)
+      // Botão Pages na AppBar (acesso único — sem FAB flutuante)
+      if (!coreInfo.isInfinite)
         IconButton(
           icon: const Icon(Icons.article_outlined),
           tooltip: 'Pages',
@@ -9594,11 +9434,14 @@ class EditorState extends State<Editor>
       primary: false,
       backgroundColor: isDark ? const Color(0xFF1E1E1E) : colorScheme.surface,
       elevation: 0,
-      scrolledUnderElevation: 0,
+      scrolledUnderElevation: 1,
+      shadowColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
       toolbarHeight: 64,
       centerTitle: true,
       leading: IconButton(
-        icon: const Icon(Icons.arrow_back),
+        icon: const Icon(Icons.arrow_back_rounded),
+        tooltip: MaterialLocalizations.of(context).backButtonTooltip,
         onPressed:
             onBackOverride ??
             () {
@@ -10147,22 +9990,6 @@ class EditorState extends State<Editor>
             );
           },
         ),
-        // Experimental Google Ink live layer (Android PlatformView). Mounted
-        // only for the experimental pen so other tools never pay hit-test or
-        // composition cost. Native owns the live stroke; committed ink flows
-        // through the standard tiled + temporary-raster LOD below.
-        if (currentTool is Pen &&
-            (currentTool as Pen).toolId == ToolId.experimentalPen &&
-            !_regionScreenshotMode)
-          Positioned.fill(
-            child: SizedBox.expand(
-              key: _googleInkOverlayKey,
-              child: GoogleInkLiveOverlay(
-                brush: (currentTool as Pen).inkBrush,
-                enabled: true,
-              ),
-            ),
-          ),
         if (_regionScreenshotMode)
           Positioned.fill(
             child: RegionScreenshotOverlay(
@@ -10372,29 +10199,8 @@ class EditorState extends State<Editor>
                             ? const Color(0xFF1E1E1E)
                             : Theme.of(context).colorScheme.surfaceContainerLow,
                         resizeToAvoidBottomInset: false,
-                        // Oculta o FAB se o painel de Pages estiver aberto OU se for tela infinita OU se estiver no SplitView (embedded)
-                        floatingActionButton:
-                            ((_dockedSidePanel !=
-                                    _EditorDockedSidePanel.pages) &&
-                                !coreInfo.isInfinite &&
-                                !widget.embedded)
-                            ? FloatingActionButton.extended(
-                                elevation: 4,
-                                backgroundColor: Theme.of(
-                                  context,
-                                ).colorScheme.secondaryContainer,
-                                foregroundColor: Theme.of(
-                                  context,
-                                ).colorScheme.onSecondaryContainer,
-                                onPressed: () => _toggleDockedSidePanel(
-                                  _EditorDockedSidePanel.pages,
-                                ),
-                                icon: const Icon(Icons.article_outlined),
-                                label: const Text('Pages'),
-                              )
-                            : null,
-                        floatingActionButtonLocation:
-                            FloatingActionButtonLocation.startFloat,
+                        // Sem FAB de Pages: acesso único via botão Pages na AppBar,
+                        // ao lado do botão de adicionar páginas.
                         // AppBar só é oculta quando a ABA PAGES está aberta. Settings e Split View a mantêm visível!
                         appBar:
                             (_dockedSidePanel == _EditorDockedSidePanel.pages)
@@ -12368,7 +12174,6 @@ class EditorState extends State<Editor>
 
   @override
   void dispose() {
-    GoogleInkNative.setFinishedStrokeHandler(null);
     WidgetsBinding.instance.removeObserver(this);
 
     if (identical(
@@ -13137,6 +12942,653 @@ class EditorFlatSidePanel extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Slot de uma aba do navegador de notas.
+///
+/// Cada aba possui seu próprio [Editor] (embedded) com estado independente
+/// (strokes, histórico, scroll, etc). O host apenas alterna a visibilidade
+/// via [IndexedStack], preservando o estado das abas inativas.
+class _BrowserTabSlot {
+  _BrowserTabSlot({
+    required this.id,
+    required this.key,
+    this.path,
+    this.pdfPath,
+    this.initialPageIndex,
+  });
+
+  final int id;
+  final GlobalKey<EditorState> key;
+  final String? path;
+  final String? pdfPath;
+  final int? initialPageIndex;
+}
+
+/// Host de tabs estilo browser para o editor.
+///
+/// Mantém múltiplas notas abertas e permite navegar entre elas sem
+/// perder estado. A topbar segue Material 3 (minimalista, madura):
+/// - Linha 1: AppBar da nota ativa (voltar, título editável, status save,
+///   inserir página, pages/settings).
+/// - Linha 2 (bottom do AppBar): strip de tabs (oculta com 1 tab).
+///
+/// Usado pela rota `/edit` (sem split). O split view continua usando
+/// [Editor] embedded diretamente, sem tabs aninhadas.
+class EditorWithTabs extends StatefulWidget {
+  const EditorWithTabs({
+    super.key,
+    this.initialPath,
+    this.pdfPath,
+    this.initialPageIndexOverride,
+  });
+
+  final String? initialPath;
+  final String? pdfPath;
+  final int? initialPageIndexOverride;
+
+  @override
+  State<EditorWithTabs> createState() => _EditorWithTabsState();
+}
+
+class _EditorWithTabsState extends State<EditorWithTabs> {
+  late List<_BrowserTabSlot> _tabs;
+  int _activeIndex = 0;
+  int _nextId = 1;
+  bool _readyRefreshScheduled = false;
+
+  EditorState? get _activeState {
+    if (_tabs.isEmpty) return null;
+    if (_activeIndex < 0 || _activeIndex >= _tabs.length) return null;
+    return _tabs[_activeIndex].key.currentState;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs = [
+      _BrowserTabSlot(
+        id: 0,
+        key: GlobalKey<EditorState>(),
+        path: widget.initialPath,
+        pdfPath: widget.pdfPath,
+        initialPageIndex: widget.initialPageIndexOverride,
+      ),
+    ];
+    _scheduleReadyRefresh();
+  }
+
+  @override
+  void didUpdateWidget(covariant EditorWithTabs oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Navegação via `go` com path diferente abre/ativa a tab correspondente.
+    final incoming = widget.initialPath;
+    if (incoming != null &&
+        incoming.isNotEmpty &&
+        incoming != oldWidget.initialPath) {
+      final idx = _indexOfPath(incoming);
+      if (idx >= 0) {
+        _activeIndex = idx;
+      } else {
+        _tabs.add(
+          _BrowserTabSlot(
+            id: _nextId++,
+            key: GlobalKey<EditorState>(),
+            path: incoming,
+            initialPageIndex: widget.initialPageIndexOverride,
+          ),
+        );
+        _activeIndex = _tabs.length - 1;
+      }
+      _scheduleReadyRefresh();
+    }
+  }
+
+  void _bumpChrome() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _scheduleReadyRefresh() {
+    if (_readyRefreshScheduled) return;
+    _readyRefreshScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _readyRefreshScheduled = false;
+      if (!mounted) return;
+      // O Editor monta de forma assíncrona; garante que AppBar/toolbar
+      // saiam do placeholder assim que o estado ativo existir.
+      if (_activeState == null) {
+        _scheduleReadyRefresh();
+        return;
+      }
+      _bumpChrome();
+    });
+  }
+
+  int _indexOfPath(String path) {
+    final needle = _normalizeTabPath(path);
+    for (var i = 0; i < _tabs.length; i++) {
+      final st = _tabs[i].key.currentState;
+      final current = st?.coreInfo.filePath ?? _tabs[i].path ?? '';
+      if (_normalizeTabPath(current) == needle) return i;
+    }
+    return -1;
+  }
+
+  static String _normalizeTabPath(String path) {
+    var normalized = path.replaceAll('\\', '/');
+    if (normalized.endsWith(Editor.extension)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extension.length,
+      );
+    } else if (normalized.endsWith(Editor.extensionOldJson)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extensionOldJson.length,
+      );
+    }
+    if (!normalized.startsWith('/')) normalized = '/$normalized';
+    return normalized;
+  }
+
+  static String _displayNameForPath(String? path) {
+    if (path == null || path.isEmpty) return 'Untitled';
+    final name = path.split('/').last;
+    final clean = name
+        .replaceAll(RegExp(r'\.sbn2?$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\.sba$', caseSensitive: false), '');
+    return clean.isEmpty ? 'Untitled' : clean;
+  }
+
+  String _fallbackTitleForSlot(_BrowserTabSlot slot) {
+    final st = slot.key.currentState;
+    if (st != null) {
+      final typed = st.filenameTextEditingController.text.trim();
+      if (typed.isNotEmpty) return typed;
+      final coreName = st.coreInfo.fileName.trim();
+      if (coreName.isNotEmpty) return coreName;
+      if (st.coreInfo.filePath.isNotEmpty) {
+        return _displayNameForPath(st.coreInfo.filePath);
+      }
+    }
+    return _displayNameForPath(slot.path);
+  }
+
+  Set<String> get _openPaths {
+    return {
+      for (final slot in _tabs)
+        if ((slot.key.currentState?.coreInfo.filePath ?? slot.path ?? '')
+            .isNotEmpty)
+          slot.key.currentState?.coreInfo.filePath ?? slot.path!,
+    };
+  }
+
+  Future<void> _addNewTab() async {
+    final selected = await _pickNotePath(
+      context,
+      excludePaths: _openPaths,
+      title: 'Open note in new tab',
+      subtitle:
+          'Browse folders, search names or tags, or create a note for a new tab.',
+    );
+    if (!mounted || selected == null || selected.isEmpty) return;
+    final existing = _indexOfPath(selected);
+    if (existing >= 0) {
+      setState(() => _activeIndex = existing);
+      return;
+    }
+    setState(() {
+      _tabs.add(
+        _BrowserTabSlot(
+          id: _nextId++,
+          key: GlobalKey<EditorState>(),
+          path: selected,
+        ),
+      );
+      _activeIndex = _tabs.length - 1;
+    });
+    _scheduleReadyRefresh();
+  }
+
+  /// Abre a nota linkada em outra tab (sem fechar a atual, sem voltar).
+  /// Se já aberta, apenas ativa e pula para a página.
+  Future<void> _openNoteInNewTab(String path, {int? pageIndex}) async {
+    final target = path.trim();
+    if (target.isEmpty || !mounted) return;
+    final idx = _indexOfPath(target);
+    if (idx >= 0) {
+      setState(() => _activeIndex = idx);
+      final st = _tabs[idx].key.currentState;
+      if (pageIndex != null && pageIndex >= 0 && st != null) {
+        // Agenda pós-frame para garantir layout pronto após a troca de tab.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final s = _tabs[idx].key.currentState;
+          s?._navigateToPage(pageIndex);
+        });
+      }
+      return;
+    }
+    setState(() {
+      _tabs.add(
+        _BrowserTabSlot(
+          id: _nextId++,
+          key: GlobalKey<EditorState>(),
+          path: target,
+          initialPageIndex: pageIndex,
+        ),
+      );
+      _activeIndex = _tabs.length - 1;
+    });
+    _scheduleReadyRefresh();
+  }
+
+  void _switchTab(int index) {
+    if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
+    setState(() => _activeIndex = index);
+    _scheduleReadyRefresh();
+  }
+
+  void _closeTab(int index) {
+    if (_tabs.isEmpty) return;
+    if (_tabs.length == 1) {
+      _goToHome();
+      return;
+    }
+    final slot = _tabs[index];
+    unawaited(slot.key.currentState?.saveToFile(force: true));
+    setState(() {
+      _tabs.removeAt(index);
+      if (_activeIndex > index) {
+        _activeIndex--;
+      } else if (_activeIndex >= _tabs.length) {
+        _activeIndex = _tabs.length - 1;
+      }
+    });
+  }
+
+  void _goToHome() {
+    unawaited(_goToHomeAfterThumbnails());
+  }
+
+  Future<void> _goToHomeAfterThumbnails() async {
+    try {
+      await Future.wait([
+        for (final slot in _tabs)
+          slot.key.currentState?._flushThumbnailBeforeExit() ??
+              Future<void>.value(),
+      ]);
+    } catch (_) {}
+    final remember = <String>[];
+    final forget = <String>[];
+    for (final slot in _tabs) {
+      final st = slot.key.currentState;
+      final path = st?.coreInfo.filePath ?? slot.path;
+      if (path == null || path.isEmpty) continue;
+      if (st != null && st.wouldAutoDeleteOnExit) {
+        forget.add(path);
+      } else {
+        remember.add(path);
+      }
+    }
+    if (forget.isNotEmpty) {
+      HomeDataCache.instance.forgetRecentPaths(forget);
+    }
+    if (remember.isNotEmpty) {
+      HomeDataCache.instance.rememberRecentPaths(remember);
+    }
+    if (!mounted) return;
+    // Fecha sem animação de saída brusca: tenta pop, senão vai ao recent.
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go('${RoutePaths.prefixOfHome}/${HomePage.recentSubpage}');
+    }
+  }
+
+  Widget _buildNewTabButton() {
+    return IconButton(
+      icon: const Icon(Icons.add_rounded),
+      tooltip: 'Open note in new tab',
+      onPressed: _addNewTab,
+    );
+  }
+
+  PreferredSizeWidget? _buildTabbedAppBar(BuildContext context) {
+    final activeState = _activeState;
+    if (activeState == null) {
+      final theme = Theme.of(context);
+      final colorScheme = theme.colorScheme;
+      final isDark = theme.brightness == Brightness.dark;
+      return AppBar(
+        primary: false,
+        backgroundColor: isDark
+            ? const Color(0xFF1E1E1E)
+            : colorScheme.surface,
+        elevation: 0,
+        scrolledUnderElevation: 1,
+        surfaceTintColor: Colors.transparent,
+        toolbarHeight: 64,
+        centerTitle: true,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_rounded),
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          onPressed: _goToHome,
+        ),
+        title: const Text('Loading…'),
+        actions: [_buildNewTabButton()],
+        bottom: _buildTabStripBottom(context, null),
+      );
+    }
+
+    final inner = activeState._buildEditorAppBar(
+      context,
+      leadingActions: [_buildNewTabButton()],
+      onBackOverride: _goToHome,
+    );
+    if (inner is AppBar) {
+      return AppBar(
+        key: inner.key,
+        leading: inner.leading,
+        automaticallyImplyLeading: inner.automaticallyImplyLeading,
+        title: inner.title,
+        actions: inner.actions,
+        flexibleSpace: inner.flexibleSpace,
+        bottom: _buildTabStripBottom(context, inner.bottom),
+        elevation: inner.elevation,
+        scrolledUnderElevation: inner.scrolledUnderElevation,
+        notificationPredicate: inner.notificationPredicate,
+        shadowColor: inner.shadowColor,
+        surfaceTintColor: inner.surfaceTintColor,
+        shape: inner.shape,
+        backgroundColor: inner.backgroundColor,
+        foregroundColor: inner.foregroundColor,
+        iconTheme: inner.iconTheme,
+        actionsIconTheme: inner.actionsIconTheme,
+        primary: false,
+        centerTitle: inner.centerTitle,
+        excludeHeaderSemantics: inner.excludeHeaderSemantics,
+        titleSpacing: inner.titleSpacing,
+        toolbarOpacity: inner.toolbarOpacity,
+        bottomOpacity: inner.bottomOpacity,
+        toolbarHeight: inner.toolbarHeight,
+        leadingWidth: inner.leadingWidth,
+        toolbarTextStyle: inner.toolbarTextStyle,
+        titleTextStyle: inner.titleTextStyle,
+        systemOverlayStyle: inner.systemOverlayStyle,
+        clipBehavior: inner.clipBehavior,
+      );
+    }
+    return inner;
+  }
+
+  /// Strip de tabs como `bottom` do AppBar (M3, minimalista).
+  /// Oculta quando há apenas 1 nota aberta; aparece com 2+ tabs.
+  PreferredSizeWidget? _buildTabStripBottom(
+    BuildContext context,
+    PreferredSizeWidget? innerBottom,
+  ) {
+    if (_tabs.length <= 1) return innerBottom;
+    // Altura: strip 48 + eventual bottom interno (nulo hoje, preservado p/ futuro).
+    final extra = innerBottom?.preferredSize.height ?? 0;
+    return PreferredSize(
+      preferredSize: Size.fromHeight(48 + extra),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildTabStrip(context),
+          if (innerBottom != null) innerBottom,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTabStrip(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final stripBg = isDark ? const Color(0xFF1E1E1E) : colorScheme.surface;
+
+    return Container(
+      color: stripBg,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(
+              color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+              width: 1,
+            ),
+            bottom: BorderSide(
+              color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+              width: 1,
+            ),
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (var i = 0; i < _tabs.length; i++) ...[
+                _buildTabChip(context, i),
+                if (i != _tabs.length - 1) const SizedBox(width: 6),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabChip(BuildContext context, int index) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final isActive = index == _activeIndex;
+    final slot = _tabs[index];
+    final state = slot.key.currentState;
+
+    final bg = isActive
+        ? colorScheme.secondaryContainer
+        : colorScheme.surfaceContainerHigh.withValues(
+            alpha: theme.brightness == Brightness.dark ? 0.6 : 0.55,
+          );
+    final fg = isActive
+        ? colorScheme.onSecondaryContainer
+        : colorScheme.onSurfaceVariant;
+    final border = isActive
+        ? null
+        : Border.all(
+            color: colorScheme.outlineVariant.withValues(alpha: 0.5),
+            width: 1,
+          );
+
+    Widget label;
+    if (state != null) {
+      label = ListenableBuilder(
+        listenable: state.filenameTextEditingController,
+        builder: (context, _) => Text(
+          _fallbackTitleForSlot(slot),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.labelLarge?.copyWith(
+            color: fg,
+            fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+            fontSize: 13,
+            letterSpacing: -0.1,
+          ),
+        ),
+      );
+    } else {
+      label = Text(
+        _fallbackTitleForSlot(slot),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.labelLarge?.copyWith(
+          color: fg,
+          fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+          fontSize: 13,
+          letterSpacing: -0.1,
+        ),
+      );
+    }
+
+    Widget? statusDot;
+    if (state != null) {
+      statusDot = ValueListenableBuilder<SavingState>(
+        valueListenable: state.savingState,
+        builder: (context, saving, _) {
+          if (saving == SavingState.saved) return const SizedBox.shrink();
+          return Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: fg.withValues(alpha: 0.75),
+              shape: BoxShape.circle,
+            ),
+          );
+        },
+      );
+    }
+
+    return GestureDetector(
+      onTap: () => _switchTab(index),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 200, minHeight: 36),
+        child: Container(
+          padding: const EdgeInsets.only(left: 10, right: 4, top: 4, bottom: 4),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(12),
+            border: border,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isActive
+                    ? Icons.description_rounded
+                    : Icons.description_outlined,
+                size: 16,
+                color: fg,
+              ),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: label,
+              ),
+              if (statusDot != null) ...[
+                const SizedBox(width: 6),
+                statusDot,
+              ],
+              if (_tabs.length > 1) ...[
+                const SizedBox(width: 2),
+                InkWell(
+                  onTap: () => _closeTab(index),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: Icon(
+                      Icons.close_rounded,
+                      size: 14,
+                      color: fg.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ),
+              ] else ...[
+                const SizedBox(width: 6),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPane(_BrowserTabSlot slot) {
+    return RepaintBoundary(
+      child: Editor(
+        key: slot.key,
+        path: slot.path,
+        pdfPath: slot.pdfPath,
+        initialPageIndexOverride: slot.initialPageIndex,
+        embedded: true,
+        showToolbar: false,
+        onEmbeddedChromeChanged: _bumpChrome,
+        onOpenNoteInNewTab: _openNoteInNewTab,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _scheduleReadyRefresh();
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final activeState = _activeState;
+
+    final canvases = IndexedStack(
+      index: _activeIndex.clamp(0, _tabs.length - 1),
+      children: [for (final slot in _tabs) _buildPane(slot)],
+    );
+
+    final axisDir = stows.editorToolbarAlignment.value;
+    final isToolbarVertical =
+        axisDir == AxisDirection.left || axisDir == AxisDirection.right;
+    final globalToolbar = activeState?._buildSplitGlobalToolbar(
+      context,
+      onHostToolbarChanged: _bumpChrome,
+    );
+
+    Widget body;
+    if (globalToolbar == null) {
+      body = canvases;
+    } else if (isToolbarVertical) {
+      body = Row(
+        textDirection: axisDir == AxisDirection.left
+            ? ui.TextDirection.ltr
+            : ui.TextDirection.rtl,
+        children: [
+          globalToolbar,
+          Expanded(child: canvases),
+        ],
+      );
+    } else {
+      body = Column(
+        verticalDirection: axisDir == AxisDirection.up
+            ? VerticalDirection.up
+            : VerticalDirection.down,
+        children: [
+          Expanded(child: canvases),
+          globalToolbar,
+        ],
+      );
+    }
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        final st = _activeState;
+        if (st != null && st._isDockedSidePanelVisible) {
+          st._closeDockedSidePanel();
+          return;
+        }
+        _goToHome();
+      },
+      child: Scaffold(
+        backgroundColor: theme.brightness == Brightness.dark
+            ? const Color(0xFF1E1E1E)
+            : colorScheme.surfaceContainerLow,
+        resizeToAvoidBottomInset: false,
+        appBar: _buildTabbedAppBar(context),
+        body: body,
+        primary: false,
+        // Sem FAB de Pages: acesso único via botão Pages na AppBar,
+        // ao lado do botão de adicionar páginas.
       ),
     );
   }

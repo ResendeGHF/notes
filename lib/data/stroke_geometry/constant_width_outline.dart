@@ -804,7 +804,12 @@ List<Offset> _singlePointOutline(
       Offset(p.x - r, p.y + r),
     ];
   }
-  return _circleOutline(Offset(p.x, p.y), radius, capSegments * 2);
+  // Tap dot: full circle, detail scaled with radius like round caps.
+  return _circleOutline(
+    Offset(p.x, p.y),
+    radius,
+    (capSegments * 2 + radius.round()).clamp(12, 64),
+  );
 }
 
 List<Offset> _outlineFromRadii(
@@ -830,6 +835,14 @@ List<Offset> _outlineFromRadii(
   final n = points.length;
   assert(n >= 2);
   assert(radii.length == n);
+
+  // Detail scales with nib radius so wide caps stay circular instead of
+  // faceted: a fixed 10-segment fan reads as a polygon on broad strokes.
+  // Pure function of radius — identical live and committed, never a pop.
+  final avgRadius = radii.reduce((a, b) => a + b) / n;
+  final detailBoost = (avgRadius / 2.5).round().clamp(0, 12);
+  final capSegs = math.min(28, capSegments + detailBoost);
+  final joinSegs = math.min(20, joinSegments + (detailBoost ~/ 2));
 
   // Unit segment directions (spine[i] → spine[i+1]).
   final segTx = List<double>.filled(n - 1, 1.0);
@@ -873,7 +886,6 @@ List<Offset> _outlineFromRadii(
   void addLeft(Offset o) => _appendDistinct(left, o);
   void addRight(Offset o) => _appendDistinct(right, o);
 
-  final avgRadius = radii.reduce((a, b) => a + b) / n;
   final tangentSize = math.max(avgRadius, math.max(radii.first, radii.last));
   // Match Ballpoint mesh: chord window scales with pen radius, not tip taper.
   final chordBase = math.max(capChordBaseSize ?? tangentSize, tangentSize);
@@ -980,7 +992,7 @@ List<Offset> _outlineFromRadii(
       tx: startTx,
       ty: startTy,
       radius: startCapR,
-      segments: capSegments,
+      segments: capSegs,
       atStart: true,
     );
   }
@@ -1034,7 +1046,7 @@ List<Offset> _outlineFromRadii(
     // Advanced Pen mirrors that on the outline: round BOTH sides into a tip
     // bulb. Collapsing the inner side onto the centerline left a flat diameter.
     if (dualSidedReturnJoins && align < 0.5) {
-      final cuspSegments = math.max(joinSegments, align < -0.5 ? 14 : 8);
+      final cuspSegments = math.max(joinSegs, align < -0.5 ? 14 : 8);
       final apex = Offset(px, py);
       var outX = -(n0x + n1x);
       var outY = -(n0y + n1y);
@@ -1083,7 +1095,7 @@ List<Offset> _outlineFromRadii(
 
     // Legacy single-sided hairpin (ballpoint / pencil outline path).
     if (align < -0.5) {
-      final cuspSegments = math.max(joinSegments, 10);
+      final cuspSegments = math.max(joinSegs, 10);
       addLeft(l0);
       _appendArc(
         left,
@@ -1103,7 +1115,7 @@ List<Offset> _outlineFromRadii(
 
     // Outer side gets a round join; inner side bevels (avoids spikes/holes).
     // Arc "outward" direction is the outer normal (not the travel tangent).
-    final joinSegs = align < 0.5 ? math.max(joinSegments, 8) : joinSegments;
+    final joinSteps = align < 0.5 ? math.max(joinSegs, 8) : joinSegs;
     if (turn >= 0) {
       // Left turn: left is inner, right is outer.
       addLeft(l0);
@@ -1117,7 +1129,7 @@ List<Offset> _outlineFromRadii(
         outwardTangentX: -(n0x + n1x),
         outwardTangentY: -(n0y + n1y),
         radius: r,
-        segments: joinSegs,
+        segments: joinSteps,
       );
       addRight(r1);
     } else {
@@ -1131,7 +1143,7 @@ List<Offset> _outlineFromRadii(
         outwardTangentX: n0x + n1x,
         outwardTangentY: n0y + n1y,
         radius: r,
-        segments: joinSegs,
+        segments: joinSteps,
       );
       addLeft(l1);
       addRight(r0);
@@ -1156,7 +1168,7 @@ List<Offset> _outlineFromRadii(
       tx: endTx,
       ty: endTy,
       radius: endCapR,
-      segments: capSegments,
+      segments: capSegs,
       atStart: false,
     );
   }
@@ -1173,7 +1185,7 @@ List<Offset> _outlineFromRadii(
         tangentX: endTx,
         tangentY: endTy,
         radius: endCapR,
-        segments: capSegments,
+        segments: capSegs,
       ),
     );
   }
@@ -1191,7 +1203,7 @@ List<Offset> _outlineFromRadii(
         tangentX: -startTx,
         tangentY: -startTy,
         radius: startCapR,
-        segments: capSegments,
+        segments: capSegs,
       ),
     );
   }

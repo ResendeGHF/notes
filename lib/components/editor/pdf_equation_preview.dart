@@ -137,7 +137,11 @@ class PdfEquationPreview extends StatelessWidget {
                                 horizontal: 12,
                               ),
                               minimumSize: const Size(0, 36),
+                              // Pair with the matching on-color: the tonal
+                              // default (onSecondaryContainer) is unreadable
+                              // on primaryContainer in grayscale themes.
                               backgroundColor: colorScheme.primaryContainer,
+                              foregroundColor: colorScheme.onPrimaryContainer,
                             ),
                           ),
                           const SizedBox(width: 8),

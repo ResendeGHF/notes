@@ -172,7 +172,15 @@ class _RecentPageState extends State<RecentPage> {
   }
 
   Future<void> _confirmGone(String path) async {
-    if (!mounted || !_index.contains(path)) return;
+    if (!mounted) return;
+    // Scratch leftovers never survive verification – drop immediately.
+    if (!FileManager.isVisibleHomeNotePath(path)) {
+      _index.remove(path);
+      HomeDataCache.instance.removeNoteIndex(path);
+      _publish();
+      return;
+    }
+    if (!_index.contains(path)) return;
     if (await FileManager.doesNoteExist(path)) return;
     if (!mounted || !_index.contains(path)) return;
     _index.remove(path);
@@ -181,6 +189,7 @@ class _RecentPageState extends State<RecentPage> {
   }
 
   Future<void> _refreshMeta(String path) async {
+    if (!FileManager.isVisibleHomeNotePath(path)) return;
     final peeked = await FileManager.peekNoteIndexEntry(path);
     if (!mounted || !_index.contains(path)) return;
     _index.applyPeekedMeta(peeked);
@@ -203,20 +212,33 @@ class _RecentPageState extends State<RecentPage> {
   }
 
   void _loadInitial() {
-    // 1. INSTANT RENDER FROM STOWS
+    // 1. INSTANT RENDER FROM STOWS (scratch filtered so a hard kill can never
+    // pin `TmPmP_` / `tmp…` / `tpm…` empty cards into the grid).
     final recentPrefs = stows.recentFiles.value;
     if (recentPrefs.isNotEmpty) {
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final instantEntries = <NoteIndexEntry>[];
-      for (int i = 0; i < recentPrefs.length; i++) {
-        instantEntries.add(NoteIndexEntry(
-          path: recentPrefs[i],
-          modifiedMillis: now - (i * 1000), // maintain relative order
-          sizeBytes: 0,
-        ));
+      final visiblePrefs = [
+        for (final p in recentPrefs)
+          if (FileManager.isVisibleHomeNotePath(
+            FileManager.notePathWithoutExtension(p),
+          ))
+            p,
+      ];
+      if (visiblePrefs.length != recentPrefs.length) {
+        stows.recentFiles.value = visiblePrefs;
       }
-      _index.mergeFromDisk(instantEntries);
-      _publish(notify: false);
+      if (visiblePrefs.isNotEmpty) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final instantEntries = <NoteIndexEntry>[];
+        for (int i = 0; i < visiblePrefs.length; i++) {
+          instantEntries.add(NoteIndexEntry(
+            path: FileManager.notePathWithoutExtension(visiblePrefs[i]),
+            modifiedMillis: now - (i * 1000), // maintain relative order
+            sizeBytes: 0,
+          ));
+        }
+        _index.mergeFromDisk(instantEntries);
+        _publish(notify: false);
+      }
     }
 
     final cached = HomeDataCache.instance.allNotesCached;
@@ -241,12 +263,32 @@ class _RecentPageState extends State<RecentPage> {
     if (!mounted) return;
     if (list.isEmpty && _index.isNotEmpty) return;
     _index.mergeFromDisk(list);
+    // Scrub any scratch leftovers from prefs so they never resurrect.
+    final prefs = stows.recentFiles.value;
+    final scrubbed = [
+      for (final p in prefs)
+        if (FileManager.isVisibleHomeNotePath(
+          FileManager.notePathWithoutExtension(p),
+        ))
+          p,
+    ];
+    if (scrubbed.length != prefs.length) {
+      stows.recentFiles.value = scrubbed;
+    }
     final diskPaths = {for (final e in list) e.path};
     final extras = [
       for (final path in _index.paths)
         if (!diskPaths.contains(path)) path,
     ];
     for (final path in extras) {
+      // Belt-and-braces: scratch entries vanish even if a stale `.sbn2`
+      // leftover still exists on disk.
+      if (!FileManager.isVisibleHomeNotePath(path)) {
+        if (!mounted) return;
+        _index.remove(path);
+        HomeDataCache.instance.removeNoteIndex(path);
+        continue;
+      }
       if (await FileManager.doesNoteExist(path)) continue;
       if (!mounted) return;
       _index.remove(path);
