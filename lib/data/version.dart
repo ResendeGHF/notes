@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-const buildNumber = 101000;
+const buildNumber = 102000;
 
-const buildName = '1.1.0';
+const buildName = '1.2.0';
 
 const buildYear = 2026;
