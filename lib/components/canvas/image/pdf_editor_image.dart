@@ -318,6 +318,10 @@ class PdfEditorImage extends EditorImage {
         }
 
         return _PdfPageRenderer(
+          // Stable identity per document page: no ancestor rebuild may ever
+          // remount this (remount drops the native texture = blink). A new
+          // document instance legitimately gets a fresh renderer.
+          key: ValueKey('pdfpage_${identityHashCode(pdfDocument)}_$pdfPage'),
           pdfDocument: pdfDocument,
           pageIndex: pdfPage,
           pdfFile: pdfFile,
@@ -366,11 +370,19 @@ class _PdfLoadingPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final color = isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF4F4F4);
-    return ColoredBox(
-      color: color,
-      child: SizedBox.fromSize(size: size),
+    // Clean skeleton over the page base color: no dark box, no content
+    // flash. The page number stays hidden until the texture arrives (see
+    // the InnerCanvas indicator gate), so a loading page never shows the
+    // half-rendered dark-page artifact.
+    return SizedBox.fromSize(
+      size: size,
+      child: const Center(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator.adaptive(strokeWidth: 2.5),
+        ),
+      ),
     );
   }
 }
@@ -386,6 +398,7 @@ class _PdfPageRenderer extends StatefulWidget {
   final void Function(Offset, PdfDocument, int, File?)? onPdfTap;
 
   const _PdfPageRenderer({
+    super.key,
     required this.pdfDocument,
     required this.pageIndex,
     required this.pdfFile,
@@ -404,6 +417,17 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   List<PdfLink> _links = const [];
   Object? _linksLoadToken;
   StreamSubscription? _pageStatusSub;
+
+  /// True once this page finished progressive loading. PdfPageView is only
+  /// mounted when ready: mounting earlier renders blank, and the status flip
+  /// later disposes the texture and re-renders (a visible blink seconds
+  /// after opening). Thumbnails render offscreen and stay ungated.
+  bool _pageReady = false;
+  Timer? _readyFallbackTimer;
+
+  /// Safety net if a page status event is ever missed: fall back to mounting
+  /// anyway rather than spinning forever.
+  static const _readyFallbackTimeout = Duration(seconds: 8);
 
   @override
   void initState() {
@@ -425,6 +449,8 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   void dispose() {
     _pageStatusSub?.cancel();
     _pageStatusSub = null;
+    _readyFallbackTimer?.cancel();
+    _readyFallbackTimer = null;
     _linksLoadToken = null;
     super.dispose();
   }
@@ -432,8 +458,11 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   void _watchPageAndLoadLinks() {
     _pageStatusSub?.cancel();
     _pageStatusSub = null;
+    _readyFallbackTimer?.cancel();
+    _readyFallbackTimer = null;
 
     if (widget.isThumbnail) {
+      _pageReady = true;
       _loadLinks();
       return;
     }
@@ -443,11 +472,32 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       return;
     }
 
+    final pdfPage = pages[widget.pageIndex];
+    if (pdfPage.isLoaded) {
+      _pageReady = true;
+      _loadLinks();
+      return;
+    }
+
+    // Page still streaming in: hold the skeleton until it is ready so the
+    // texture mounts exactly once and never blanks afterwards.
+    _pageReady = false;
     // If progressive load finishes after our first attempt (or ensureLoaded
     // misses a status race), reload highlights when the page becomes ready.
-    _pageStatusSub = pages[widget.pageIndex].events.listen((change) {
+    _pageStatusSub = pdfPage.events.listen((change) {
       if (change.page.isLoaded) {
+        _pageReady = true;
+        _readyFallbackTimer?.cancel();
+        _readyFallbackTimer = null;
         _loadLinks();
+        if (mounted) setState(() {});
+      }
+    });
+    _readyFallbackTimer = Timer(_readyFallbackTimeout, () {
+      _readyFallbackTimer = null;
+      if (!_pageReady && mounted) {
+        _pageReady = true;
+        setState(() {});
       }
     });
     _loadLinks();
@@ -481,6 +531,12 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
 
     // Black on light / non-inverted pages; white when the PDF is inverted.
     final outlineColor = widget.invert ? Colors.white : Colors.black;
+
+    // While the page streams in, hold the skeleton instead of mounting a
+    // texture that the status flip would blank and re-render (blink).
+    if (!_pageReady && !widget.isThumbnail) {
+      return _PdfLoadingPlaceholder(size: widget.naturalSize);
+    }
 
     return Stack(
       fit: StackFit.passthrough,

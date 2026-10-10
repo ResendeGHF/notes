@@ -448,6 +448,76 @@ class InnerCanvasState extends State<InnerCanvas> {
   bool _isCapturingThumbnail = false;
   final GlobalKey _thumbnailCaptureKey = GlobalKey();
 
+  /// True once a PDF page background has its texture. While false the
+  /// page-number indicator stays hidden so a loading page never shows the
+  /// half-rendered dark-page artifact. Pages without a PDF background are
+  /// always ready.
+  bool _pdfBgReady = true;
+  EditorImage? _pdfBgObserved;
+  ValueNotifier<PdfDocument?>? _pdfBgNotifier;
+  VoidCallback? _pdfBgReadyListener;
+
+  void _syncPdfBgReady({bool notify = true}) {
+    final pages = widget.coreInfo.pages;
+    final EditorImage? bg =
+        pages.isEmpty ? null : pages[_safePageIndex].backgroundImage;
+    if (!identical(bg, _pdfBgObserved)) {
+      _forgetPdfBgReadyListener();
+      _pdfBgObserved = bg;
+    }
+    if (bg is! PdfEditorImage) {
+      if (!_pdfBgReady) {
+        _pdfBgReady = true;
+        if (notify && mounted) setState(() {});
+      }
+      return;
+    }
+    final notifier =
+        widget.coreInfo.assetCacheAll.getPdfNotifier(bg.assetId);
+    if (notifier.value != null) {
+      _forgetPdfBgReadyListener();
+      if (!_pdfBgReady) {
+        _pdfBgReady = true;
+        if (notify && mounted) setState(() {});
+      }
+      return;
+    }
+    // Already waiting on this background; avoid stacking listeners on
+    // every parent rebuild (e.g. each stroke).
+    if (_pdfBgReadyListener != null) return;
+    _pdfBgReady = false;
+    if (notify && mounted) setState(() {});
+    _pdfBgNotifier = notifier;
+    late VoidCallback listener;
+    listener = () {
+      if (notifier.value != null) {
+        notifier.removeListener(listener);
+        if (identical(_pdfBgReadyListener, listener)) {
+          _pdfBgReadyListener = null;
+          _pdfBgNotifier = null;
+        }
+        _pdfBgReady = true;
+        // Async load completion always needs a rebuild, even when the
+        // subscription started from initState.
+        if (mounted) setState(() {});
+      }
+    };
+    _pdfBgReadyListener = listener;
+    notifier.addListener(listener);
+  }
+
+  void _forgetPdfBgReadyListener() {
+    final listener = _pdfBgReadyListener;
+    final notifier = _pdfBgNotifier;
+    _pdfBgReadyListener = null;
+    _pdfBgNotifier = null;
+    if (listener != null && notifier != null) {
+      try {
+        notifier.removeListener(listener);
+      } catch (_) {}
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -455,6 +525,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     _quillScrollController = ScrollController();
     widget.redrawPageListenable?.addListener(_onPageChanged);
     _loadPdfLinks();
+    _syncPdfBgReady(notify: false);
 
     if (widget.coreInfo.pages.isNotEmpty) {
       final page = widget.coreInfo.pages[_safePageIndex];
@@ -569,6 +640,10 @@ class InnerCanvasState extends State<InnerCanvas> {
     : oldWidget.pageIndex.clamp(0, oldPages.length - 1);
 
     final page = pages[safePageIndex];
+    // Keep the PDF-readiness gate in sync when the background changes
+    // (set-as-background / remove / undo). A flip schedules its own
+    // rebuild, so the early-return below stays correct.
+    _syncPdfBgReady();
     final bool strokeFinished =
     oldWidget.currentStroke != null && widget.currentStroke == null;
     final bool pageChanged = page != oldPages[safeOldPageIndex];
@@ -733,6 +808,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     StrokePaintImageCache.instance.revision.removeListener(
       _onStrokePaintImageReady,
     );
+    _forgetPdfBgReadyListener();
     _layer2Repaint.dispose();
     super.dispose();
   }
@@ -843,6 +919,16 @@ class InnerCanvasState extends State<InnerCanvas> {
 
   Future<Uint8List?> captureThumbnail() async {
     if (!mounted) return null;
+
+    // Never capture a PDF-backed page from the live tree: the capture swaps
+    // the page subtree into a dedicated RepaintBoundary, which remounts
+    // PdfPageView and destroys the native texture (visible blink), plus a
+    // GPU readback stall. The headless PDF renderer covers these pages.
+    final pages = widget.coreInfo.pages;
+    if (pages.isNotEmpty &&
+        pages[_safePageIndex].backgroundImage is PdfEditorImage) {
+      return null;
+    }
 
     _bakePendingNow();
     setState(() {
@@ -1319,7 +1405,12 @@ class InnerCanvasState extends State<InnerCanvas> {
                   showPageIndicator:
                       !widget.isPreview &&
                       (!widget.isPrint || stows.printPageIndicators.value) &&
-                      !widget.coreInfo.isInfinite,
+                      !widget.coreInfo.isInfinite &&
+                      // Hide the number while a PDF background is still
+                      // loading so the page never shows the half-rendered
+                      // dark-page artifact. The texture overlay covers this
+                      // layer once it arrives.
+                      _pdfBgReady,
                   tiledCache: _strokePictureCache,
                   liveStrokes: _liveTiledStrokes,
                 ),

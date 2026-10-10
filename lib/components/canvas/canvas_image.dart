@@ -9,11 +9,13 @@ import 'package:defer_pointer/defer_pointer.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
+import 'package:saber/components/canvas/canvas_transform_cache.dart';
 import 'package:saber/components/canvas/canvas_image_dialog.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/theming/adaptive_alert_dialog.dart';
 import 'package:saber/components/toolbar/plot_animation_metadata.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
+import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/i18n/strings.g.dart';
@@ -103,7 +105,12 @@ class _CanvasImageState extends State<CanvasImage> {
 
   @override
   void initState() {
-    _renderScale = widget.canvasScale;
+    // Seed from the restored viewport (set post-frame from the transform
+    // cache) instead of the identity zoom active at first build. Otherwise
+    // the first canvasScale update trips the scale debounce below and
+    // re-renders every PDF page ~500ms after opening — a blink seconds
+    // after returning to a tab. Same-zoom mounts are unaffected.
+    _renderScale = _restoredScale() ?? widget.canvasScale;
     widget.image.loadIn();
 
     if (widget.image.newImage) {
@@ -120,6 +127,21 @@ class _CanvasImageState extends State<CanvasImage> {
 
   void disableActive() {
     active = false;
+  }
+
+  /// Viewport zoom this note will restore to, if cached. Clamped to the
+  /// render-scale range so the first paint already targets the final DPI
+  /// bucket (see _PdfPageRenderer).
+  double? _restoredScale() {
+    try {
+      final scale = CanvasTransformCache.get(
+        widget.filePath,
+      )?.transform.approxScale;
+      if (scale != null && scale.isFinite && scale > 0) {
+        return scale.clamp(0.5, 4.0);
+      }
+    } catch (_) {}
+    return null;
   }
 
   void imageListener() {

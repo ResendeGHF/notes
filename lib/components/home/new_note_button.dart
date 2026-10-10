@@ -14,6 +14,7 @@ import 'package:pdf_combiner/pdf_combiner.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/routes.dart';
+import 'package:saber/data/samsung_notes/sdocx_importer.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/background_operation_queue.dart';
@@ -458,16 +459,17 @@ class _NewNoteButtonState extends State<NewNoteButton> {
                                 await Future<void>.delayed(Duration.zero);
 
                                 final filePath = file.path!;
-                                if (filePath.toLowerCase().endsWith('.sbn') ||
-                                    filePath.toLowerCase().endsWith('.sbn2') ||
-                                    filePath.toLowerCase().endsWith('.sba')) {
+                                final lowerPath = filePath.toLowerCase();
+                                if (lowerPath.endsWith('.sbn') ||
+                                    lowerPath.endsWith('.sbn2') ||
+                                    lowerPath.endsWith('.sba')) {
                                   final importedPath = await FileManager.importFile(
                                     filePath,
                                     '${widget.path ?? ''}/',
                                     theme: themeData,
                                     mediaQuery: mediaQueryData,
                                     getEncryptionPassword:
-                                        filePath.toLowerCase().endsWith('.sba')
+                                        lowerPath.endsWith('.sba')
                                         ? () async {
                                             if (!scaffoldCtx.mounted) return null;
                                             return showSbaImportPasswordDialog(scaffoldCtx);
@@ -478,6 +480,32 @@ class _NewNoteButtonState extends State<NewNoteButton> {
                                   if (importedPath != null) {
                                     count++;
                                     lastImportedPath = importedPath;
+                                  }
+                                } else if (lowerPath.endsWith('.sdocx')) {
+                                  final baseName = file.name.substring(
+                                    0,
+                                    file.name.length - '.sdocx'.length,
+                                  );
+                                  final sbnBasePath =
+                                      await FileManager.suffixFilePathToMakeItUnique(
+                                    '${widget.path ?? ''}/$baseName',
+                                  );
+                                  final ok =
+                                      await SamsungNotesImporter.importSdocxToNote(
+                                    sbnBasePath,
+                                    filePath,
+                                    theme: themeData,
+                                    mediaQuery: mediaQueryData,
+                                    onImportProgress: (p, status) {
+                                      onProgress(
+                                        (i + p) / otherFiles.length,
+                                        '${i + 1}/${otherFiles.length} · $status',
+                                      );
+                                    },
+                                  );
+                                  if (ok) {
+                                    count++;
+                                    lastImportedPath = sbnBasePath;
                                   }
                                 }
                               }

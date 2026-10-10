@@ -4343,7 +4343,18 @@ class FileManager {
       try {
         final pdfImg = page.backgroundImage as PdfEditorImage;
 
-        if (pdfImg.pdfFile != null && pdfImg.pdfFile!.existsSync()) {
+        // Prefer the already-open document: reopening per save would redo
+        // native init plus vault byte reads and spike save latency (blink).
+        final liveDoc = coreInfo.assetCacheAll
+            .getPdfNotifier(pdfImg.assetId)
+            .value;
+        if (liveDoc != null) {
+          success = await generateThumbnailFromPdf('', path, document: liveDoc);
+        }
+
+        if (!success &&
+            pdfImg.pdfFile != null &&
+            pdfImg.pdfFile!.existsSync()) {
           success = await generateThumbnailFromPdf(pdfImg.pdfFile!.path, path);
         }
 

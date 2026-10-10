@@ -205,7 +205,29 @@ class SelectResult {
     if (displayBounds != null) return displayBounds!;
     if (isEmpty) return Rect.zero;
 
-    final centroid = getCentroid();
+    displayBounds = _boundsUnrotatedAround(getCentroid());
+    return displayBounds!;
+  }
+
+  /// Recomputes [displayBounds] in the selection's unrotated frame,
+  /// un-rotating current geometry around [pivot] instead of the
+  /// point-average centroid.
+  ///
+  /// Commits must use the gesture pivot: un-rotating around a drifting
+  /// centroid moves the box on every rotation, so the next rotation orbits
+  /// a new center (content visibly translates and the overlay detaches).
+  /// Un-rotating around the gesture pivot returns the exact pre-transform
+  /// box, keeping the pivot fixed across rotations and making a
+  /// rotate-forth-and-back round trip identity.
+  void recomputeBoundsAround(Offset pivot) {
+    if (isEmpty) {
+      displayBounds = Rect.zero;
+      return;
+    }
+    displayBounds = _boundsUnrotatedAround(pivot);
+  }
+
+  Rect _boundsUnrotatedAround(Offset center) {
     Rect? bounds;
     final rotationRad = rotationDeg * math.pi / 180.0;
     final cosUnrotate = math.cos(-rotationRad);
@@ -213,11 +235,11 @@ class SelectResult {
 
     Offset unrotateAroundSelection(Offset p) {
       if (rotationDeg == 0) return p;
-      final dx = p.dx - centroid.dx;
-      final dy = p.dy - centroid.dy;
+      final dx = p.dx - center.dx;
+      final dy = p.dy - center.dy;
       return Offset(
-        centroid.dx + dx * cosUnrotate - dy * sinUnrotate,
-        centroid.dy + dx * sinUnrotate + dy * cosUnrotate,
+        center.dx + dx * cosUnrotate - dy * sinUnrotate,
+        center.dy + dx * sinUnrotate + dy * cosUnrotate,
       );
     }
     
@@ -272,8 +294,7 @@ class SelectResult {
       }
     }
     
-    displayBounds = bounds ?? Rect.zero;
-    return displayBounds!;
+    return bounds ?? Rect.zero;
   }
 
   bool contains(Offset position) {

@@ -864,6 +864,10 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
   String _search = '';
   String _currentDirectory = '/';
 
+  /// Directory names of the current folder, cached for the new-folder
+  /// name validator.
+  List<String> _currentDirectories = [];
+
   @override
   void initState() {
     super.initState();
@@ -949,6 +953,7 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
             .where((name) => !FileManager.isTempSystemFileName(name))
             .toList()
           ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    if (mounted) _currentDirectories = List<String>.from(directories);
     final files = children.files.where((name) {
       if (FileManager.isTempSystemFileName(name)) return false;
       final path = _joinFile(directory, name);
@@ -1004,6 +1009,41 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
     final path = await FileManager.newFilePath(_currentDirectory);
     if (!mounted) return;
     Navigator.pop(context, path);
+  }
+
+  Future<void> _showNewFolderDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => NewFolderDialog(
+        doesFolderExist: (name) => _currentDirectories.any(
+          (existing) => existing.toLowerCase() == name.trim().toLowerCase(),
+        ),
+        createFolder: (name) {
+          unawaited(_createFolder(name));
+        },
+      ),
+    );
+  }
+
+  Future<void> _createFolder(String folderName) async {
+    final name = folderName.trim();
+    if (name.isEmpty || !mounted) return;
+    // Enter the new folder right away so a note can be created inside it.
+    final target = _normalizeDirectoryPath('$_currentDirectory$name/');
+    try {
+      await FileManager.createFolder(target);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not create folder: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
+    _openDirectory(target);
   }
 
   List<_NotePickerEntry> _filterSearch(List<_NotePickerEntry> entries) {
@@ -1127,6 +1167,12 @@ class _NotePickerDialogState extends State<_NotePickerDialog> {
                     icon: const Icon(Icons.add),
                     label: const Text('Create a New Note'),
                   ),
+                  if (_search.isEmpty)
+                    OutlinedButton.icon(
+                      onPressed: _showNewFolderDialog,
+                      icon: const Icon(Icons.create_new_folder_outlined),
+                      label: const Text('New folder'),
+                    ),
                   OutlinedButton.icon(
                     onPressed: () async {
                       final selected = await _pickNoteFromFilePicker();

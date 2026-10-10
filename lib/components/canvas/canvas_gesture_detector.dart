@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:keybinder/keybinder.dart';
 import 'package:saber/components/canvas/hud/canvas_hud.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
+import 'package:saber/components/canvas/canvas_transform_cache.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
@@ -1292,47 +1293,4 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     }
     return content;
   }
-}
-
-@visibleForTesting
-class CanvasTransformCache {
-  static const _maxCacheSize = 5;
-  static final _cache = LinkedList<CanvasTransformCacheItem>();
-
-  CanvasTransformCache._();
-
-  static void add(String filePath, Matrix4 transform) {
-    for (final entry in _cache) {
-      if (entry.filePath != filePath) continue;
-      entry.unlink();
-      break;
-    }
-    _cache.add(CanvasTransformCacheItem(filePath, transform));
-
-    if (_cache.length > _maxCacheSize) {
-      _cache.first.unlink();
-    }
-  }
-
-  static CanvasTransformCacheItem? get(String filePath) {
-    try {
-      return _cache.firstWhere((item) => item.filePath == filePath);
-    } on StateError {
-      return null;
-    }
-  }
-
-  @visibleForTesting
-  static void clear() {
-    _cache.clear();
-  }
-}
-
-@visibleForTesting
-base class CanvasTransformCacheItem
-    extends LinkedListEntry<CanvasTransformCacheItem> {
-  final String filePath;
-  final Matrix4 transform;
-
-  CanvasTransformCacheItem(this.filePath, this.transform);
 }

@@ -56,6 +56,7 @@ import 'package:saber/components/canvas/shape_control_points_overlay.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
 import 'package:saber/components/canvas/save_indicator.dart';
 import 'package:saber/components/home/home_toolbar_chrome.dart';
+import 'package:saber/components/home/new_folder_dialog.dart';
 import 'package:saber/components/editor/export_dialog.dart';
 import 'package:saber/components/editor/note_properties_dialog.dart';
 import 'package:saber/components/editor/pdf_equation_preview.dart';
@@ -243,6 +244,7 @@ class Editor extends StatefulWidget {
     this.initialPageIndexOverride,
     this.onEmbeddedChromeChanged,
     this.onOpenNoteInNewTab,
+    this.onDeleteNote,
   }) : initialPath = path != null
            ? Future.value(path)
            : FileManager.newFilePath('/'),
@@ -276,6 +278,10 @@ class Editor extends StatefulWidget {
   /// When null (split view / standalone), falls back to in-place replace.
   final Future<void> Function(String path, {int? pageIndex})?
       onOpenNoteInNewTab;
+
+  /// Tabs host closes just this tab when its note is deleted.
+  /// When null, deletion pops the whole route (standalone behavior).
+  final VoidCallback? onDeleteNote;
 
   static const extension = '.sbn2';
 
@@ -800,6 +806,16 @@ class EditorState extends State<Editor>
 
   Timer? _delayedSaveTimer;
   DateTime? _lastUserActivityForAutosave;
+
+  bool get hasUnsavedChanges =>
+      savingState.value != SavingState.saved || _saveFollowUpRequested;
+
+  /// Saves only when there are pending edits. Avoids ghost `force`
+  /// rewrites on unmodified files (BSON + renumber + thumbnail).
+  Future<void> saveIfDirty({bool updateThumbnail = false}) {
+    if (!hasUnsavedChanges) return Future.value();
+    return saveToFile(force: false, updateThumbnail: updateThumbnail);
+  }
 
   DateTime _lastSaveTime = DateTime.now();
   DateTime _lastTimeSpentUpdate = DateTime.now();
@@ -3196,6 +3212,12 @@ class EditorState extends State<Editor>
 
           if (isCurrentSelection) {
             select.selectResult.displayBounds = null;
+            // Recompute around the undone transform's pivot so the box (and
+            // the next rotation pivot) stays exact instead of drifting to
+            // the point-average centroid.
+            if (item.centroid != null) {
+              select.selectResult.recomputeBoundsAround(item.centroid!);
+            }
           }
 
           for (final idx in affectedPageIndices) {
@@ -3469,11 +3491,16 @@ class EditorState extends State<Editor>
 
           if (isCurrentSelection) {
             select.selectResult.displayBounds = null;
+            // Same as undo: recompute around the redone transform's pivot to
+            // keep the box (and the next rotation pivot) exact.
+            if (item.centroid != null) {
+              select.selectResult.recomputeBoundsAround(item.centroid!);
+            }
           }
 
           for (final idx in affectedPageIndices) {
             // Geometry changed in place (shift/rotate/scale): same objects,
-            // same count — bump the content revision so the tile spatial grid
+            // same count — bump the content revision for the tile spatial grid
             // rebuilds instead of serving stale bounds (ghost/missing ink
             // until the next count change). Also marks the note for save.
             coreInfo.pages[idx].markSaveBinaryDirty();
@@ -5732,9 +5759,12 @@ class EditorState extends State<Editor>
         preview.transformMatrix.storage,
       );
     }
-    // Recompute from committed geometry so min-size clamps stay inside the box.
+    // Recompute from committed geometry around the gesture pivot (not the
+    // point-average centroid): this returns the exact pre-transform box, so
+    // the pivot stays fixed across rotations and the overlay keeps tracking
+    // the content in translation and rotation without drifting.
     selection.displayBounds = null;
-    selection.displayBounds = selection.getBounds();
+    selection.recomputeBoundsAround(pivot);
     _selectionPreview = null;
     // Strokes were removed at drag start; put the transformed ones back.
     _reattachSelectionStrokesToPage(selection);
@@ -6448,14 +6478,17 @@ class EditorState extends State<Editor>
         final dir = idx >= 0 ? coreInfo.filePath.substring(0, idx + 1) : '';
         coreInfo.filePath = dir + newName;
         needsNaming = false;
-        return;
+      } else {
+        coreInfo.filePath = await FileManager.moveFile(extPath, newExtPath);
+        coreInfo.filePath = coreInfo.filePath.substring(
+          0,
+          coreInfo.filePath.lastIndexOf(Editor.extension),
+        );
+        needsNaming = false;
       }
-      coreInfo.filePath = await FileManager.moveFile(extPath, newExtPath);
-      coreInfo.filePath = coreInfo.filePath.substring(
-        0,
-        coreInfo.filePath.lastIndexOf(Editor.extension),
-      );
-      needsNaming = false;
+      // The tab slot and the persisted session cache the note path, so tell
+      // the host to re-sync them after a rename.
+      _notifyEmbeddedChromeChanged();
     }
 
     final actualName = coreInfo.fileName;
@@ -7260,12 +7293,12 @@ class EditorState extends State<Editor>
       _onGoToLocation(link.targetPageIndex);
       return;
     }
-    // Mesmo arquivo: apenas pula para a página.
+    // Same file: just jump to the page.
     if (link.targetPath.trim() == coreInfo.filePath) {
       _onGoToLocation(link.targetPageIndex);
       return;
     }
-    // Comportamento padrão: abrir a nota linkada em outra tab.
+    // Default behavior: open the linked note in another tab.
     final openInNewTab = widget.onOpenNoteInNewTab;
     if (openInNewTab != null) {
       unawaited(
@@ -7273,8 +7306,8 @@ class EditorState extends State<Editor>
       );
       return;
     }
-    // Fallback (split view / standalone sem host de tabs): troca in-place
-    // sem histórico/voltar.
+    // Fallback (split view / standalone without tabs host): in-place replace
+    // without history/back.
     unawaited(
       _navigateToNoteReplacingCurrent(
         link.targetPath,
@@ -9324,7 +9357,7 @@ class EditorState extends State<Editor>
   }
 
   List<Widget> _buildNoteLinkBackActions() {
-    // Removido: links agora abrem em outra tab, sem histórico/voltar.
+    // Removed: links now open in another tab, no history/back.
     return const [];
   }
 
@@ -9408,7 +9441,7 @@ class EditorState extends State<Editor>
           ],
         ),
 
-      // Botão Pages na AppBar (acesso único — sem FAB flutuante)
+      // Pages button in the AppBar (single access — no floating FAB)
       if (!coreInfo.isInfinite)
         IconButton(
           icon: const Icon(Icons.article_outlined),
@@ -10199,9 +10232,9 @@ class EditorState extends State<Editor>
                             ? const Color(0xFF1E1E1E)
                             : Theme.of(context).colorScheme.surfaceContainerLow,
                         resizeToAvoidBottomInset: false,
-                        // Sem FAB de Pages: acesso único via botão Pages na AppBar,
-                        // ao lado do botão de adicionar páginas.
-                        // AppBar só é oculta quando a ABA PAGES está aberta. Settings e Split View a mantêm visível!
+                        // No Pages FAB: single access via the Pages button in the AppBar,
+                        // next to the add-pages button.
+                        // AppBar is only hidden when the PAGES tab is open. Settings and split view keep it visible!
                         appBar:
                             (_dockedSidePanel == _EditorDockedSidePanel.pages)
                             ? null
@@ -10309,6 +10342,13 @@ class EditorState extends State<Editor>
           );
         } catch (_) {}
 
+        // Inside the tabs host, deletion closes only this tab and reveals
+        // the next one instead of popping the whole editor route.
+        final onDeleteNote = widget.onDeleteNote;
+        if (onDeleteNote != null) {
+          onDeleteNote();
+          return;
+        }
         if (mounted) {
           Navigator.of(context).pop();
         }
@@ -12052,7 +12092,26 @@ class EditorState extends State<Editor>
     }
     final hash = coreInfo.calculateFirstPageHash();
     if (hash.isEmpty || hash == _lastWrittenThumbnailHash) return;
+    // Capture theme while mounted; the async work below may outlive it.
+    final ThemeData? themeForThumb =
+        _cachedTheme ?? (mounted ? Theme.of(context) : null);
+    final MediaQueryData? mqForThumb =
+        _cachedMediaQuery ?? (mounted ? MediaQuery.of(context) : null);
     try {
+      // PDF-backed first pages never capture from the live tree: the capture
+      // would remount PdfPageView and blink the texture. Render headless.
+      if (coreInfo.pages.first.backgroundImage is PdfEditorImage) {
+        if (themeForThumb == null || mqForThumb == null) return;
+        final path = '${coreInfo.filePath}${Editor.extension}.p';
+        await FileManager.generateThumbnailForNote(
+          coreInfo: coreInfo,
+          theme: themeForThumb,
+          mediaQuery: mqForThumb,
+          path: path,
+        );
+        _markThumbnailWritten(hash);
+        return;
+      }
       final bytes = await _captureThumbnailBytesFromFirstPage();
       if (bytes == null || bytes.isEmpty) return;
       final path = '${coreInfo.filePath}${Editor.extension}.p';
@@ -12947,11 +13006,14 @@ class EditorFlatSidePanel extends StatelessWidget {
   }
 }
 
-/// Slot de uma aba do navegador de notas.
+/// Browser-tab slot for notes.
 ///
-/// Cada aba possui seu próprio [Editor] (embedded) com estado independente
-/// (strokes, histórico, scroll, etc). O host apenas alterna a visibilidade
-/// via [IndexedStack], preservando o estado das abas inativas.
+/// Tabs are lazy: only the active slot has a mounted [Editor]. Inactive
+/// slots are lightweight metadata (path + note ID), so N open tabs cost no
+/// canvas, raster, PDF, timer or gesture budget. Switching mounts the new
+/// tab (fast: OS file cache is warm) and disposes the old one after saving.
+/// [path] and [noteId] are refreshed from the live [EditorState] whenever
+/// the host syncs, so renames are tracked.
 class _BrowserTabSlot {
   _BrowserTabSlot({
     required this.id,
@@ -12959,25 +13021,65 @@ class _BrowserTabSlot {
     this.path,
     this.pdfPath,
     this.initialPageIndex,
+    this.noteId,
   });
 
   final int id;
   final GlobalKey<EditorState> key;
-  final String? path;
+  String? path;
   final String? pdfPath;
   final int? initialPageIndex;
+  String? noteId;
+
+  /// pdfPath / initialPageIndex are one-shot: they apply on the first mount
+  /// only. Re-applying them on every remount would re-import the PDF and
+  /// reset the scroll position on each tab switch.
+  bool mountConsumed = false;
 }
 
-/// Host de tabs estilo browser para o editor.
+/// Snapshot of one open tab kept across editor routes.
 ///
-/// Mantém múltiplas notas abertas e permite navegar entre elas sem
-/// perder estado. A topbar segue Material 3 (minimalista, madura):
-/// - Linha 1: AppBar da nota ativa (voltar, título editável, status save,
-///   inserir página, pages/settings).
-/// - Linha 2 (bottom do AppBar): strip de tabs (oculta com 1 tab).
+/// The host writes it on every tab mutation and reads it when a new
+/// [EditorWithTabs] mounts, so pressing back and opening another note
+/// restores all still-open tabs.
+class _PersistedEditorTab {
+  _PersistedEditorTab({this.path, this.noteId});
+
+  String? path;
+  String? noteId;
+}
+
+abstract class EditorTabSession {
+  static final List<_PersistedEditorTab> tabs = [];
+  static int activeIndex = 0;
+
+  static void replace(List<_PersistedEditorTab> next, int active) {
+    tabs
+      ..clear()
+      ..addAll(next);
+    activeIndex = active;
+  }
+
+  static void clear() {
+    tabs.clear();
+    activeIndex = 0;
+  }
+}
+
+/// Browser-style tabs host for the editor.
 ///
-/// Usado pela rota `/edit` (sem split). O split view continua usando
-/// [Editor] embedded diretamente, sem tabs aninhadas.
+/// Tabs are lazy: exactly one note is mounted at a time and inactive tabs
+/// are plain metadata, so gestures, animations and input behave exactly
+/// like single-note mode no matter how many tabs are open. Viewport
+/// (scroll/zoom) is restored per note via the transform cache; tab switches
+/// reload from warm OS file caches. The top bar follows Material 3
+/// (minimal, mature):
+/// - Line 1: active note AppBar (back, editable title, save status,
+///   insert page, pages/settings).
+/// - Line 2 (AppBar bottom): tabs strip (hidden with 1 tab).
+///
+/// Used by the `/edit` route (no split). Split view keeps using
+/// embedded [Editor] directly, without nested tabs.
 class EditorWithTabs extends StatefulWidget {
   const EditorWithTabs({
     super.key,
@@ -13000,6 +13102,11 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   int _nextId = 1;
   bool _readyRefreshScheduled = false;
 
+  /// Expected note IDs for tabs restored from the persisted session, keyed
+  /// by slot id. Used to drop tabs whose note was moved (same display path
+  /// now holding a different note) or replaced.
+  final Map<int, String> _expectedNoteIds = {};
+
   EditorState? get _activeState {
     if (_tabs.isEmpty) return null;
     if (_activeIndex < 0 || _activeIndex >= _tabs.length) return null;
@@ -13009,26 +13116,27 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   @override
   void initState() {
     super.initState();
-    _tabs = [
-      _BrowserTabSlot(
-        id: 0,
+    _tabs = [];
+    // Restore tabs kept from the previous editor visit. Entries without a
+    // path are ephemeral new notes that were never saved.
+    for (final persisted in EditorTabSession.tabs) {
+      if (persisted.path == null || persisted.path!.isEmpty) continue;
+      final slot = _BrowserTabSlot(
+        id: _nextId++,
         key: GlobalKey<EditorState>(),
-        path: widget.initialPath,
-        pdfPath: widget.pdfPath,
-        initialPageIndex: widget.initialPageIndexOverride,
-      ),
-    ];
-    _scheduleReadyRefresh();
-  }
-
-  @override
-  void didUpdateWidget(covariant EditorWithTabs oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // Navegação via `go` com path diferente abre/ativa a tab correspondente.
+        path: persisted.path,
+      );
+      _tabs.add(slot);
+      if (persisted.noteId != null && persisted.noteId!.isNotEmpty) {
+        _expectedNoteIds[slot.id] = persisted.noteId!;
+      }
+    }
+    // Merge the navigation target: an explicit path activates its tab if
+    // already open, else opens it. A null path is an explicit "new note"
+    // request, so it always opens a fresh tab on top of the restored ones.
+    // The explicit target always wins over the persisted active index.
     final incoming = widget.initialPath;
-    if (incoming != null &&
-        incoming.isNotEmpty &&
-        incoming != oldWidget.initialPath) {
+    if (incoming != null && incoming.isNotEmpty) {
       final idx = _indexOfPath(incoming);
       if (idx >= 0) {
         _activeIndex = idx;
@@ -13038,18 +13146,237 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
             id: _nextId++,
             key: GlobalKey<EditorState>(),
             path: incoming,
+            pdfPath: widget.pdfPath,
             initialPageIndex: widget.initialPageIndexOverride,
           ),
         );
         _activeIndex = _tabs.length - 1;
       }
-      _scheduleReadyRefresh();
+    } else {
+      _tabs.add(
+        _BrowserTabSlot(
+          id: _nextId++,
+          key: GlobalKey<EditorState>(),
+          path: null,
+          pdfPath: widget.pdfPath,
+          initialPageIndex: widget.initialPageIndexOverride,
+        ),
+      );
+      _activeIndex = _tabs.length - 1;
     }
+    _syncSession();
+    _scheduleReadyRefresh();
+    unawaited(_validateRestoredTabs());
+  }
+
+  @override
+  void dispose() {
+    // Skipped when leaving via back with a single tab: the session was
+    // intentionally cleared and re-syncing here would resurrect the tab.
+    if (!_exitClearedSession) _syncSession();
+    super.dispose();
+  }
+
+  /// Drops restored tabs whose file no longer exists (deleted or moved to
+  /// another folder) and tabs whose loaded note ID differs from the expected
+  /// one (path reused by a different note). Only entries restored from the
+  /// persisted session are validated; tabs created in this visit are kept.
+  Future<void> _validateRestoredTabs() async {
+    if (!mounted || _tabs.isEmpty) return;
+    // File-existence pass (cheap, synchronous IO under the hood).
+    var removed = false;
+    for (var i = _tabs.length - 1; i >= 0; i--) {
+      final slot = _tabs[i];
+      // Only validate restored tabs; fresh tabs may point at not-yet-saved
+      // new notes whose file legitimately does not exist.
+      if (!_expectedNoteIds.containsKey(slot.id)) continue;
+      final path = slot.key.currentState?.coreInfo.filePath ?? slot.path;
+      if (path == null || path.isEmpty) continue;
+      bool exists = false;
+      try {
+        exists = await FileManager.doesFileExist(path + Editor.extension);
+      } catch (_) {
+        exists = true;
+      }
+      if (!exists && mounted) {
+        _expectedNoteIds.remove(slot.id);
+        _tabs.removeAt(i);
+        removed = true;
+      }
+    }
+    if (removed && mounted) {
+      _activeIndex = _activeIndex.clamp(0, _tabs.length - 1);
+      if (_tabs.isEmpty) {
+        _syncSession();
+        _replaceWithFreshTabOrHome();
+        return;
+      }
+      setState(() {});
+      _syncSession();
+    }
+    // Identity of inactive tabs is verified lazily on activation (see
+    // _validateActiveNoteId): only the mounted editor can report its note
+    // ID, and only one editor is ever mounted.
+  }
+
+  /// Drops the active tab when its loaded note ID differs from the expected
+  /// one recorded in the persisted session (same display path now holding a
+  /// different note, e.g. after a move). Inactive tabs keep their expectation
+  /// until they are activated. No-ops for tabs created in this visit.
+  Future<void> _validateActiveNoteId() async {
+    for (var attempt = 0; attempt < 10; attempt++) {
+      if (!mounted || _tabs.isEmpty) return;
+      final slot = _tabs[_activeIndex.clamp(0, _tabs.length - 1)];
+      final expected = _expectedNoteIds[slot.id];
+      if (expected == null || expected.isEmpty) return;
+      final st = slot.key.currentState;
+      if (st == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        continue;
+      }
+      final loadedId = st.coreInfo.noteId;
+      if (loadedId.isEmpty) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
+      _expectedNoteIds.remove(slot.id);
+      if (loadedId == expected || !mounted) return;
+      final index = _tabs.indexOf(slot);
+      if (index < 0) return;
+      if (_tabs.length == 1) {
+        _syncSession();
+        _replaceWithFreshTabOrHome();
+        return;
+      }
+      _removeTabAt(index);
+      _scheduleReadyRefresh();
+      return;
+    }
+  }
+
+  /// Falls back to a fresh empty tab when validation pruned everything and
+  /// no incoming note was requested; otherwise leaves the editor for home.
+  void _replaceWithFreshTabOrHome() {
+    if (widget.initialPath == null || widget.initialPath!.isEmpty) {
+      _tabs.add(
+        _BrowserTabSlot(id: _nextId++, key: GlobalKey<EditorState>()),
+      );
+      _activeIndex = 0;
+      _syncSession();
+      if (mounted) setState(() {});
+      _scheduleReadyRefresh();
+      return;
+    }
+    _goToHome();
+  }
+
+  @override
+  void didUpdateWidget(covariant EditorWithTabs oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Navigation via `go` opens/activates the matching tab. A null path is
+    // an explicit "new note" request and always opens a fresh tab.
+    final incoming = widget.initialPath;
+    if (incoming == oldWidget.initialPath &&
+        widget.pdfPath == oldWidget.pdfPath) {
+      return;
+    }
+    if (incoming != null && incoming.isNotEmpty) {
+      final idx = _indexOfPath(incoming);
+      if (idx >= 0) {
+        unawaited(_setActiveIndex(idx));
+      } else {
+        unawaited(
+          _addTabAndSwitch(
+            path: incoming,
+            initialPageIndex: widget.initialPageIndexOverride,
+          ),
+        );
+      }
+      return;
+    }
+    if (incoming == null) {
+      unawaited(
+        _addTabAndSwitch(
+          initialPageIndex: widget.initialPageIndexOverride,
+        ),
+      );
+    }
+  }
+
+  /// Switch guard: rapid taps resolve last-wins instead of racing saves and
+  /// mounts against each other.
+  int _switchEpoch = 0;
+
+  /// Centralized switch. Only one editor is ever mounted, so this persists
+  /// the outgoing tab first (cheap no-op when clean), then mounts the new
+  /// one. Never saves tabs in parallel and never keeps background canvases.
+  Future<void> _setActiveIndex(int index) async {
+    if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
+    final epoch = ++_switchEpoch;
+    final outgoing = _activeState;
+    if (outgoing != null) {
+      try {
+        await outgoing.saveIfDirty(updateThumbnail: false);
+      } catch (_) {}
+    }
+    if (!mounted || epoch != _switchEpoch) return;
+    setState(() => _activeIndex = index);
+    _syncSession();
+    _scheduleReadyRefresh();
+    unawaited(_validateActiveNoteId());
+  }
+
+  /// Appends a tab and switches to it through the standard save-then-switch
+  /// path, so the outgoing tab is persisted before unmounting.
+  Future<void> _addTabAndSwitch({
+    String? path,
+    String? pdfPath,
+    int? initialPageIndex,
+  }) async {
+    if (!mounted) return;
+    final slot = _BrowserTabSlot(
+      id: _nextId++,
+      key: GlobalKey<EditorState>(),
+      path: path,
+      pdfPath: pdfPath,
+      initialPageIndex: initialPageIndex,
+    );
+    _tabs.add(slot);
+    _syncSession();
+    await _setActiveIndex(_tabs.indexOf(slot));
   }
 
   void _bumpChrome() {
     if (!mounted) return;
+    _refreshSlotPathsFromLiveStates();
+    _syncSession();
     setState(() {});
+  }
+
+  /// Copies live file paths and note IDs from mounted editors into their
+  /// slots, so renames are tracked and the persisted session stays accurate.
+  void _refreshSlotPathsFromLiveStates() {
+    for (final slot in _tabs) {
+      final st = slot.key.currentState;
+      if (st == null) continue;
+      final livePath = st.coreInfo.filePath;
+      if (livePath.isNotEmpty) slot.path = livePath;
+      final liveId = st.coreInfo.noteId;
+      if (liveId.isNotEmpty) slot.noteId = liveId;
+    }
+  }
+
+  /// Persists the current tab list (path + note ID) and active index so a
+  /// later editor visit restores all still-open tabs.
+  void _syncSession() {
+    _refreshSlotPathsFromLiveStates();
+    EditorTabSession.replace(
+      [
+        for (final slot in _tabs)
+          _PersistedEditorTab(path: slot.path, noteId: slot.noteId),
+      ],
+      _activeIndex.clamp(0, _tabs.length - 1),
+    );
   }
 
   void _scheduleReadyRefresh() {
@@ -13058,13 +13385,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyRefreshScheduled = false;
       if (!mounted) return;
-      // O Editor monta de forma assíncrona; garante que AppBar/toolbar
-      // saiam do placeholder assim que o estado ativo existir.
+      // The Editor mounts asynchronously; ensures AppBar/toolbar
+      // leave the placeholder as soon as the active state exists.
       if (_activeState == null) {
         _scheduleReadyRefresh();
         return;
       }
       _bumpChrome();
+      unawaited(_validateActiveNoteId());
     });
   }
 
@@ -13138,69 +13466,42 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (!mounted || selected == null || selected.isEmpty) return;
     final existing = _indexOfPath(selected);
     if (existing >= 0) {
-      setState(() => _activeIndex = existing);
+      unawaited(_setActiveIndex(existing));
       return;
     }
-    setState(() {
-      _tabs.add(
-        _BrowserTabSlot(
-          id: _nextId++,
-          key: GlobalKey<EditorState>(),
-          path: selected,
-        ),
-      );
-      _activeIndex = _tabs.length - 1;
-    });
-    _scheduleReadyRefresh();
+    await _addTabAndSwitch(path: selected);
   }
 
-  /// Abre a nota linkada em outra tab (sem fechar a atual, sem voltar).
-  /// Se já aberta, apenas ativa e pula para a página.
+  /// Opens the linked note in another tab (without closing the current one, no back).
+  /// If already open, just activates it and jumps to the page.
   Future<void> _openNoteInNewTab(String path, {int? pageIndex}) async {
     final target = path.trim();
     if (target.isEmpty || !mounted) return;
     final idx = _indexOfPath(target);
     if (idx >= 0) {
-      setState(() => _activeIndex = idx);
-      final st = _tabs[idx].key.currentState;
-      if (pageIndex != null && pageIndex >= 0 && st != null) {
-        // Agenda pós-frame para garantir layout pronto após a troca de tab.
+      await _setActiveIndex(idx);
+      if (!mounted || _activeIndex != idx) return;
+      if (pageIndex != null && pageIndex >= 0) {
+        // Post-frame so layout is ready after the tab switch.
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
+          if (!mounted || idx >= _tabs.length) return;
           final s = _tabs[idx].key.currentState;
           s?._navigateToPage(pageIndex);
         });
       }
       return;
     }
-    setState(() {
-      _tabs.add(
-        _BrowserTabSlot(
-          id: _nextId++,
-          key: GlobalKey<EditorState>(),
-          path: target,
-          initialPageIndex: pageIndex,
-        ),
-      );
-      _activeIndex = _tabs.length - 1;
-    });
-    _scheduleReadyRefresh();
+    await _addTabAndSwitch(path: target, initialPageIndex: pageIndex);
   }
 
   void _switchTab(int index) {
-    if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
-    setState(() => _activeIndex = index);
-    _scheduleReadyRefresh();
+    unawaited(_setActiveIndex(index));
   }
 
-  void _closeTab(int index) {
-    if (_tabs.isEmpty) return;
-    if (_tabs.length == 1) {
-      _goToHome();
-      return;
-    }
-    final slot = _tabs[index];
-    unawaited(slot.key.currentState?.saveToFile(force: true));
+  /// Removes the tab at [index] and reveals a neighbor. The closed editor
+  /// disposes itself (single save if dirty).
+  void _removeTabAt(int index) {
+    if (index < 0 || index >= _tabs.length) return;
     setState(() {
       _tabs.removeAt(index);
       if (_activeIndex > index) {
@@ -13209,19 +13510,72 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         _activeIndex = _tabs.length - 1;
       }
     });
+    _syncSession();
   }
 
+  void _closeTab(int index) {
+    if (_tabs.isEmpty) return;
+    if (_tabs.length == 1) {
+      _goToHome();
+      return;
+    }
+    // No upfront save: Editor dispose (_cleanUpAsync) already saves once
+    // if dirty. A forced save here raced dispose (double-save + duplicated
+    // BSON/thumbnail work).
+    final closingActive = index == _activeIndex;
+    _removeTabAt(index);
+    if (closingActive) _scheduleReadyRefresh();
+  }
+
+  /// Called by a tab editor right after its note file was deleted.
+  /// Closes just that tab and reveals the next one instead of popping the
+  /// whole editor route.
+  void _handleTabNoteDeleted(_BrowserTabSlot slot) {
+    final index = _tabs.indexOf(slot);
+    if (index < 0) return;
+    final path = slot.key.currentState?.coreInfo.filePath ?? slot.path;
+    if (path != null && path.isNotEmpty) {
+      HomeDataCache.instance.forgetRecentPaths([path]);
+    }
+    if (_tabs.length == 1) {
+      EditorTabSession.clear();
+      _goToHome();
+      return;
+    }
+    final closingActive = index == _activeIndex;
+    _removeTabAt(index);
+    if (closingActive) _scheduleReadyRefresh();
+  }
+
+  bool _isNavigatingHome = false;
+
+  /// Set when leaving via back with a single tab so [dispose] does not
+  /// re-persist the intentionally closed tab into the session.
+  bool _exitClearedSession = false;
+
   void _goToHome() {
+    if (_isNavigatingHome) return;
     unawaited(_goToHomeAfterThumbnails());
   }
 
   Future<void> _goToHomeAfterThumbnails() async {
+    if (_isNavigatingHome) return;
+    _isNavigatingHome = true;
     try {
-      await Future.wait([
-        for (final slot in _tabs)
-          slot.key.currentState?._flushThumbnailBeforeExit() ??
-              Future<void>.value(),
-      ]);
+      // Only one editor is ever mounted: a single dirty-save plus one
+      // thumbnail capture, never N concurrent captures on the UI isolate.
+      // Afterwards dispose becomes a no-op for the saved tab.
+      final st = _activeState;
+      if (st != null && st.hasUnsavedChanges) {
+        try {
+          await st.saveIfDirty(updateThumbnail: false);
+        } catch (_) {}
+        await Future<void>.delayed(Duration.zero);
+      }
+      try {
+        await (_activeState?._flushThumbnailBeforeExit() ??
+            Future<void>.value());
+      } catch (_) {}
     } catch (_) {}
     final remember = <String>[];
     final forget = <String>[];
@@ -13241,8 +13595,18 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (remember.isNotEmpty) {
       HomeDataCache.instance.rememberRecentPaths(remember);
     }
-    if (!mounted) return;
-    // Fecha sem animação de saída brusca: tenta pop, senão vai ao recent.
+    if (!mounted) {
+      _isNavigatingHome = false;
+      return;
+    }
+    // Back with a single tab closes that tab: clear the session so opening
+    // another note later starts fresh with one tab. With several tabs the
+    // session is kept as-is and all tabs restore on the next visit.
+    if (_tabs.length <= 1) {
+      EditorTabSession.clear();
+      _exitClearedSession = true;
+    }
+    // Close without a jarring exit animation: pop when possible, else go recent.
     if (context.canPop()) {
       context.pop();
     } else {
@@ -13326,14 +13690,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     return inner;
   }
 
-  /// Strip de tabs como `bottom` do AppBar (M3, minimalista).
-  /// Oculta quando há apenas 1 nota aberta; aparece com 2+ tabs.
+  /// Tabs strip as AppBar `bottom` (minimal M3).
+  /// Hidden with a single open note; shown with 2+ tabs.
   PreferredSizeWidget? _buildTabStripBottom(
     BuildContext context,
     PreferredSizeWidget? innerBottom,
   ) {
     if (_tabs.length <= 1) return innerBottom;
-    // Altura: strip 48 + eventual bottom interno (nulo hoje, preservado p/ futuro).
+    // Height: 48 strip + eventual inner bottom (null today, kept for future).
     final extra = innerBottom?.preferredSize.height ?? 0;
     return PreferredSize(
       preferredSize: Size.fromHeight(48 + extra),
@@ -13509,16 +13873,25 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   }
 
   Widget _buildPane(_BrowserTabSlot slot) {
+    // One-shot route params: pdfPath and initialPageIndex apply on the first
+    // mount only. Re-applying them on every remount would re-import the PDF
+    // and reset the scroll position on each tab switch (viewport is restored
+    // via the transform cache instead).
+    final pdfPath = slot.mountConsumed ? null : slot.pdfPath;
+    final initialPageIndex =
+        slot.mountConsumed ? null : slot.initialPageIndex;
+    slot.mountConsumed = true;
     return RepaintBoundary(
       child: Editor(
         key: slot.key,
         path: slot.path,
-        pdfPath: slot.pdfPath,
-        initialPageIndexOverride: slot.initialPageIndex,
+        pdfPath: pdfPath,
+        initialPageIndexOverride: initialPageIndex,
         embedded: true,
         showToolbar: false,
         onEmbeddedChromeChanged: _bumpChrome,
         onOpenNoteInNewTab: _openNoteInNewTab,
+        onDeleteNote: () => _handleTabNoteDeleted(slot),
       ),
     );
   }
@@ -13528,12 +13901,25 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     _scheduleReadyRefresh();
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    // Transient empty list (last tab removed while navigating home): render
+    // a blank scaffold instead of indexing an empty list.
+    if (_tabs.isEmpty) {
+      return Scaffold(
+        backgroundColor: theme.brightness == Brightness.dark
+            ? const Color(0xFF1E1E1E)
+            : colorScheme.surfaceContainerLow,
+        resizeToAvoidBottomInset: false,
+        primary: false,
+        body: const SizedBox.shrink(),
+      );
+    }
     final activeState = _activeState;
+    final activeIdx = _activeIndex.clamp(0, _tabs.length - 1);
 
-    final canvases = IndexedStack(
-      index: _activeIndex.clamp(0, _tabs.length - 1),
-      children: [for (final slot in _tabs) _buildPane(slot)],
-    );
+    // Lazy tabs: exactly one Editor is mounted. Inactive tabs are metadata
+    // only, so gestures, sidebars and strokes run on the same budget as
+    // single-note mode regardless of tab count.
+    final canvases = _buildPane(_tabs[activeIdx]);
 
     final axisDir = stows.editorToolbarAlignment.value;
     final isToolbarVertical =
@@ -13587,8 +13973,8 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         appBar: _buildTabbedAppBar(context),
         body: body,
         primary: false,
-        // Sem FAB de Pages: acesso único via botão Pages na AppBar,
-        // ao lado do botão de adicionar páginas.
+        // No Pages FAB: single access via the Pages button in the AppBar,
+        // next to the add-pages button.
       ),
     );
   }
