@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /// Canonical storage for toolbar pen-size presets: same internal units as [Pen.options.size]
-/// (0.5–5 step 0.5). The pen modal displays [formatModalStrokeLabel] (= internal × 2, so 1.0–10.0).
+/// (0.5–50 step 0.5). Everywhere displays [formatModalStrokeLabel] (= internal × 2, so 1.0–100.0).
 abstract final class PenStrokePresetScaling {
   static const double internalMin = 0.5;
-  static const double internalMax = 5.0;
+  static const double internalMax = 50.0;
   static const double internalStep = 0.5;
 
   /// Divisions between min and max for a Material slider (`min/max + divisions`).
-  static const int sliderDivisions = 9;
+  static const int sliderDivisions = 99;
 
   /// Snap **internal** width to nearest 0.5 in [internalMin], [internalMax].
   static double snapInternal(double v) {
@@ -18,8 +18,8 @@ abstract final class PenStrokePresetScaling {
     return internalMin + n * internalStep;
   }
 
-  /// Pen modal slider label — matches [_SizeSlider] logic for ordinary pens:
-  /// [SizePicker] shows **internal × 2** (approximately 1.0–10.0).
+  /// Pen modal slider label — matches [_SizeSlider] logic for every tool:
+  /// [SizePicker] shows **internal × 2** (1.0–100.0).
   static String formatModalStrokeLabel(double internal) =>
       (snapInternal(internal) * 2).toStringAsFixed(1);
 
@@ -28,8 +28,8 @@ abstract final class PenStrokePresetScaling {
     final parsed = double.tryParse(raw.trim());
     if (parsed == null) return snapInternal(2.0);
 
-    // Historically sliders used ~0.5–24 (misleading "px"); treat clearly-out-of-range
-    // legacy values linearly onto our internal stroke range.
+    // Historically sliders used ~0.5–24 (misleading "px"); values above the
+    // current range are clamped to it by [snapInternal] below.
     if (parsed <= internalMax + 1e-9) return snapInternal(parsed);
 
     final t = ((parsed.clamp(internalMin, 24.0) - internalMin) /

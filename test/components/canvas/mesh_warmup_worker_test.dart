@@ -88,7 +88,7 @@ List<Stroke> _corpus() {
   final neon = testPolylineStroke(toolId: ToolId.ballpointPen, y: 480);
   neon.neon = true;
   strokes.add(neon);
-  final pencil = testPolylineStroke(toolId: ToolId.advancedPencil, y: 560);
+  final pencil = testPolylineStroke(toolId: ToolId.pencil, y: 560);
   pencil.paint = const StrokePaint(
     mode: StrokePaintMode.pencilNoise,
     pressureMapsToCoverage: true,

@@ -42,12 +42,14 @@ void main() {
       }
     }
 
+    // The Advanced pen runs its own brush smoothing engine (spring-mass +
+    // stroke-end prediction) instead of the Saber motion predictor, so it
+    // is covered by the brush parity and no-cap-pop tests instead.
     for (final id in [
       ToolId.ballpointPen,
       ToolId.fountainPen,
       ToolId.calligraphyPen,
-      ToolId.advancedPen,
-      ToolId.advancedPencil,
+      ToolId.pencil,
     ]) {
       test('$id live tip leads cruise, commit snaps back', () {
         final stroke = liveStroke(id);

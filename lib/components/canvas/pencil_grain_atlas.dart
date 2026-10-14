@@ -6,7 +6,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-/// Tiling graphite / paper-tooth atlases for Advanced Pencil.
+/// Tiling graphite / paper-tooth atlases for pencil.
 ///
 /// Skia/Impeller sample these as [ui.Image] samplers (the same hardware path
 /// as Android `BitmapShader`): bilinear fetch instead of hashing 4 lattice

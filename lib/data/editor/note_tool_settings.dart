@@ -34,9 +34,7 @@ class NoteToolSettings {
     this.shapePenColor,
     this.advancedPenOptions,
     this.advancedPenColor,
-    this.advancedPenMainEasingId,
-    this.advancedPenStartEasingId,
-    this.advancedPenEndEasingId,
+    this.advancedPenBrushOptions,
 
     this.laserPointerSize,
 
@@ -65,9 +63,7 @@ class NoteToolSettings {
   final int? shapePenColor;
   final Map<String, dynamic>? advancedPenOptions;
   final int? advancedPenColor;
-  final String? advancedPenMainEasingId;
-  final String? advancedPenStartEasingId;
-  final String? advancedPenEndEasingId;
+  final Map<String, dynamic>? advancedPenBrushOptions;
 
   final double? laserPointerSize;
 
@@ -97,9 +93,7 @@ class NoteToolSettings {
       if (shapePenColor != null) 'spc': shapePenColor,
       if (advancedPenOptions != null) 'apo': advancedPenOptions,
       if (advancedPenColor != null) 'apc': advancedPenColor,
-      if (advancedPenMainEasingId != null) 'ame': advancedPenMainEasingId,
-      if (advancedPenStartEasingId != null) 'ase': advancedPenStartEasingId,
-      if (advancedPenEndEasingId != null) 'aee': advancedPenEndEasingId,
+      if (advancedPenBrushOptions != null) 'apb': advancedPenBrushOptions,
       if (laserPointerSize != null) 'lps': laserPointerSize,
       if (eraserSize != null) 'es': eraserSize,
       if (eraserMode != null) 'em': eraserMode,
@@ -144,9 +138,9 @@ class NoteToolSettings {
           ? null
           : Map<String, dynamic>.from(json['apo']),
       advancedPenColor: (json['apc'] as num?)?.toInt(),
-      advancedPenMainEasingId: json['ame'] as String?,
-      advancedPenStartEasingId: json['ase'] as String?,
-      advancedPenEndEasingId: json['aee'] as String?,
+      advancedPenBrushOptions: json['apb'] == null
+          ? null
+          : Map<String, dynamic>.from(json['apb']),
       laserPointerSize: (json['lps'] as num?)?.toDouble(),
       eraserSize: (json['es'] as num?)?.toDouble(),
       eraserMode: (json['em'] as num?)?.toInt(),
@@ -180,6 +174,7 @@ NoteToolSettings captureNoteToolSettings({
   int highlighterColor = stows.lastHighlighterColor.value;
   StrokeOptions advancedOpts = stows.lastAdvancedPenOptions.value;
   int advancedColor = stows.lastAdvancedPenColor.value;
+  AdvancedPenOptions advancedBrush = stows.lastAdvancedPenBrushOptions.value;
 
   final cp = Pen.currentPen;
   final ch = Highlighter.currentHighlighter;
@@ -195,6 +190,7 @@ NoteToolSettings captureNoteToolSettings({
   } else if (cp.toolId == ToolId.advancedPen) {
     advancedOpts = cp.options;
     advancedColor = cp.color.value;
+    advancedBrush = cp.brushOptions;
   }
 
   highlighterOpts = ch.options;
@@ -221,9 +217,7 @@ NoteToolSettings captureNoteToolSettings({
     shapePenColor: stows.lastShapePenColor.value,
     advancedPenOptions: advancedOpts.toJson(),
     advancedPenColor: advancedColor,
-    advancedPenMainEasingId: stows.lastAdvancedPenMainEasingId.value,
-    advancedPenStartEasingId: stows.lastAdvancedPenStartEasingId.value,
-    advancedPenEndEasingId: stows.lastAdvancedPenEndEasingId.value,
+    advancedPenBrushOptions: advancedBrush.toJson(),
     laserPointerSize: stows.laserPointerSize.value,
     eraserSize: Eraser.currentEraser.size,
     eraserMode: Eraser.currentEraser.mode.index,
@@ -325,15 +319,14 @@ void applyNoteToolSettings(NoteToolSettings settings) {
   if (settings.advancedPenColor != null) {
     stows.lastAdvancedPenColor.value = settings.advancedPenColor!;
   }
-  if (settings.advancedPenMainEasingId != null) {
-    stows.lastAdvancedPenMainEasingId.value = settings.advancedPenMainEasingId!;
-  }
-  if (settings.advancedPenStartEasingId != null) {
-    stows.lastAdvancedPenStartEasingId.value =
-        settings.advancedPenStartEasingId!;
-  }
-  if (settings.advancedPenEndEasingId != null) {
-    stows.lastAdvancedPenEndEasingId.value = settings.advancedPenEndEasingId!;
+  if (settings.advancedPenBrushOptions != null) {
+    try {
+      stows.lastAdvancedPenBrushOptions.value = AdvancedPenOptions.fromJson(
+        settings.advancedPenBrushOptions!,
+      );
+    } catch (_) {
+      // Keep the current brush style when the payload is invalid.
+    }
   }
 
   if (settings.laserPointerSize != null) {
@@ -367,6 +360,8 @@ Pen _penFromType(ToolId id) {
       return Pen.ballpointPen();
     case ToolId.advancedPen:
       return Pen.advancedPen();
+    case ToolId.pencil:
+      return Pen.pencil();
     default:
       return Pen.ballpointPen();
   }

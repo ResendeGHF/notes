@@ -93,6 +93,9 @@ void main() {
     test('jittered put-down keeps symmetric start caps', () {
       // Single-sample spike at pen down must not lean the start fan: both
       // sides of the tip stay covered, like the Advanced Pen guarantee.
+      // NB: Path.contains excludes the boundary, so the behind-tip probe
+      // sits at 94% of the nominal radius (exact-circle caps otherwise make
+      // this a float-dust lottery).
       for (final id in [ToolId.ballpointPen, ToolId.advancedPen]) {
         final stroke = strokeFor(id);
         const pts = [
@@ -106,7 +109,7 @@ void main() {
           stroke.addPoint(pts[i], 0.6, Duration(milliseconds: i * 8));
         }
         final path = livePath(stroke);
-        expect(path.contains(const Offset(-1.8, 0)), isTrue,
+        expect(path.contains(const Offset(-1.7, 0)), isTrue,
             reason: '$id cap behind tip');
         expect(path.contains(const Offset(0, 1.5)), isTrue,
             reason: '$id cap symmetric +');

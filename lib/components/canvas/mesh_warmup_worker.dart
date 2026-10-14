@@ -42,7 +42,9 @@ const int kMeshWarmupMinStrokes = 300;
 bool strokeNeedsMeshWarmup(Stroke s) {
   if (s.points.length < 2 || s.hasCachedMesh) return false;
   final tool = s.toolId;
-  if (tool == ToolId.highlighter || tool == ToolId.advancedPen) return false;
+  if (tool == ToolId.highlighter || tool == ToolId.advancedPen) {
+    return false;
+  }
   if (s is ShapeStroke || s is CircleStroke || s is RectangleStroke) {
     return false;
   }

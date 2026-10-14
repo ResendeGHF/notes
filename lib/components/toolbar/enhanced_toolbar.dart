@@ -10,7 +10,6 @@ import 'package:flutter_quill/flutter_quill.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:saber/components/toolbar/advanced_pen_panel.dart';
-import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/color_toolbar.dart';
 import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/pen_size_preset_toolbar.dart';
@@ -788,8 +787,8 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
         case ToolId.advancedPen:
           _selectedPen = Pen.advancedPen();
           break;
-        case ToolId.advancedPencil:
-          _selectedPen = Pen.advancedPencil();
+        case ToolId.pencil:
+          _selectedPen = Pen.pencil();
           break;
         default:
           _selectedPen = Pen.ballpointPen();
@@ -867,18 +866,10 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
           AdvancedPenPresets(
             pen: activePen,
             onChanged: () {
-              stows.lastAdvancedPenOptions.value = activePen.options.copyWith();
-              setState(() {});
-            },
-          ),
-          const SizedBox(height: 16),
-        ],
-        if (activePen.toolId == ToolId.advancedPencil) ...[
-          AdvancedPencilPresets(
-            pen: activePen,
-            onChanged: () {
-              stows.lastAdvancedPencilOptions.value = activePen.options.copyWith();
-              stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(activePen.paint.toJson(embedBytes: false));
+              stows.lastAdvancedPenOptions.value =
+                  activePen.options.copyWith();
+              stows.lastAdvancedPenBrushOptions.value =
+                  activePen.brushOptions.copyWith();
               setState(() {});
             },
           ),
@@ -959,18 +950,10 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
           AdvancedPenSettings(
             pen: activePen,
             onChanged: () {
-              stows.lastAdvancedPenOptions.value = activePen.options.copyWith();
-              setState(() {});
-            },
-          ),
-        ],
-        if (activePen.toolId == ToolId.advancedPencil) ...[
-          const Divider(height: 32),
-          AdvancedPencilSettings(
-            pen: activePen,
-            onChanged: () {
-              stows.lastAdvancedPencilOptions.value = activePen.options.copyWith();
-              stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(activePen.paint.toJson(embedBytes: false));
+              stows.lastAdvancedPenOptions.value =
+                  activePen.options.copyWith();
+              stows.lastAdvancedPenBrushOptions.value =
+                  activePen.brushOptions.copyWith();
               setState(() {});
             },
           ),
@@ -988,7 +971,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
     Pen.ballpointPen(),
     Pen.calligraphyPen(),
     Pen.fountainPen(),
-    Pen.advancedPencil(),
+    Pen.pencil(),
     Pen.advancedPen(),
   ];
 
@@ -997,7 +980,7 @@ class _PenSelectionCardState extends State<_PenSelectionCard> {
       ToolId.ballpointPen => Symbols.ink_pen,
       ToolId.calligraphyPen => Symbols.brush,
       ToolId.fountainPen => Symbols.stylus_fountain_pen,
-      ToolId.advancedPencil => Symbols.stylus_pencil,
+      ToolId.pencil => Symbols.stylus_pencil,
       ToolId.advancedPen => Symbols.draw,
       _ => Symbols.ink_pen,
     };

@@ -59,6 +59,23 @@ class SdocxParser {
       entry.bytes = kv.value;
     }
 
+    // Note-level metadata (`note.note`): string table for pen-name
+    // resolution plus the default page-template URI fallback.
+    var stringTable = const <int, String>{};
+    String? defaultTemplateUri;
+    final noteBytes = entries['note.note'];
+    if (noteBytes != null) {
+      try {
+        final meta = _parseNoteMetadata(noteBytes);
+        stringTable = meta.stringTable;
+        defaultTemplateUri = meta.templateUri;
+      } catch (_) {
+        // Fallback scan below still recovers pen names from raw bytes.
+        final fallback = _scanPenStrings(noteBytes);
+        if (fallback.isNotEmpty) stringTable = fallback;
+      }
+    }
+
     // Page order from pageIdInfo.dat, fallback to sorted .page names.
     List<String> orderedIds = [];
     final manifestBytes = entries['pageIdInfo.dat'];
@@ -95,7 +112,7 @@ class SdocxParser {
         final bytes = uuidToBytes[id];
         if (bytes == null) continue; // missing entry -> skip (Rust warns)
         try {
-          orderedPages.add(parsePage(bytes));
+          orderedPages.add(parsePage(bytes, stringTable: stringTable));
         } catch (_) {
           // Corrupt page -> skip rather than failing whole import.
           continue;
@@ -105,7 +122,7 @@ class SdocxParser {
       for (final kv in uuidToBytes.entries) {
         if (orderedIds.contains(kv.key)) continue;
         try {
-          orderedPages.add(parsePage(kv.value));
+          orderedPages.add(parsePage(kv.value, stringTable: stringTable));
         } catch (_) {
           continue;
         }
@@ -113,7 +130,7 @@ class SdocxParser {
     } else {
       for (final name in pageEntries) {
         try {
-          orderedPages.add(parsePage(entries[name]!));
+          orderedPages.add(parsePage(entries[name]!, stringTable: stringTable));
         } catch (_) {
           continue;
         }
@@ -124,6 +141,8 @@ class SdocxParser {
       pages: orderedPages,
       mediaByBindId: mediaByBindId,
       mediaByFileName: mediaByFileName,
+      stringTable: stringTable,
+      defaultTemplateUri: defaultTemplateUri,
     );
   }
 
@@ -216,8 +235,208 @@ class SdocxParser {
     return ids;
   }
 
-  static String peekPageUuid(Uint8List data) {
+  // ------------------------------------------------------------------
+  // note.note flexible metadata: string table (bit 10) + default
+  // page-template URI (bit 6). Mirrors Rust `NoteMetadataDecoder`
+  // (bit order 0..fields.len()*8, stop at first unparsed field).
+  // ------------------------------------------------------------------
+
+  static _SdocxNoteMeta _parseNoteMetadata(Uint8List data) {
     final r = SdocxReader(data);
+    final flexibleOffset = r.readU32();
+    SdocxMask.read(r); // properties
+    final fields = SdocxMask.read(r);
+    r.skip(4); // format version
+    r.readUtf16U16(); // note id (may be empty)
+    r.skip(4 + 8 + 8 + 4 + 4 + 4 + 4 + 4); // rev, created, modified,
+    // w, h, hPad, vPad, minVersion
+    final titleSize = r.readU32();
+    r.skip(titleSize);
+    final bodySize = r.readU32();
+    r.skip(bodySize);
+    // Remaining fixed bytes up to flexibleOffset are trailing fixed data
+    // (e.g. default page dimensions); the flexible block starts at the
+    // recorded offset.
+    final payloadEnd = data.length - 32; // 32-byte integrity trailer
+    if (flexibleOffset < r.offset ||
+        flexibleOffset > payloadEnd ||
+        payloadEnd < 0) {
+      throw FormatException('Note flexible data outside note payload');
+    }
+    final flex = SdocxReader(data.sublist(flexibleOffset, payloadEnd));
+
+    final stringTable = <int, String>{};
+    String? templateUri;
+    for (var bit = 0; bit < fields.bytes.length * 8; bit++) {
+      if (!fields.contains(bit)) continue;
+      switch (bit) {
+        case 0:
+          flex.readUtf16U16(); // application name
+        case 1:
+          flex.skip(4 + 4); // version major/minor
+          flex.readUtf16U16(); // patch name
+        case 2:
+          flex.readNullableUtf16U16(); // author name
+          flex.readNullableUtf16U16(); // phone
+          flex.readNullableUtf16U16(); // email
+          flex.skip(4); // author image media id
+        case 3:
+          flex.skip(8 + 8); // lat/lon
+        case 6:
+          templateUri = flex.readUtf16U16();
+        case 7:
+          flex.skip(4); // last-edited page index
+        case 9:
+          flex.skip(4 + 8); // last-edited image media id + time
+        case 10:
+          final size = flex.readU32();
+          final tableBytes = flex.readBytes(size);
+          final tr = SdocxReader(tableBytes);
+          final count = tr.readU16();
+          for (var i = 0; i < count; i++) {
+            final id = tr.readU32();
+            final text = tr.readUtf16U16();
+            stringTable[id] = text;
+          }
+        case 11:
+          flex.skip(4); // body font size delta
+        case 12:
+          _skipNotePen(flex, modern: false);
+        case 13:
+          final count = flex.readU32();
+          for (var i = 0; i < count; i++) {
+            final recSize = flex.readU32();
+            flex.skip(recSize);
+          }
+        case 14:
+          final count = flex.readU16();
+          for (var i = 0; i < count; i++) {
+            flex.readUtf16U16(); // attachment name
+            flex.skip(4); // media id
+          }
+        case 15:
+          final size = flex.readU32();
+          if (size < 4) {
+            throw FormatException('Note pen block smaller than prefix');
+          }
+          flex.skip(size - 4);
+        case 16:
+          flex.skip(8); // server checkpoint
+        case 17:
+          flex.readUtf16U16(); // fixed font
+        case 18:
+          flex.skip(4); // fixed text direction
+        case 19:
+          flex.skip(4); // fixed background theme
+        case 20:
+          flex.readUtf16U16(); // text summarization
+        case 21:
+          flex.skip(4); // stroke group size
+        case 22:
+          flex.readUtf16U32(); // app custom data
+        default:
+          // Unknown extension field: same as Rust, stop here. A best-effort
+          // pen-string scan below still recovers names for mapping.
+          return _SdocxNoteMeta(stringTable, templateUri);
+      }
+    }
+    return _SdocxNoteMeta(stringTable, templateUri);
+  }
+
+  static void _skipNotePen(SdocxReader flex, {required bool modern}) {
+    flex.readUtf16U16(); // name
+    flex.skip(4 + 4 + 4); // size, color, curvable
+    flex.readUtf16U16(); // advanced setting
+    flex.skip(4 + 4 + 4); // eraser, size level, particle density
+    if (modern) flex.skip(4 + 4); // particle size, fixed width
+    flex.skip(4 + 4 + 4 + 4); // hsv[3] + color UI info
+  }
+
+  /// Best-effort fallback: harvest `id -> pen-ish string` pairs straight
+  /// from raw `note.note` bytes when the structured walk above stops early
+  /// (unknown extension field) before reaching the string table.
+  ///
+  /// Only strings containing `pen.preload.` or exactly matching a known
+  /// Samsung pen short name are collected, with small sane ids, so random
+  /// binary cannot pollute the map.
+  static Map<int, String> _scanPenStrings(Uint8List data) {
+    const known = <String>{
+      'DefaultPen',
+      'AirBrushPen',
+      'Beautify',
+      'Brush',
+      'BrushPen',
+      'ChineseBrush',
+      'Crayon',
+      'Crayon2',
+      'Eraser',
+      'FadedPen',
+      'FountainPen',
+      'InkPen',
+      'InkPen2',
+      'MagicPen',
+      'Marker',
+      'Marker2',
+      'Marker3',
+      'Marker4',
+      'MontblancCalligraphyPen',
+      'MontblancFountainPen',
+      'MosaicPen',
+      'ObliquePen',
+      'OilBrush3',
+      'Pencil',
+      'Pencil2',
+      'Pencil3',
+      'SelectPen',
+      'SelectPen2',
+      'Smudge',
+      'ColoredPencil',
+      'WaterColorBrush',
+      'StraightHighlighter',
+      'StraightMarker',
+      'LaserPen',
+      'GlowPen',
+      'PatternImagePen',
+      'StraightInkPen2',
+      'StraightGlowPen',
+      'BlurPen',
+      'StraightMosaicPen',
+      'StraightBlurPen',
+      'MosaicPen2',
+      'StraightMosaicPen2',
+      'TapePen',
+    };
+    final out = <int, String>{};
+    for (var i = 0; i + 6 < data.length; i++) {
+      final id = data[i] |
+          (data[i + 1] << 8) |
+          (data[i + 2] << 16) |
+          (data[i + 3] << 24);
+      if (id < 0 || id > 10000) continue;
+      final len = data[i + 4] | (data[i + 5] << 8);
+      if (len < 2 || len > 120) continue;
+      final end = i + 6 + len * 2;
+      if (end > data.length) continue;
+      var ok = true;
+      final units = <int>[];
+      for (var k = i + 6; k < end; k += 2) {
+        final u = data[k] | (data[k + 1] << 8);
+        if (u < 32 || u > 126) {
+          ok = false;
+          break;
+        }
+        units.add(u);
+      }
+      if (!ok) continue;
+      final text = String.fromCharCodes(units);
+      if (text.contains('pen.preload.') || known.contains(text)) {
+        out.putIfAbsent(id, () => text);
+      }
+    }
+    return out;
+  }
+
+  static String peekPageUuid(Uint8List data) {    final r = SdocxReader(data);
     final rawLayerOffset = r.readU32();
     final propertyOffset = r.readU32();
     final headerEnd = propertyOffset == 0 ? rawLayerOffset : propertyOffset;
@@ -236,7 +455,10 @@ class SdocxParser {
   // .page files
   // ------------------------------------------------------------------
 
-  static SdocxPage parsePage(Uint8List data) {
+  static SdocxPage parsePage(
+    Uint8List data, {
+    Map<int, String> stringTable = const {},
+  }) {
     final r = SdocxReader(data);
     final rawLayerOffset = r.readU32();
     final propertyOffset = r.readU32();
@@ -258,6 +480,12 @@ class SdocxParser {
 
     // Flexible page properties live between propertyOffset and rawLayerOffset.
     int? backgroundColorArgb;
+    String? templateUri;
+    int? templateType;
+    int? backgroundImageId;
+    int? backgroundImageMode;
+    int? backgroundWidth;
+    int? backgroundRotation;
     final pdfPapers = <SdocxPdfPaper>[];
     if (propertyOffset != 0) {
       final flexBytes = data.sublist(propertyOffset, rawLayerOffset.toInt());
@@ -273,22 +501,22 @@ class SdocxParser {
         }
       }
       if ((propertyMask & (1 << 2)) != 0) {
-        flex.readUtf16U16(); // template URI
+        templateUri = flex.readUtf16U16();
       }
       if ((propertyMask & (1 << 3)) != 0) {
-        flex.skip(4); // background image id
+        backgroundImageId = flex.readU32();
       }
       if ((propertyMask & (1 << 4)) != 0) {
-        flex.skip(4); // background image mode
+        backgroundImageMode = flex.readU32();
       }
       if ((propertyMask & (1 << 5)) != 0) {
         backgroundColorArgb = flex.readU32();
       }
       if ((propertyMask & (1 << 6)) != 0) {
-        flex.skip(4); // background width
+        backgroundWidth = flex.readU32();
       }
       if ((propertyMask & (1 << 7)) != 0) {
-        flex.skip(4); // background rotation
+        backgroundRotation = flex.readU32();
       }
       if ((propertyMask & (1 << 8)) != 0) {
         final n = flex.readU16();
@@ -333,7 +561,9 @@ class SdocxParser {
           );
         }
       }
-      // Bit 9 (template type) is intentionally ignored for import.
+      if ((propertyMask & (1 << 9)) != 0) {
+        templateType = flex.readU32();
+      }
     }
 
     // Layers.
@@ -350,7 +580,7 @@ class SdocxParser {
     final allStrokes = <SdocxStroke>[];
     final allImages = <SdocxImage>[];
     for (var li = 0; li < layerCount; li++) {
-      final layer = _parseLayer(lr, data);
+      final layer = _parseLayer(lr, data, stringTable: stringTable);
       // Import every layer (Rust renders only the current one, but hidden
       // layers may still hold user content in older notes; importing all
       // is the lossless choice for a note-taking app).
@@ -366,6 +596,12 @@ class SdocxParser {
       pdfPapers: pdfPapers,
       strokes: allStrokes,
       images: allImages,
+      templateUri: templateUri,
+      templateType: templateType,
+      backgroundImageId: backgroundImageId,
+      backgroundImageMode: backgroundImageMode,
+      backgroundWidth: backgroundWidth,
+      backgroundRotation: backgroundRotation,
     );
   }
 
@@ -374,7 +610,11 @@ class SdocxParser {
     return v >= 0x80000000 ? v - 0x100000000 : v;
   }
 
-  static _SdocxLayer _parseLayer(SdocxReader lr, Uint8List pageBytes) {
+  static _SdocxLayer _parseLayer(
+    SdocxReader lr,
+    Uint8List pageBytes, {
+    Map<int, String> stringTable = const {},
+  }) {
     final headerSize = lr.readU32();
     if (headerSize < 14 || headerSize > 16 * 1024) {
       throw FormatException('Invalid layer header size $headerSize');
@@ -385,7 +625,8 @@ class SdocxParser {
     final strokes = <SdocxStroke>[];
     final images = <SdocxImage>[];
     for (var i = 0; i < objectCount; i++) {
-      _parseObject(lr, pageBytes, 0, strokes, images);
+      _parseObject(lr, pageBytes, 0, strokes, images,
+          stringTable: stringTable);
     }
     if (lr.remaining < 32) {
       throw FormatException('Truncated layer integrity trailer');
@@ -403,8 +644,9 @@ class SdocxParser {
     Uint8List pageBytes,
     int depth,
     List<SdocxStroke> strokes,
-    List<SdocxImage> images,
-  ) {
+    List<SdocxImage> images, {
+    Map<int, String> stringTable = const {},
+  }) {
     if (depth >= 64) {
       throw FormatException('Object nesting too deep');
     }
@@ -434,7 +676,7 @@ class SdocxParser {
     // Decode supported leaf types. Failures are non-fatal: skip the object.
     try {
       if (type == 1) {
-        final s = decodeStroke(payload);
+        final s = decodeStroke(payload, stringTable: stringTable);
         if (s != null) strokes.add(s);
       } else if (type == 3) {
         final img = decodeImage(payload);
@@ -447,7 +689,8 @@ class SdocxParser {
     }
 
     for (var c = 0; c < childCount; c++) {
-      _parseObject(lr, pageBytes, depth + 1, strokes, images);
+      _parseObject(lr, pageBytes, depth + 1, strokes, images,
+          stringTable: stringTable);
     }
   }
 
@@ -528,7 +771,10 @@ class SdocxParser {
     return (raw & 0x8000) == 0 ? mag : -mag;
   }
 
-  static SdocxStroke? decodeStroke(Uint8List payload) {
+  static SdocxStroke? decodeStroke(
+    Uint8List payload, {
+    Map<int, String> stringTable = const {},
+  }) {
     final meta = _readObjectMeta(payload);
     if (meta == null || !meta.visible) return null;
 
@@ -538,6 +784,10 @@ class SdocxParser {
     if (r.isEof) return null;
     final frame = _readFrame(r);
     if (frame.kind != 1) return null;
+
+    // Samsung eraser marks are not ink: dropping them keeps erased content
+    // erased instead of resurrecting it on import.
+    if (frame.properties.contains(3)) return null;
 
     final fixed = SdocxReader(frame.fixed);
     if (fixed.remaining < 2) return null;
@@ -558,7 +808,7 @@ class SdocxParser {
     }
     if (fixed.remaining != channelBytes + 2) return null;
     final channelData = fixed.readBytes(channelBytes);
-    fixed.skip(2); // tool/input type (kept for future pen mapping)
+    final toolTypeRaw = fixed.readU16();
 
     final cd = SdocxReader(channelData);
     final points = <SdocxPoint>[];
@@ -603,9 +853,12 @@ class SdocxParser {
     // Remaining channels (timestamps, tilts) are intentionally ignored:
     // Saber stores per-point pressure only.
 
-    // Style (color + width) from flexible fields.
+    // Style (color + width + pen ids) from flexible fields.
     int? colorArgb;
     double penWidth = 4.5;
+    int? penNameId;
+    int? advancedSettingId;
+    int? legacyPenNameId;
     try {
       final style = _readStrokeStyle(frame);
       colorArgb = style.colorArgb;
@@ -615,6 +868,9 @@ class SdocxParser {
           style.penSize! < 200) {
         penWidth = style.penSize!;
       }
+      penNameId = style.penNameId;
+      advancedSettingId = style.advancedPenSettingId;
+      legacyPenNameId = style.legacyPenNameId;
     } catch (_) {
       // Keep defaults.
     }
@@ -626,7 +882,39 @@ class SdocxParser {
       colorArgb: colorArgb,
       penWidth: penWidth,
       bbox: meta.bbox,
+      penName: resolvePenName(
+        stringTable,
+        penNameId: penNameId,
+        legacyPenNameId: legacyPenNameId,
+      ),
+      penNameId: penNameId ?? legacyPenNameId,
+      advancedSettingId: advancedSettingId,
+      toolTypeRaw: toolTypeRaw,
     );
+  }
+
+  /// Resolve a stroke's Samsung pen name via the `note.note` string table.
+  /// Prefers the modern `pen_name_id` (unless -1), falls back to the legacy
+  /// id, and strips the `…pen.preload.` package prefix (`InkPen2`,
+  /// `FountainPen`, `Marker4`, …). Returns null when unresolvable.
+  static String? resolvePenName(
+    Map<int, String> stringTable, {
+    int? penNameId,
+    int? legacyPenNameId,
+  }) {
+    int? useId;
+    if (penNameId != null && penNameId != -1) {
+      useId = penNameId;
+    } else {
+      useId = legacyPenNameId;
+    }
+    if (useId == null || useId < 0) return null;
+    final full = stringTable[useId];
+    if (full == null || full.isEmpty) return null;
+    const prefix = 'com.samsung.android.sdk.pen.pen.preload.';
+    if (full.startsWith(prefix)) return full.substring(prefix.length);
+    if (full.contains('.')) return full.split('.').last;
+    return full;
   }
 
   static double _clamp01(double v) => v.isNaN
@@ -640,12 +928,15 @@ class SdocxParser {
   static _SdocxStrokeStyle _readStrokeStyle(_SdocxFrame frame) {
     int? colorArgb;
     double? penSize;
+    int? legacyPenNameId;
+    int? advancedPenSettingId;
+    int? penNameId;
     final flex = SdocxReader(frame.flexible);
     if (frame.fields.contains(0)) {
-      flex.skip(4); // legacy pen name id
+      legacyPenNameId = flex.readI32();
     }
     if (frame.fields.contains(1)) {
-      flex.skip(4); // advanced pen setting id
+      advancedPenSettingId = flex.readI32();
     }
     if (frame.fields.contains(2)) {
       colorArgb = flex.readU32();
@@ -653,7 +944,23 @@ class SdocxParser {
     if (frame.fields.contains(3)) {
       penSize = flex.readF32();
     }
-    return _SdocxStrokeStyle(colorArgb, penSize);
+    if (frame.fields.contains(4)) {
+      flex.skip(1); // field_4_raw u8
+    }
+    // Bit 5 (legacy partial-rectangle data) is variable-length and needs the
+    // base frame to size; when present the offsets of bit-7+ fields cannot be
+    // located reliably, so penNameId is left unresolved (the legacy id above
+    // still applies as fallback).
+    if (!frame.fields.contains(5) && frame.fields.contains(7)) {
+      penNameId = flex.readI32();
+    }
+    return _SdocxStrokeStyle(
+      colorArgb,
+      penSize,
+      legacyPenNameId: legacyPenNameId,
+      advancedPenSettingId: advancedPenSettingId,
+      penNameId: penNameId,
+    );
   }
 
   // ------------------------------------------------------------------
@@ -754,8 +1061,24 @@ class _SdocxObjectMeta {
 }
 
 class _SdocxStrokeStyle {
-  _SdocxStrokeStyle(this.colorArgb, this.penSize);
+  _SdocxStrokeStyle(
+    this.colorArgb,
+    this.penSize, {
+    this.legacyPenNameId,
+    this.advancedPenSettingId,
+    this.penNameId,
+  });
 
   final int? colorArgb;
   final double? penSize;
+  final int? legacyPenNameId;
+  final int? advancedPenSettingId;
+  final int? penNameId;
+}
+
+class _SdocxNoteMeta {
+  _SdocxNoteMeta(this.stringTable, this.templateUri);
+
+  final Map<int, String> stringTable;
+  final String? templateUri;
 }

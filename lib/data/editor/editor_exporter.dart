@@ -40,6 +40,7 @@ import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/services/pdf_open_helper.dart';
 import 'package:saber/services/pdf_stroke_overlay.dart';
 import 'package:saber/services/perf_timing.dart';
 import 'package:saber/services/vault_adapter.dart';
@@ -133,13 +134,36 @@ class _RasterExportCache {
   /// feel hung). Pages load on demand via [PdfPage.render].
 
   static Future<pdfrx.PdfDocument> _openPdfFileForRaster(String path) async {
-    return pdfrx.PdfDocument.openFile(path, useProgressiveLoading: true);
+    return PdfOpenHelper.openFileProgressive(path);
   }
 
   static Future<pdfrx.PdfDocument> _openPdfDataForRaster(
     Uint8List bytes,
   ) async {
-    return pdfrx.PdfDocument.openData(bytes, useProgressiveLoading: true);
+    // mmap for large payloads so PDFium streams from SSD instead of holding
+    // the whole file in Dart RAM for the export. Small payloads open
+    // directly: a forced disk write would cost more than it saves.
+    if (bytes.length > PdfOpenHelper.smallBytesDirectOpenThreshold) {
+      final tempPath = await PdfOpenHelper.spillBytesToTempFile(
+        bytes,
+        sourceName: 'export_raster',
+      );
+      if (tempPath != null) {
+        try {
+          return await PdfOpenHelper.openFileProgressive(tempPath);
+        } catch (_) {
+          try {
+            File(tempPath).deleteSync();
+          } catch (_) {}
+        }
+      }
+    }
+    return pdfrx.PdfDocument.openData(
+      bytes,
+      sourceName: 'export_raster',
+      useProgressiveLoading: true,
+      maxSizeToCacheOnMemory: bytes.length,
+    );
   }
 
   Future<ui.Image?> png(PngEditorImage image) {

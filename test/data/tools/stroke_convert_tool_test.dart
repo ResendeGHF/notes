@@ -15,7 +15,7 @@ void main() {
     final stroke = Stroke(
       color: Colors.indigo,
       pressureEnabled: true,
-      options: Pen.advancedPenOptions.copyWith(size: 3.5, isComplete: true),
+      options: Pen.defaultOptions.copyWith(size: 3.5, isComplete: true),
       pageIndex: 0,
       page: page,
       toolId: ToolId.advancedPen,

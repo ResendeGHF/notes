@@ -167,7 +167,7 @@ class CanvasPainter extends CustomPainter {
           final forceRecentSensitiveStroke =
               stroke.toolId == ToolId.highlighter ||
               stroke.toolId == ToolId.advancedPen ||
-              stroke.toolId == ToolId.advancedPencil ||
+              stroke.toolId == ToolId.pencil ||
               stroke.toolId == ToolId.calligraphyPen ||
               stroke is ShapeStroke;
           if ((overlaps || (!boundsFinite && forceRecentSensitiveStroke)) &&
@@ -398,7 +398,7 @@ class CanvasPainter extends CustomPainter {
     double? pencilLastQuality;
     var pencilVisibleCount = 0;
     for (final s in visibleStrokes) {
-      if (s.toolId == ToolId.advancedPencil || s.paint.usesPencilNoise) {
+      if (s.toolId == ToolId.pencil || s.paint.usesPencilNoise) {
         pencilVisibleCount++;
       }
     }
@@ -465,7 +465,7 @@ class CanvasPainter extends CustomPainter {
         continue;
       }
 
-      if (stroke.toolId == ToolId.advancedPencil ||
+      if (stroke.toolId == ToolId.pencil ||
           stroke.paint.usesPencilNoise) {
         final applied = _drawPencilNoiseStroke(
           canvas,
@@ -602,7 +602,9 @@ class CanvasPainter extends CustomPainter {
     if (path.getBounds().isEmpty) return null;
 
     ui.Vertices? mesh;
-    if (stroke.toolId == ToolId.advancedPencil && stroke.paint.pressureMapsToCoverage) {
+    // Pencil renders the exact ballpoint spine mesh (same code path, same
+    // caps) with graphite grain on top: ballpoint geometry + texture.
+    if (stroke.toolId == ToolId.pencil) {
       mesh = stroke.ensureMeshVertices();
     }
 
@@ -734,7 +736,7 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    if (currentStroke!.toolId == ToolId.advancedPencil ||
+    if (currentStroke!.toolId == ToolId.pencil ||
         currentStroke!.paint.usesPencilNoise) {
       _drawPencilNoiseStroke(
         canvas,

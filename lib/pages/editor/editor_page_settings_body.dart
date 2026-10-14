@@ -42,6 +42,17 @@ const List<Color> _kEditorSwatchDark = [
   Color(0xFF0C4A6E),
 ];
 
+/// Formats a [Color] as `#RRGGBB`, dropping alpha.
+///
+/// Uses `padLeft(8, '0')` because `int.toRadixString(16)` does not pad:
+/// fully transparent (`0x00000000`) yields `"0"`, so a bare
+/// `.substring(2)` throws `RangeError (start): Invalid value:
+/// Not in inclusive range 0..1: 2`.
+String _colorToHex(Color color) {
+  final argb = color.toARGB32().toRadixString(16).padLeft(8, '0');
+  return '#${argb.substring(2).toUpperCase()}';
+}
+
 /// Full-screen page appearance editor body (used by [EditorPageSettingsPage] in `editor_menu.dart`).
 class EditorPageSettingsBody extends StatefulWidget {
   final EditorCoreInfo coreInfo;
@@ -159,12 +170,9 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
       _pageSize = o.defaultSize;
       _invertInDarkMode = stows.editorAutoInvert.value;
       _invertBackground = stows.editorAutoInvertBackground.value;
-      _hexBorderController.text =
-          '#${_borderColor.value.toRadixString(16).substring(2).toUpperCase()}';
-      _hexController.text =
-          '#${_pageColor.value.toRadixString(16).substring(2).toUpperCase()}';
-      _hexLineController.text =
-          '#${_lineColor.value.toRadixString(16).substring(2).toUpperCase()}';
+      _hexBorderController.text = _colorToHex(_borderColor);
+      _hexController.text = _colorToHex(_pageColor);
+      _hexLineController.text = _colorToHex(_lineColor);
       return;
     }
 
@@ -186,12 +194,9 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
     final page = ci.pages[widget.currentPageIndex];
     _pageSize = page.size;
 
-    _hexBorderController.text =
-        '#${_borderColor.value.toRadixString(16).substring(2).toUpperCase()}';
-    _hexController.text =
-        '#${_pageColor.value.toRadixString(16).substring(2).toUpperCase()}';
-    _hexLineController.text =
-        '#${_lineColor.value.toRadixString(16).substring(2).toUpperCase()}';
+    _hexBorderController.text = _colorToHex(_borderColor);
+    _hexController.text = _colorToHex(_pageColor);
+    _hexLineController.text = _colorToHex(_lineColor);
     _panelOrientation = ci.notePageOrientation;
   }
 
@@ -374,8 +379,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
             final isLight = sw.computeLuminance() > 0.55;
             return InkWell(
               onTap: () {
-                hexCtrl.text =
-                    '#${sw.value.toRadixString(16).substring(2).toUpperCase()}';
+                hexCtrl.text = _colorToHex(sw);
                 onColorChanged(sw);
               },
               borderRadius: BorderRadius.circular(6),
@@ -588,8 +592,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
             onColorChanged: (color) {
               setState(() {
                 _pageColor = color;
-                _hexController.text =
-                    '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
+                _hexController.text = _colorToHex(color);
               });
               widget.onSetColor(color);
             },
@@ -709,8 +712,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
               onColorChanged: (color) {
                 setState(() {
                   _lineColor = color;
-                  _hexLineController.text =
-                      '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
+                  _hexLineController.text = _colorToHex(color);
                 });
                 widget.onSetLineColor(color);
               },
@@ -795,8 +797,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
             onColorChanged: (color) {
               setState(() {
                 _borderColor = color;
-                _hexBorderController.text =
-                    '#${color.value.toRadixString(16).substring(2).toUpperCase()}';
+                _hexBorderController.text = _colorToHex(color);
               });
               widget.onSetBorderColor?.call(color);
             },

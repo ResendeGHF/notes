@@ -232,6 +232,11 @@ class EditorCoreInfo extends ChangeNotifier {
 
   bool isInfinite = false;
 
+  /// Per-note toggle for the PDF link-boxes overlay. Defaults to true so
+  /// legacy notes (without this metadata) keep showing boxes as before.
+  /// Persisted in binary + JSON; never flips on its own after user toggle.
+  bool showPdfLinkBoxes = true;
+
   String infiniteThumbnailMode = 'jdenticon';
 
   NoteToolSettings? noteToolSettings;
@@ -503,6 +508,7 @@ class EditorCoreInfo extends ChangeNotifier {
     List<String>? tags,
     List<NoteLink>? links,
     this.isInfinite = false,
+    this.showPdfLinkBoxes = true,
     this.infiniteThumbnailMode = 'jdenticon',
     this.creationDate = 0,
     this.lastModification = 0,
@@ -626,6 +632,7 @@ class EditorCoreInfo extends ChangeNotifier {
         location: json['loc']?.toString(),
         noteId: (json['nid'] as String?)?.trim() ?? '',
         floatingCalculatorMetadata: json['fcm']?.toString(),
+        showPdfLinkBoxes: json['showLinkBoxes'] == false ? false : true,
       )
       .._migrateOldStrokesAndImages(
         fileVersion: fileVersion,
@@ -1086,8 +1093,11 @@ class EditorCoreInfo extends ChangeNotifier {
               await FileManager.readFileToTempFile(pdfAsset0Path);
               return;
             }
-            if (cipherSize >= largeVaultPdfCipherBytes) return;
-            await FileManager.readFile(pdfAsset0Path);
+            // RAM branch registers a shared future: the asset open consumes
+            // these exact bytes (no size gate — sharing costs zero extra RAM
+            // versus the open decrypting alone). Warms concurrently with the
+            // body parse below instead of serializing after it.
+            await VaultAdapter.instance.prefetchFileForOpen(pdfAsset0Path);
           } catch (e, _) {
             log.fine('Vault PDF .0 prefetch skipped: $e');
           }
@@ -1597,6 +1607,7 @@ class EditorCoreInfo extends ChangeNotifier {
 
     bool replaceDefaultLoaded = false;
     bool isInfiniteLoaded = false;
+    bool showPdfLinkBoxesLoaded = true;
     String infiniteThumbnailModeLoaded = 'jdenticon';
     int creationDateLoaded = 0;
     int lastModificationLoaded = 0;
@@ -1697,6 +1708,8 @@ class EditorCoreInfo extends ChangeNotifier {
         locationLoaded = reader.readStringNoKey();
       } else if (nextKey == SBNBinaryKeys.noteId) {
         noteIdLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.showPdfLinkBoxes) {
+        showPdfLinkBoxesLoaded = reader.readBoolNoKey();
       }
     }
 
@@ -1803,6 +1816,7 @@ class EditorCoreInfo extends ChangeNotifier {
       location: locationLoaded,
       noteId: noteIdLoaded?.trim() ?? '',
       floatingCalculatorMetadata: floatingCalculatorMetadataLoaded,
+      showPdfLinkBoxes: showPdfLinkBoxesLoaded,
     );
 
     info._lazyPages = lazyStateFromPages;
@@ -2031,6 +2045,7 @@ class EditorCoreInfo extends ChangeNotifier {
 
     bool replaceDefaultLoaded = false;
     bool isInfiniteLoaded = false;
+    bool showPdfLinkBoxesLoaded = true;
     String infiniteThumbnailModeLoaded = 'jdenticon';
     int creationDateLoaded = 0;
     int lastModificationLoaded = 0;
@@ -2131,6 +2146,8 @@ class EditorCoreInfo extends ChangeNotifier {
         locationLoaded = reader.readStringNoKey();
       } else if (nextKey == SBNBinaryKeys.noteId) {
         noteIdLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.showPdfLinkBoxes) {
+        showPdfLinkBoxesLoaded = reader.readBoolNoKey();
       }
     }
 
@@ -2234,6 +2251,7 @@ class EditorCoreInfo extends ChangeNotifier {
       location: locationLoaded,
       noteId: noteIdLoaded?.trim() ?? '',
       floatingCalculatorMetadata: floatingCalculatorMetadataLoaded,
+      showPdfLinkBoxes: showPdfLinkBoxesLoaded,
     );
 
     info._lazyPages = lazyStateFromPages;
@@ -2353,6 +2371,7 @@ class EditorCoreInfo extends ChangeNotifier {
       if (floatingCalculatorMetadata != null &&
           floatingCalculatorMetadata!.isNotEmpty)
         'fcm': floatingCalculatorMetadata,
+      if (!showPdfLinkBoxes) 'showLinkBoxes': false,
     };
 
     return (json);
@@ -2612,6 +2631,13 @@ class EditorCoreInfo extends ChangeNotifier {
     if (noteId.isNotEmpty) {
       writer.writeKey(SBNBinaryKeys.noteId);
       writer.writeStringNoKey(noteId);
+    }
+
+    // Per-note Link Boxes toggle (default true; only stored when disabled
+    // so legacy files without the key keep showing boxes).
+    if (!showPdfLinkBoxes) {
+      writer.writeKey(SBNBinaryKeys.showPdfLinkBoxes);
+      writer.writeBoolNoKey(false);
     }
 
     _appendPagesToBinaryWriter(writer, lazyForSave);
@@ -2987,6 +3013,7 @@ class EditorCoreInfo extends ChangeNotifier {
     String? location,
     String? noteId,
     String? floatingCalculatorMetadata,
+    bool? showPdfLinkBoxes,
   }) {
     final info = EditorCoreInfo._(
       filePath: filePath ?? this.filePath,
@@ -3018,6 +3045,7 @@ class EditorCoreInfo extends ChangeNotifier {
       noteId: noteId ?? this.noteId,
       floatingCalculatorMetadata:
           floatingCalculatorMetadata ?? this.floatingCalculatorMetadata,
+      showPdfLinkBoxes: showPdfLinkBoxes ?? this.showPdfLinkBoxes,
     );
     info.noteDefaultPattern = noteDefaultPattern;
     info.noteDefaultPageColor = noteDefaultPageColor;

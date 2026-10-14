@@ -1068,7 +1068,7 @@ class _Translations$editor$pens$pt_BR extends Translations$editor$pens$en {
 	@override String get fountainPen => 'Caneta tinteiro';
 	@override String get ballpointPen => 'Caneta esferográfica';
 	@override String get advancedPen => 'Caneta avançada';
-	@override String get advancedPencil => 'Lápis avançado';
+	@override String get pencil => 'Lápis';
 	@override String get highlighter => 'Marcador';
 	@override String get shapePen => 'Caneta de forma';
 	@override String get laserPointer => 'Apontador laser';

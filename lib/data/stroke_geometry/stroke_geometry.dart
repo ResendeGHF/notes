@@ -15,4 +15,7 @@ export 'constant_width_outline.dart'
 export 'easings.dart';
 export 'outline_triangulate.dart';
 export 'point_vector.dart';
+export 'advanced_pen_composer.dart';
+export 'advanced_pen_modeler.dart';
+export 'advanced_pen_options.dart';
 export 'stroke_options.dart';

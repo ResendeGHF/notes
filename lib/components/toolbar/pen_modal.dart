@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:saber/components/toolbar/advanced_pen_panel.dart';
-import 'package:saber/components/toolbar/advanced_pencil_panel.dart';
 import 'package:saber/components/toolbar/size_picker.dart';
 import 'package:saber/data/extensions/axis_extensions.dart';
 import 'package:saber/data/prefs.dart';
@@ -435,7 +434,7 @@ class _PenModalState extends State<PenModal> {
             ),
             tooltip: t.editor.pens.advancedPen,
             icon: Icon(
-              Icons.tune,
+              Icons.brush_outlined,
               color: Pen.currentPen.icon == Pen.advancedPenIcon
                   ? ColorScheme.of(context).secondary
                   : ColorScheme.of(context).onSurface,
@@ -444,25 +443,25 @@ class _PenModalState extends State<PenModal> {
           const SizedBox.square(dimension: 8),
           IconButton(
             onPressed: () => setState(() {
-              final p = Pen.advancedPencil();
+              final p = Pen.pencil();
               Pen.currentPen = p;
               widget.setTool(p);
             }),
             style: TextButton.styleFrom(
-              foregroundColor: Pen.currentPen.icon == Pen.advancedPencilIcon
+              foregroundColor: Pen.currentPen.icon == Pen.pencilIcon
                   ? ColorScheme.of(context).secondary
                   : ColorScheme.of(context).onSurface,
-              backgroundColor: Pen.currentPen.icon == Pen.advancedPencilIcon
+              backgroundColor: Pen.currentPen.icon == Pen.pencilIcon
                   ? Theme.of(
                       context,
                     ).colorScheme.secondary.withValues(alpha: 0.1)
                   : Colors.transparent,
               shape: const CircleBorder(),
             ),
-            tooltip: t.editor.pens.advancedPencil,
+            tooltip: t.editor.pens.pencil,
             icon: Icon(
               Icons.edit_note,
-              color: Pen.currentPen.icon == Pen.advancedPencilIcon
+              color: Pen.currentPen.icon == Pen.pencilIcon
                   ? ColorScheme.of(context).secondary
                   : ColorScheme.of(context).onSurface,
             ),
@@ -476,18 +475,6 @@ class _PenModalState extends State<PenModal> {
           ),
           const SizedBox.square(dimension: 12),
           AdvancedPenSettings(
-            pen: currentPen,
-            onChanged: () => setState(() {}),
-          ),
-        ],
-        if (currentPen.toolId == ToolId.advancedPencil) ...[
-          const SizedBox.square(dimension: 12),
-          AdvancedPencilPresets(
-            pen: currentPen,
-            onChanged: () => setState(() {}),
-          ),
-          const SizedBox.square(dimension: 12),
-          AdvancedPencilSettings(
             pen: currentPen,
             onChanged: () => setState(() {}),
           ),

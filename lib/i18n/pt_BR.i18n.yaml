@@ -401,7 +401,7 @@ editor:
     fountainPen: Caneta tinteiro
     ballpointPen: Caneta esferográfica
     advancedPen: Caneta avançada
-    advancedPencil: Lápis avançado
+    pencil: Lápis
     highlighter: Marcador
     shapePen: Caneta de forma
     laserPointer: Apontador laser

@@ -25,7 +25,7 @@ Stroke _livePencil() {
     ),
     pageIndex: 0,
     page: HasSize(EditorPage.defaultSize),
-    toolId: ToolId.advancedPencil,
+    toolId: ToolId.pencil,
   )..paint = StrokePaint.pencilNoiseDefault().copyWith(
     pressureMapsToCoverage: true,
   );

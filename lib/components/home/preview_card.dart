@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import 'dart:async' show Future, StreamSubscription, Timer;
+import 'dart:async' show Future, StreamSubscription, Timer, unawaited;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -26,6 +26,7 @@ import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/thumbnail_cache.dart';
+import 'package:saber/services/vault_adapter.dart';
 
 class PreviewCard extends StatefulWidget {
   PreviewCard({
@@ -377,7 +378,7 @@ class _PreviewCardState extends State<PreviewCard> {
                   SelectableText('Path: ${widget.filePath}'),
                   const SizedBox(height: 8),
                   SelectableText(
-                    'Last modified: ${lastModified.toString().split('.')[0]}',
+                    '${t.home.lastModified}: ${formatHomeListDateFull(context, lastModified)}',
                   ),
                   const SizedBox(height: 8),
                   SelectableText(
@@ -475,7 +476,27 @@ class _PreviewCardState extends State<PreviewCard> {
       editPath = editPath.substring(0, editPath.length - 4);
     }
 
+    void warmVaultForOpen() {
+      if (!VaultAdapter.isUnlocked) return;
+      unawaited(() async {
+        try {
+          await VaultAdapter.instance.prefetchFileForOpen(
+            '$editPath${Editor.extension}',
+          );
+        } catch (_) {}
+        try {
+          await VaultAdapter.instance.prefetchFileForOpen(
+            '$editPath${Editor.extension}.0',
+          );
+        } catch (_) {}
+      }());
+    }
+
     void openAction() async {
+      // Warm the vault decrypt for body (+ conventional first PDF asset)
+      // while navigation + editor build runs (~0.8s): shared prefetch
+      // futures the opener consumes with zero duplication. No-ops off-vault.
+      warmVaultForOpen();
       await context.push(RoutePaths.editFilePath(editPath));
       if (mounted) _refreshThumbnailAfterDelay();
     }

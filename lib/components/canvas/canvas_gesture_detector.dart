@@ -372,6 +372,14 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void initState() {
+    // Seed the initial viewport BEFORE first layout: otherwise the first
+    // frame builds at scroll 0 (mounting full PDF renderers for pages 0-2,
+    // each queueing parses+renders on the single pdfrx worker) and only
+    // then jumps to the saved page. Starting placed saves ~seconds on deep
+    // notes. The post-frame re-assert covers late prop arrival (no-op once
+    // placed, guarded by the identity check in setInitialTransform).
+    _recalculatePageOffsets();
+    setInitialTransform();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _recalculatePageOffsets();
@@ -1254,7 +1262,24 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       );
     }
 
+    // Build order follows distance to the visible middle (not page
+    // order): the current page's PDF parse+render jobs hit pdfrx's single
+    // worker first, so visible content paints ~seconds earlier on deep
+    // notes instead of waiting behind neighbor pages. Layout is unaffected
+    // (absolute Positioned offsets); paint order of non-overlapping pages
+    // is irrelevant.
+    final mid = (startIndex + endIndex) ~/ 2;
+    final buildOrder = <int>[];
     for (int i = startIndex; i <= endIndex && i < widget.pages.length; i++) {
+      buildOrder.add(i);
+    }
+    buildOrder.sort((a, b) {
+      final da = (a - mid).abs();
+      final db = (b - mid).abs();
+      if (da != db) return da.compareTo(db);
+      return a.compareTo(b);
+    });
+    for (final i in buildOrder) {
       final offset = _pageOffsets[i];
       final height = _pageHeights[i];
       final width = _pageWidths[i];

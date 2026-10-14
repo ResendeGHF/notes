@@ -26,6 +26,8 @@ class GraphPage extends StatefulWidget {
 
 class _GraphPageState extends State<GraphPage> {
   StreamSubscription? _fileSystemSubscription;
+  Timer? _reloadDebounce;
+  int _reloadEpoch = 0;
   final Set<String> _notes = {};
   final Map<String, List<String>> _edges = {};
   final Map<Node, String> _nodeToPath = {};
@@ -64,14 +66,42 @@ class _GraphPageState extends State<GraphPage> {
     _fileSystemSubscription = FileManager.fileWriteStream.stream.listen((
       event,
     ) {
-      if (mounted && !_loading) {
-        _loadGraph();
-      }
+      if (!mounted) return;
+      // Thumbnail sidecars and dotfile bookkeeping (.folder_props,
+      // .recent_meta_cache.json, .saber_*.db, …) never change graph topology:
+      // reloading on them is what kept the graph spinning non-stop in disk
+      // mode (every thumbnail/index write retriggered a full rebuild).
+      if (_isIrrelevantGraphEvent(event)) return;
+      _scheduleGraphReload();
     });
+  }
+
+  /// Trailing-edge reload: bursts (e.g. deleting a folder emits one event
+  /// per file) collapse into a single rebuild ~1.2s after the last event. If
+  /// a load is still in flight, re-arms instead of dropping the change.
+  void _scheduleGraphReload() {
+    final epoch = ++_reloadEpoch;
+    _reloadDebounce?.cancel();
+    _reloadDebounce = Timer(const Duration(milliseconds: 1200), () {
+      if (!mounted || epoch != _reloadEpoch) return;
+      if (_loading) {
+        _scheduleGraphReload();
+        return;
+      }
+      _loadGraph();
+    });
+  }
+
+  /// Bookkeeping-only file events that can never affect graph topology.
+  bool _isIrrelevantGraphEvent(FileOperation event) {
+    if (event.isThumbnail) return true;
+    final base = event.filePath.split('/').last;
+    return base.startsWith('.');
   }
 
   @override
   void dispose() {
+    _reloadDebounce?.cancel();
     _fileSystemSubscription?.cancel();
     _notes.clear();
     _edges.clear();

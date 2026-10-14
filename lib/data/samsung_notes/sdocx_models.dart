@@ -40,6 +40,10 @@ class SdocxStroke {
     this.colorArgb,
     required this.penWidth,
     required this.bbox,
+    this.penName,
+    this.penNameId,
+    this.advancedSettingId,
+    this.toolTypeRaw,
   });
 
   /// Absolute page coordinates (same space as [bbox] and page size).
@@ -48,6 +52,19 @@ class SdocxStroke {
   final int? colorArgb;
   final double penWidth;
   final Rect bbox;
+
+  /// Resolved Samsung pen name with the preload package prefix stripped
+  /// (e.g. `InkPen2`, `FountainPen`, `Marker4`, `Pencil2`). Null when the
+  /// stroke carries no resolvable pen id (unknown format version).
+  final String? penName;
+
+  /// Raw style ids from the stroke frame (for debugging/future mapping).
+  final int? penNameId;
+  final int? advancedSettingId;
+
+  /// Raw tool/input type from the stroke channel data (1..3 normally means
+  /// finger/stylus variants, *not* the pen type; kept for debugging).
+  final int? toolTypeRaw;
 }
 
 class SdocxPoint {
@@ -93,6 +110,12 @@ class SdocxPage {
     this.pdfPapers = const [],
     this.strokes = const [],
     this.images = const [],
+    this.templateUri,
+    this.templateType,
+    this.backgroundImageId,
+    this.backgroundImageMode,
+    this.backgroundWidth,
+    this.backgroundRotation,
   });
 
   final String uuid;
@@ -102,6 +125,21 @@ class SdocxPage {
   final List<SdocxPdfPaper> pdfPapers;
   final List<SdocxStroke> strokes;
   final List<SdocxImage> images;
+
+  /// Built-in page-template backing (bit 2): e.g. a URI naming the
+  /// ruled/grid/dotted stock template. Null when absent.
+  final String? templateUri;
+
+  /// Built-in page-template id (bit 9): 1..3 ruled, 4..6 grid, 7..9 dots,
+  /// 0/absent means blank. Other ids are retained but map to blank.
+  final int? templateType;
+
+  /// Stock background artwork reference (bits 3/4): media bind id of an
+  /// embedded pattern image plus its mode. Null when absent.
+  final int? backgroundImageId;
+  final int? backgroundImageMode;
+  final int? backgroundWidth;
+  final int? backgroundRotation;
 
   bool get isEmpty => strokes.isEmpty && images.isEmpty && pdfPapers.isEmpty;
 }
@@ -113,10 +151,20 @@ class SdocxDocument {
     required this.mediaByBindId,
     required this.mediaByFileName,
     this.title,
+    this.stringTable = const {},
+    this.defaultTemplateUri,
   });
 
   final List<SdocxPage> pages;
   final Map<int, SdocxMediaEntry> mediaByBindId;
   final Map<String, SdocxMediaEntry> mediaByFileName;
   final String? title;
+
+  /// `note.note` string table (id -> text): resolves stroke pen names
+  /// (`pen_name_id`) and advanced pen settings. Empty when unavailable.
+  final Map<int, String> stringTable;
+
+  /// Note-level default page-template URI (`note.note` bit 6), used when a
+  /// page carries no template of its own.
+  final String? defaultTemplateUri;
 }

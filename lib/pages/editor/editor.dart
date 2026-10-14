@@ -114,6 +114,7 @@ import 'package:saber/pages/home/note_and_ink_defaults_pages.dart';
 import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/math_solver_service.dart';
 import 'package:saber/services/online/online_transcription_service.dart';
+import 'package:saber/services/pdf_viewport.dart';
 import 'package:saber/services/recognition_service.dart';
 import 'package:saber/services/vlm/page_image_renderer.dart';
 import 'package:saber/services/vlm/page_latex_vlm_service.dart';
@@ -393,6 +394,13 @@ class EditorState extends State<Editor>
     return MediaQuery.devicePixelRatioOf(context).clamp(1.0, 4.0);
   }
 
+  /// Pan/zoom tick fan-out for PDF viewport tiling (see [PdfViewportBus]).
+  /// The renderer debounces and early-outs on unchanged rects, so per-tick
+  /// cost here is a single epoch bump.
+  void _onCanvasTransformTick() {
+    PdfViewportBus.tick();
+  }
+
   void _onPageRasterLodSettled() {
     if (!mounted || coreInfo.pages.isEmpty) return;
     final scale =
@@ -417,6 +425,9 @@ class EditorState extends State<Editor>
       scale: scale,
     );
     setState(() {});
+    // Manual scroll may have settled on a linked page: rescan if the toggle
+    // is still hidden (no-op while a sweep is already running).
+    if (!_hasPdfLinks && !_pdfLinkScanActive) _checkForPdfLinks();
   }
 
   void _maintainPageRasterBand(
@@ -735,8 +746,8 @@ class EditorState extends State<Editor>
       case ToolId.advancedPen:
         Pen.currentPen = Pen.advancedPen();
         break;
-      case ToolId.advancedPencil:
-        Pen.currentPen = Pen.advancedPencil();
+      case ToolId.pencil:
+        Pen.currentPen = Pen.pencil();
         break;
       case ToolId.fountainPen:
       default:
@@ -750,7 +761,7 @@ class EditorState extends State<Editor>
       case .calligraphyPen:
       case .shapePen:
       case .advancedPen:
-      case .advancedPencil:
+      case .pencil:
         return Pen.currentPen;
       case .highlighter:
         return Highlighter.currentHighlighter;
@@ -827,39 +838,130 @@ class EditorState extends State<Editor>
   bool _hasPdfLinks = false;
   final ValueNotifier<bool> _showPdfLinkBoxes = ValueNotifier(true);
 
-  void _checkForPdfLinks() {
-    // Deferred off the open critical path: PDF open + link detection runs
-    // after first frames settle and only when a PDF-backed page exists.
-    Future<void>.delayed(const Duration(milliseconds: 1200), () async {
-      if (!mounted) return;
-      if (!coreInfo.pages.any(
-        (page) => page.backgroundImage is PdfEditorImage,
-      )) {
-        return;
-      }
-      bool found = false;
-      for (final page in coreInfo.pages) {
-        if (!mounted) return;
-        if (page.backgroundImage is PdfEditorImage) {
-          final pdfImg = page.backgroundImage as PdfEditorImage;
-          final pdfDoc = await _waitForPdfDocument(pdfImg.assetId);
-          if (pdfDoc != null) {
-            final links = await PdfLinkDetector.detectLinksOnPage(
-              pdfDoc,
-              pdfImg.pdfPage,
-            );
-            if (links.isNotEmpty) {
-              found = true;
-              break;
-            }
-          }
+  /// Persiste o toggle "Link boxes" nos metadados da nota. O valor vive em
+  /// [EditorCoreInfo.showPdfLinkBoxes] (default true para notas legadas) e
+  /// nunca muda sozinho: so escreve quando o usuario alterna o switch.
+  void _onShowPdfLinkBoxesChanged() {
+    if (_isDisposed) return;
+    final value = _showPdfLinkBoxes.value;
+    if (coreInfo.filePath.isEmpty) return;
+    try {
+      if (coreInfo.showPdfLinkBoxes == value) return;
+      coreInfo.showPdfLinkBoxes = value;
+    } catch (_) {
+      return;
+    }
+    if (coreInfo.readOnly) return;
+    autosaveAfterDelay();
+  }
+
+  /// Epoch cancelling stale link scans (navigation/import restarts prioritize
+  /// the newly visible page). Negative results are cached per PDF page for the
+  /// session (PDF assets are immutable), so rescans only touch new pages.
+  int _pdfLinkScanEpoch = 0;
+  bool _pdfLinkScanActive = false;
+  final Set<String> _pdfLinkScannedNoLink = <String>{};
+
+  /// Link affordance sweep gating the "Link boxes" toggle. Scans every
+  /// PDF-backed page (visible window first), not just the landing page, so a
+  /// linked PDF always reveals the toggle no matter which page the note opens
+  /// on or which page holds the links. Runs fully in the background with
+  /// yields between pages plus epoch cancellation; [PdfLinkDetector] ensures
+  /// page load itself, so there is no `isLoaded` guard silently skipping
+  /// not-yet-rendered pages. Only ever flips the flag on (links are immutable
+  /// in a saved PDF); repeat calls are cheap once pages are cached.
+  void _checkForPdfLinks({bool currentPageOnly = false}) {
+    if (_hasPdfLinks) return;
+    if (_pdfLinkScanActive) {
+      // A scan is already running; restart it so the current visible window
+      // goes first (epoch bump cancels the stale pass; cached progress stays).
+      _pdfLinkScanEpoch++;
+    }
+    final epoch = ++_pdfLinkScanEpoch;
+    // Open path stays off the critical path; import/navigation rescan sooner.
+    final delay = currentPageOnly
+        ? const Duration(milliseconds: 1200)
+        : const Duration(milliseconds: 400);
+    _pdfLinkScanActive = true;
+    Future<void>.delayed(delay, () async {
+      try {
+        if (!mounted || epoch != _pdfLinkScanEpoch) return;
+        if (_hasPdfLinks) return;
+        if (!coreInfo.pages.any(
+          (page) => page.backgroundImage is PdfEditorImage,
+        )) {
+          return;
         }
-        await Future<void>.delayed(Duration.zero);
-      }
-      if (mounted && _hasPdfLinks != found) {
-        setState(() {
-          _hasPdfLinks = found;
-        });
+        final startIdx = currentPageIndex.clamp(0, coreInfo.pages.length - 1);
+        // Visible window first for a fast affordance, then every other page.
+        final order = <int>[];
+        final seen = <int>{};
+        final windowEnd = math.min(coreInfo.pages.length, startIdx + 3);
+        for (var i = startIdx; i < windowEnd; i++) {
+          order.add(i);
+          seen.add(i);
+        }
+        for (var i = 0; i < coreInfo.pages.length; i++) {
+          if (seen.add(i)) order.add(i);
+        }
+        for (final i in order) {
+          if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
+          if (i < 0 || i >= coreInfo.pages.length) continue;
+          // Reopened notes keep distant pages as lazy BSON shells without any
+          // backgroundImage. Hydrate on demand so their PDF links are found
+          // too; dense pages hydrate chunked and rescan via
+          // [_finishAsyncHydrate] on completion.
+          if (coreInfo.isLazyShellPage(i)) {
+            try {
+              _tryIdleHydratePage(i);
+            } catch (_) {}
+            if (coreInfo.isLazyShellPage(i)) continue;
+            await Future<void>.delayed(Duration.zero);
+            if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
+            if (i < 0 || i >= coreInfo.pages.length) continue;
+          }
+          final bg = coreInfo.pages[i].backgroundImage;
+          if (bg is! PdfEditorImage) continue;
+          final key = '${bg.assetId}:${bg.pdfPage}';
+          if (_pdfLinkScannedNoLink.contains(key)) continue;
+          PdfDocument? pdfDoc;
+          try {
+            pdfDoc =
+                coreInfo.assetCacheAll.getPdfNotifier(bg.assetId).value ??
+                await _waitForPdfDocument(bg.assetId);
+          } catch (_) {
+            pdfDoc = null;
+          }
+          if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
+          if (pdfDoc == null ||
+              bg.pdfPage < 0 ||
+              bg.pdfPage >= pdfDoc.pages.length) {
+            continue;
+          }
+          List<PdfLink> links = const [];
+          try {
+            links = await PdfLinkDetector.detectLinksOnPage(
+              pdfDoc,
+              bg.pdfPage,
+            );
+          } catch (_) {
+            links = const [];
+          }
+          if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
+          if (links.isNotEmpty) {
+            if (mounted) {
+              setState(() {
+                _hasPdfLinks = true;
+              });
+            }
+            return;
+          }
+          _pdfLinkScannedNoLink.add(key);
+          await Future<void>.delayed(Duration.zero);
+        }
+        // Exhaustive scan found nothing: flag stays false (guarded no-op).
+      } finally {
+        if (epoch == _pdfLinkScanEpoch) _pdfLinkScanActive = false;
       }
     });
   }
@@ -1180,6 +1282,8 @@ class EditorState extends State<Editor>
     );
     PageRasterCacheManager.endProgrammaticViewportJump();
     if (mounted) setState(() {});
+    // Jumping to a page may land on links the open sweep has not reached yet.
+    if (!_hasPdfLinks) _checkForPdfLinks();
   }
 
   void _startSelectionLongPressTimer(Offset globalPos) {
@@ -1939,6 +2043,7 @@ class EditorState extends State<Editor>
 
   @override
   void initState() {
+    log.info('PDFTIMING editor.initState');
     WidgetsBinding.instance.addObserver(this);
 
     // Evita o memory leak/ghosting de seleções antigas ao entrar em uma nova nota
@@ -1959,10 +2064,16 @@ class EditorState extends State<Editor>
     _assignKeybindings();
 
     stows.noteInvertInDarkModeOverrides.addListener(_onGlobalInvertChanged);
+    _showPdfLinkBoxes.addListener(_onShowPdfLinkBoxesChanged);
 
     NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
 
     PageRasterCacheManager.addLodSettledListener(_onPageRasterLodSettled);
+
+    // Viewport-motion bus for PDF tiling: every pan/zoom tick lets mounted
+    // PDF pages recompute their visible rect (debounced in the renderer).
+    // Cheap fan-out; renderers early-out when the rect is unchanged.
+    _transformationController.addListener(_onCanvasTransformTick);
 
     if (coreInfo.pages.isNotEmpty) {
     } else {}
@@ -2000,6 +2111,7 @@ class EditorState extends State<Editor>
   }
 
   void _initAsync() async {
+    log.info('PDFTIMING editor._initAsync start');
     coreInfo.filePath = await widget.initialPath;
     _lastInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     filenameTextEditingController.text = coreInfo.fileName;
@@ -2021,7 +2133,7 @@ class EditorState extends State<Editor>
 
     await _initStrokes();
 
-    _checkForPdfLinks();
+    _checkForPdfLinks(currentPageOnly: true);
 
     if (widget.pdfPath != null) {
       importPdfFromFilePath(widget.pdfPath!)
@@ -2043,6 +2155,7 @@ class EditorState extends State<Editor>
   }
 
   Future _initStrokes() async {
+    log.info('PDFTIMING editor._initStrokes start');
     try {
       final pending = _pendingSavesByPath[coreInfo.filePath];
       if (pending != null) {
@@ -2051,7 +2164,11 @@ class EditorState extends State<Editor>
         );
         await pending;
       }
+      log.info('PDFTIMING editor.loadFromFilePath start');
       coreInfo = await EditorCoreInfo.loadFromFilePath(coreInfo.filePath);
+      log.info('PDFTIMING editor.loadFromFilePath done pages=${coreInfo.pages.length}');
+      // Restaura o toggle por-nota; o listener ignora quando igual (sem autosave espurio).
+      _showPdfLinkBoxes.value = coreInfo.showPdfLinkBoxes;
       coreInfo.ensureNoteId();
       _lastWrittenThumbnailHash = coreInfo.firstPageHash ?? '';
       _recoveryJournal = EditorRecoveryJournal(
@@ -2498,7 +2615,7 @@ class EditorState extends State<Editor>
       case ToolId.shapePen:
       case ToolId.advancedPen:
         return Pen.currentPen;
-      case ToolId.advancedPencil:
+      case ToolId.pencil:
         return Pen.currentPen;
       case ToolId.highlighter:
         return Highlighter.currentHighlighter;
@@ -5079,14 +5196,13 @@ class EditorState extends State<Editor>
             break;
           case ToolId.advancedPen:
             stows.lastAdvancedPenOptions.value = pen.options;
+            stows.lastAdvancedPenBrushOptions.value =
+                pen.brushOptions.copyWith();
             stows.lastAdvancedPenColor.value = pen.color.toARGB32();
             break;
-          case ToolId.advancedPencil:
-            stows.lastAdvancedPencilOptions.value = pen.options;
-            stows.lastAdvancedPencilColor.value = pen.color.toARGB32();
-            stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
-              pen.paint.toJson(embedBytes: false),
-            );
+          case ToolId.pencil:
+            stows.lastPencilOptions.value = pen.options;
+            stows.lastPencilColor.value = pen.color.toARGB32();
             break;
           default:
             break;
@@ -5815,6 +5931,9 @@ class EditorState extends State<Editor>
   void onInteractionEnd(ScaleEndDetails details) {
     _canvasGestureActive = false;
     _endCanvasDrawSession();
+    // Gesture settle flush for PDF tiling: renderers dispatch the retile
+    // immediately instead of sitting out their motion debounce.
+    PdfViewportBus.settle();
     _lastSeenPointerCountTimer?.cancel();
     _lastSeenPointerCountTimer = Timer(const Duration(milliseconds: 10), () {
       lastSeenPointerCount = 0;
@@ -6552,12 +6671,11 @@ class EditorState extends State<Editor>
           break;
         case ToolId.advancedPen:
           stows.lastAdvancedPenOptions.value = pen.options;
+          stows.lastAdvancedPenBrushOptions.value =
+              pen.brushOptions.copyWith();
           break;
-        case ToolId.advancedPencil:
-          stows.lastAdvancedPencilOptions.value = pen.options;
-          stows.lastAdvancedPencilPaint.value = Map<String, dynamic>.from(
-            pen.paint.toJson(embedBytes: false),
-          );
+        case ToolId.pencil:
+          stows.lastPencilOptions.value = pen.options;
           break;
         default:
           break;
@@ -9716,8 +9834,8 @@ class EditorState extends State<Editor>
                     break;
                   case ToolId.advancedPen:
                     stows.lastAdvancedPenColor.value = color.toARGB32();
-                  case ToolId.advancedPencil:
-                    stows.lastAdvancedPencilColor.value = color.toARGB32();
+                  case ToolId.pencil:
+                    stows.lastPencilColor.value = color.toARGB32();
                     break;
                   default:
                     break;
@@ -9765,6 +9883,12 @@ class EditorState extends State<Editor>
                       case ToolId.calligraphyPen:
                         stows.lastCalligraphyPenColor.value = color.toARGB32();
                         break;
+                      case ToolId.advancedPen:
+                        stows.lastAdvancedPenColor.value = color.toARGB32();
+                        break;
+                      case ToolId.pencil:
+                        stows.lastPencilColor.value = color.toARGB32();
+                        break;
                       default:
                         break;
                     }
@@ -9790,8 +9914,8 @@ class EditorState extends State<Editor>
                         break;
                       case ToolId.advancedPen:
                         stows.lastAdvancedPenColor.value = color.toARGB32();
-                      case ToolId.advancedPencil:
-                        stows.lastAdvancedPencilColor.value = color.toARGB32();
+                      case ToolId.pencil:
+                        stows.lastPencilColor.value = color.toARGB32();
                         break;
                       default:
                         break;
@@ -10979,6 +11103,11 @@ class EditorState extends State<Editor>
     _wirePageImageCallbacks(index);
     listenToQuillChanges(page.quill, index);
     _primeVisibleCanvasAssets(coreInfo, index, index, index);
+    // A newly hydrated PDF page may hold the note's first links: rescan so
+    // the "Link boxes" toggle appears (cheap via the session negative cache).
+    if (!_hasPdfLinks && page.backgroundImage is PdfEditorImage) {
+      _checkForPdfLinks();
+    }
     setState(() {});
   }
 
@@ -11168,20 +11297,8 @@ class EditorState extends State<Editor>
   }
 
   void _onDockedSidePanelAnimTick() {
-    if (_resizeViewportAnchor == null) return;
-    // Apply immediately from the ticker (not during layout). Prefer the
-    // predicted canvas width so we stay aligned before LayoutBuilder runs.
-    final predictedW = _predictCanvasWidthForDockAnim();
-    if (_canvasGestureActive) {
-      // Keep horizontal centering while the user draws/pans; skip vertical
-      // re-anchoring so we do not fight the active gesture.
-      _applyResizeViewportAnchor(
-        viewportWidthOverride: predictedW,
-        horizontalOnly: true,
-      );
-      return;
-    }
-    _applyResizeViewportAnchor(viewportWidthOverride: predictedW);
+    // Sidebars abrem instantaneamente, sem animacao - tick desativado.
+    return;
   }
 
   void _onCanvasContainerBoundsChanged(Size size) {
@@ -11331,99 +11448,131 @@ class EditorState extends State<Editor>
   }
 
   bool get _isDockedSidePanelVisible =>
-      _dockedSidePanel != _EditorDockedSidePanel.none ||
-      _dockedSidePanelController.value > 0;
+      _dockedSidePanel != _EditorDockedSidePanel.none;
+
+  double _dockedPanelSpaceFor(_EditorDockedSidePanel panel) {
+    if (panel == _EditorDockedSidePanel.none) return 0.0;
+    if (!mounted) return 0.0;
+    double ideal;
+    try {
+      ideal = editorSidePanelDesktopWidth(context);
+    } catch (_) {
+      return 0.0;
+    }
+    if (ideal <= 0 || !ideal.isFinite) return 0.0;
+    final isPages = panel == _EditorDockedSidePanel.pages;
+    final panelWidth = isPages
+        ? ideal.clamp(280.0, 360.0).toDouble()
+        : ideal.clamp(340.0, 460.0).toDouble();
+    const spacing = 16.0;
+    return panelWidth + spacing * 2;
+  }
+
+  /// Troca instantanea de sidebar preservando a pagina visivel.
+  /// Captura a ancora (pagina + posicao relativa) com a largura ANTIGA,
+  /// calcula a nova largura do canvas de forma deterministica, aplica o
+  /// `setState` do painel e reajusta o `TransformationController` de forma
+  /// sincrona para a nova largura - tudo no mesmo frame, sem animacao.
+  /// Um `postFrame` faz o ajuste fino com a largura real apos layout e
+  /// libera a ancora. O conteudo visivel e a pagina aberta nao mudam.
+  void _setDockedSidePanelInstant(_EditorDockedSidePanel target) {
+    if (!mounted) return;
+    if (_dockedSidePanel == target) return;
+    final epoch = ++_dockedSidePanelAnimEpoch;
+    final bool needsAnchor =
+        coreInfo.pages.isNotEmpty && !coreInfo.isInfinite && coreInfo.pages.length > 1;
+    _ResizeViewportAnchor? anchor;
+    if (needsAnchor) {
+      try {
+        final liveIdx = getPageIndexFromScrollPosition(
+          scrollY: -scrollY,
+          screenWidth: _currentViewportWidth(),
+          pages: coreInfo.pages,
+        ).clamp(0, coreInfo.pages.length - 1);
+        _viewportStablePageIndex = liveIdx;
+        _lastCurrentPageIndex = liveIdx;
+        anchor = _captureResizeViewportAnchor();
+        if (anchor != null) _resizeViewportAnchor = anchor;
+      } catch (_) {
+        anchor = null;
+      }
+    }
+    double? newWidth;
+    try {
+      final oldWidth = _currentViewportWidth();
+      if (oldWidth > 0 && oldWidth.isFinite) {
+        final oldSpace = _dockedPanelSpaceFor(_dockedSidePanel);
+        final newSpace = _dockedPanelSpaceFor(target);
+        final computed = oldWidth + oldSpace - newSpace;
+        if (computed > 0 && computed.isFinite) newWidth = computed;
+      }
+    } catch (_) {
+      newWidth = null;
+    }
+    if (target == _EditorDockedSidePanel.pages) {
+      try {
+        _pagesSidePanelIndexAtOpen = (_viewportStablePageIndex ?? currentPageIndex).clamp(
+          0,
+          coreInfo.pages.isEmpty ? 0 : coreInfo.pages.length - 1,
+        );
+      } catch (_) {}
+    }
+    try {
+      _suppressTransformClamp.value = true;
+    } catch (_) {}
+    setState(() => _dockedSidePanel = target);
+    if (anchor != null && newWidth != null) {
+      try {
+        _applyResizeViewportAnchor(viewportWidthOverride: newWidth);
+      } catch (_) {}
+    }
+    final savedAnchor = anchor;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
+      try {
+        _applyResizeViewportAnchor();
+      } catch (_) {}
+      if (savedAnchor != null && coreInfo.pages.isNotEmpty) {
+        try {
+          _lastCurrentPageIndex = savedAnchor.pageIndex.clamp(
+            0,
+            coreInfo.pages.length - 1,
+          );
+        } catch (_) {}
+      }
+      _resizeViewportAnchor = null;
+      _viewportStablePageIndex = null;
+      try {
+        _suppressTransformClamp.value = false;
+      } catch (_) {}
+      try {
+        _canvasGestureDetectorKey.currentState?.reclampTransform();
+        _transformationController.notifyListenersPlease();
+      } catch (_) {}
+    });
+  }
 
   void _toggleDockedSidePanel(_EditorDockedSidePanel panel) {
+    // Instantaneo, sem animacao: apenas troca o estado e aparece.
     if (panel == _EditorDockedSidePanel.none) {
       _closeDockedSidePanel();
       return;
     }
-
-    final controller = _dockedSidePanelController;
-    final isThisPanel = _dockedSidePanel == panel;
-    final visible = controller.value > 0.01;
-
-    // Mid-close of this panel → reopen (do not stack another reverse).
-    if (isThisPanel &&
-        controller.isAnimating &&
-        controller.status == AnimationStatus.reverse) {
-      _openDockedSidePanel(panel);
-      return;
-    }
-
-    // Already open (or opening) → close.
-    if (isThisPanel && visible) {
+    if (_dockedSidePanel == panel) {
       _closeDockedSidePanel();
       return;
     }
-
-    final switching =
-        _dockedSidePanel != _EditorDockedSidePanel.none &&
-        _dockedSidePanel != panel &&
-        visible;
-
-    if (switching) {
-      // Swap content in place; keep whatever open/close animation is running.
-      if (panel == _EditorDockedSidePanel.pages) {
-        _pagesSidePanelIndexAtOpen = currentPageIndex;
-      }
-      setState(() => _dockedSidePanel = panel);
-      if (controller.status == AnimationStatus.reverse ||
-          controller.isDismissed) {
-        _openDockedSidePanel(panel);
-      }
-      return;
-    }
-
-    if (panel == _EditorDockedSidePanel.pages) {
-      _pagesSidePanelIndexAtOpen = currentPageIndex;
-    }
-    _openDockedSidePanel(panel);
+    _setDockedSidePanelInstant(panel);
   }
 
   void _openDockedSidePanel(_EditorDockedSidePanel panel) {
-    final epoch = ++_dockedSidePanelAnimEpoch;
-    if (!_dockedSidePanelOcclusionActive) {
-      PageRasterCacheManager.pushLayoutOcclusion();
-      _dockedSidePanelOcclusionActive = true;
-    }
-    _beginViewportResizeStabilization(freezePageLayout: false);
-    if (_dockedSidePanel != panel) {
-      setState(() => _dockedSidePanel = panel);
-    }
-    final future = _dockedSidePanelController.forward();
-    future.whenComplete(() {
-      if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
-      if (!_dockedSidePanelController.isCompleted) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
-        _endViewportResizeStabilization();
-      });
-    });
+    // Abertura instantanea, sem animacao, preservando a pagina visivel.
+    _setDockedSidePanelInstant(panel);
   }
 
   void _closeDockedSidePanel() {
-    if (_dockedSidePanel == _EditorDockedSidePanel.none &&
-        _dockedSidePanelController.isDismissed) {
-      return;
-    }
-    final epoch = ++_dockedSidePanelAnimEpoch;
-    _beginViewportResizeStabilization(freezePageLayout: false);
-    final future = _dockedSidePanelController.reverse();
-    future.whenComplete(() {
-      if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
-      if (!_dockedSidePanelController.isDismissed) return;
-      setState(() => _dockedSidePanel = _EditorDockedSidePanel.none);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || epoch != _dockedSidePanelAnimEpoch) return;
-        _endViewportResizeStabilization();
-        if (_dockedSidePanelOcclusionActive) {
-          PageRasterCacheManager.popLayoutOcclusion();
-          _dockedSidePanelOcclusionActive = false;
-        }
-      });
-    });
+    // Fechamento instantaneo, sem animacao, preservando a pagina visivel.
+    _setDockedSidePanelInstant(_EditorDockedSidePanel.none);
   }
 
   Widget _buildDockedSidePanelBody() {
@@ -11509,55 +11658,42 @@ class EditorState extends State<Editor>
         ? null
         : _buildDockedSidePanelBody();
 
-    return AnimatedBuilder(
-      animation: _dockedSidePanelController,
-      child: child,
-      builder: (context, cachedChild) {
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final ideal = editorSidePanelDesktopWidth(context);
-            final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
-            final panelWidth = isPages
-                ? ideal.clamp(280.0, 360.0).toDouble()
-                : ideal.clamp(340.0, 460.0).toDouble();
-            final tAnim = Curves.easeOutCubic.transform(
-              _dockedSidePanelController.value,
-            );
-            const double spacing = 16.0;
-            final totalPanelSpace = panelWidth + spacing * 2;
-            final visibleSpace = totalPanelSpace * tAnim;
+    // Sem animacao: layout final direto em um unico frame.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final ideal = editorSidePanelDesktopWidth(context);
+        final isPages = _dockedSidePanel == _EditorDockedSidePanel.pages;
+        final panelWidth = isPages
+            ? ideal.clamp(280.0, 360.0).toDouble()
+            : ideal.clamp(340.0, 460.0).toDouble();
+        const double spacing = 16.0;
+        final totalPanelSpace = panelWidth + spacing * 2;
+        final visibleSpace =
+            _dockedSidePanel == _EditorDockedSidePanel.none
+                ? 0.0
+                : totalPanelSpace;
 
-            return Stack(
-              children: [
-                // O canvas é empurrado de acordo com a aba selecionada. A Toolbar se mantém fixa.
-                Positioned.fill(
-                  left: isPages ? visibleSpace : 0,
-                  right:
-                      (!isPages &&
-                          _dockedSidePanel == _EditorDockedSidePanel.settings)
-                      ? visibleSpace
-                      : 0,
-                  child: cachedChild!,
-                ),
-
-                // Sidebar Card do Material 3 Flutuante (porém fixada ao lado)
-                if (panelBody != null && tAnim > 0)
-                  Positioned(
-                    top: spacing,
-                    bottom: spacing,
-                    left: isPages ? -panelWidth * (1 - tAnim) + spacing : null,
-                    right: !isPages
-                        ? -panelWidth * (1 - tAnim) + spacing
-                        : null,
-                    width: panelWidth,
-                    child: Opacity(
-                      opacity: tAnim.clamp(0.0, 1.0),
-                      child: panelBody,
-                    ),
-                  ),
-              ],
-            );
-          },
+        return Stack(
+          children: [
+            Positioned.fill(
+              left: isPages ? visibleSpace : 0,
+              right:
+                  (!isPages &&
+                      _dockedSidePanel == _EditorDockedSidePanel.settings)
+                  ? visibleSpace
+                  : 0,
+              child: child,
+            ),
+            if (panelBody != null)
+              Positioned(
+                top: spacing,
+                bottom: spacing,
+                left: isPages ? spacing : null,
+                right: !isPages ? spacing : null,
+                width: panelWidth,
+                child: RepaintBoundary(child: panelBody),
+              ),
+          ],
         );
       },
     );
@@ -12243,6 +12379,7 @@ class EditorState extends State<Editor>
     }
 
     stows.noteInvertInDarkModeOverrides.removeListener(_onGlobalInvertChanged);
+    _showPdfLinkBoxes.removeListener(_onShowPdfLinkBoxesChanged);
 
     if (_dockedSidePanelOcclusionActive) {
       TiledStrokePictureCache.popLayoutOcclusion();
@@ -12251,6 +12388,7 @@ class EditorState extends State<Editor>
 
     _pageRasterCache.dispose();
     PageRasterCacheManager.removeLodSettledListener(_onPageRasterLodSettled);
+    _transformationController.removeListener(_onCanvasTransformTick);
 
     _keepAliveController.dispose();
     _dockedSidePanelController
@@ -12277,6 +12415,7 @@ class EditorState extends State<Editor>
     stows.lastHighlighterOptions.notifyListeners();
 
     _interactionRepaint.dispose();
+    _showPdfLinkBoxes.dispose();
     _eraserPositionRepaint.dispose();
 
     super.dispose();
@@ -13042,18 +13181,18 @@ class _BrowserTabSlot {
 /// The host writes it on every tab mutation and reads it when a new
 /// [EditorWithTabs] mounts, so pressing back and opening another note
 /// restores all still-open tabs.
-class _PersistedEditorTab {
-  _PersistedEditorTab({this.path, this.noteId});
+class PersistedEditorTab {
+  PersistedEditorTab({this.path, this.noteId});
 
   String? path;
   String? noteId;
 }
 
 abstract class EditorTabSession {
-  static final List<_PersistedEditorTab> tabs = [];
+  static final List<PersistedEditorTab> tabs = [];
   static int activeIndex = 0;
 
-  static void replace(List<_PersistedEditorTab> next, int active) {
+  static void replace(List<PersistedEditorTab> next, int active) {
     tabs
       ..clear()
       ..addAll(next);
@@ -13063,6 +13202,39 @@ abstract class EditorTabSession {
   static void clear() {
     tabs.clear();
     activeIndex = 0;
+  }
+
+  /// Canonical tab-identity form: extensionless with a leading slash, so a
+  /// home tap (`/Work/Note`), a stored slot (`/Work/Note.sbn2`) and a live
+  /// editor path all resolve to the same tab.
+  static String normalizeTabPath(String path) {
+    var normalized = path.replaceAll('\\', '/');
+    if (normalized.endsWith(Editor.extension)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extension.length,
+      );
+    } else if (normalized.endsWith(Editor.extensionOldJson)) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - Editor.extensionOldJson.length,
+      );
+    }
+    if (!normalized.startsWith('/')) normalized = '/$normalized';
+    return normalized;
+  }
+
+  /// Index of the tab holding [path] in [paths] (null/empty entries
+  /// skipped), or -1. Pure so the open-note-activates-its-tab contract is
+  /// unit-testable across every path form.
+  static int indexOfPath(List<String?> paths, String path) {
+    final needle = normalizeTabPath(path);
+    for (var i = 0; i < paths.length; i++) {
+      final candidate = paths[i];
+      if (candidate == null || candidate.isEmpty) continue;
+      if (normalizeTabPath(candidate) == needle) return i;
+    }
+    return -1;
   }
 }
 
@@ -13097,6 +13269,8 @@ class EditorWithTabs extends StatefulWidget {
 }
 
 class _EditorWithTabsState extends State<EditorWithTabs> {
+  final log = Logger('EditorTabs');
+
   late List<_BrowserTabSlot> _tabs;
   int _activeIndex = 0;
   int _nextId = 1;
@@ -13164,6 +13338,10 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       );
       _activeIndex = _tabs.length - 1;
     }
+    log.info(
+      'mount restore=${EditorTabSession.tabs.length} tabs=${_tabs.length} '
+      'active=$_activeIndex incoming=${incoming ?? "<new>"}',
+    );
     _syncSession();
     _scheduleReadyRefresh();
     unawaited(_validateRestoredTabs());
@@ -13184,12 +13362,17 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   Future<void> _validateRestoredTabs() async {
     if (!mounted || _tabs.isEmpty) return;
     // File-existence pass (cheap, synchronous IO under the hood).
+    // Skipped while the encrypted vault is locked: fileExists cannot see
+    // vault files then and would prune every legitimate tab. Identity is
+    // still verified lazily on activation once unlocked.
+    final vaultBlind =
+        stows.localEncryptionEnabled.value && !VaultAdapter.isUnlocked;
     var removed = false;
     for (var i = _tabs.length - 1; i >= 0; i--) {
       final slot = _tabs[i];
       // Only validate restored tabs; fresh tabs may point at not-yet-saved
       // new notes whose file legitimately does not exist.
-      if (!_expectedNoteIds.containsKey(slot.id)) continue;
+      if (vaultBlind || !_expectedNoteIds.containsKey(slot.id)) continue;
       final path = slot.key.currentState?.coreInfo.filePath ?? slot.path;
       if (path == null || path.isEmpty) continue;
       bool exists = false;
@@ -13199,6 +13382,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         exists = true;
       }
       if (!exists && mounted) {
+        log.info(
+          'prune missing-file ${_displayNameForPath(slot.path)}',
+        );
         _expectedNoteIds.remove(slot.id);
         _tabs.removeAt(i);
         removed = true;
@@ -13241,6 +13427,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       }
       _expectedNoteIds.remove(slot.id);
       if (loadedId == expected || !mounted) return;
+      log.info(
+        'prune identity-mismatch ${_displayNameForPath(slot.path)}',
+      );
       final index = _tabs.indexOf(slot);
       if (index < 0) return;
       if (_tabs.length == 1) {
@@ -13248,7 +13437,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         _replaceWithFreshTabOrHome();
         return;
       }
-      _removeTabAt(index);
+      _removeTabAt(index, reason: 'identity-mismatch');
       _scheduleReadyRefresh();
       return;
     }
@@ -13313,6 +13502,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   Future<void> _setActiveIndex(int index) async {
     if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
     final epoch = ++_switchEpoch;
+    // Resolve by slot identity after the save gap: tabs may have been
+    // added/removed/closed while saving, so a raw index may be stale.
+    final target = _tabs[index];
     final outgoing = _activeState;
     if (outgoing != null) {
       try {
@@ -13320,7 +13512,15 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       } catch (_) {}
     }
     if (!mounted || epoch != _switchEpoch) return;
-    setState(() => _activeIndex = index);
+    // The list may have shrunk while saving (tab closed, validation
+    // pruned); re-resolve instead of activating a stale index.
+    final freshIndex = _tabs.indexOf(target);
+    if (freshIndex < 0 || freshIndex == _activeIndex) return;
+    log.info(
+      'switch ${_displayNameForPath(_tabs[_activeIndex.clamp(0, _tabs.length - 1)].path)}'
+      ' -> ${_displayNameForPath(target.path)}',
+    );
+    setState(() => _activeIndex = freshIndex);
     _syncSession();
     _scheduleReadyRefresh();
     unawaited(_validateActiveNoteId());
@@ -13342,6 +13542,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       initialPageIndex: initialPageIndex,
     );
     _tabs.add(slot);
+    log.info(
+      'add ${_displayNameForPath(slot.path)} (total ${_tabs.length})',
+    );
     _syncSession();
     await _setActiveIndex(_tabs.indexOf(slot));
   }
@@ -13373,14 +13576,15 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     EditorTabSession.replace(
       [
         for (final slot in _tabs)
-          _PersistedEditorTab(path: slot.path, noteId: slot.noteId),
+          PersistedEditorTab(path: slot.path, noteId: slot.noteId),
       ],
-      _activeIndex.clamp(0, _tabs.length - 1),
+      // Empty list has no valid index (clamp(0, -1) would throw).
+      _tabs.isEmpty ? 0 : _activeIndex.clamp(0, _tabs.length - 1),
     );
   }
 
   void _scheduleReadyRefresh() {
-    if (_readyRefreshScheduled) return;
+    if (_readyRefreshScheduled || _tabs.isEmpty) return;
     _readyRefreshScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyRefreshScheduled = false;
@@ -13397,30 +13601,13 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   }
 
   int _indexOfPath(String path) {
-    final needle = _normalizeTabPath(path);
-    for (var i = 0; i < _tabs.length; i++) {
-      final st = _tabs[i].key.currentState;
-      final current = st?.coreInfo.filePath ?? _tabs[i].path ?? '';
-      if (_normalizeTabPath(current) == needle) return i;
-    }
-    return -1;
-  }
-
-  static String _normalizeTabPath(String path) {
-    var normalized = path.replaceAll('\\', '/');
-    if (normalized.endsWith(Editor.extension)) {
-      normalized = normalized.substring(
-        0,
-        normalized.length - Editor.extension.length,
-      );
-    } else if (normalized.endsWith(Editor.extensionOldJson)) {
-      normalized = normalized.substring(
-        0,
-        normalized.length - Editor.extensionOldJson.length,
-      );
-    }
-    if (!normalized.startsWith('/')) normalized = '/$normalized';
-    return normalized;
+    return EditorTabSession.indexOfPath(
+      [
+        for (var i = 0; i < _tabs.length; i++)
+          _tabs[i].key.currentState?.coreInfo.filePath ?? _tabs[i].path,
+      ],
+      path,
+    );
   }
 
   static String _displayNameForPath(String? path) {
@@ -13500,8 +13687,12 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
 
   /// Removes the tab at [index] and reveals a neighbor. The closed editor
   /// disposes itself (single save if dirty).
-  void _removeTabAt(int index) {
+  void _removeTabAt(int index, {String reason = 'close'}) {
     if (index < 0 || index >= _tabs.length) return;
+    log.info(
+      'remove $reason ${_displayNameForPath(_tabs[index].path)} '
+      '(remaining ${_tabs.length - 1})',
+    );
     setState(() {
       _tabs.removeAt(index);
       if (_activeIndex > index) {
@@ -13538,12 +13729,13 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       HomeDataCache.instance.forgetRecentPaths([path]);
     }
     if (_tabs.length == 1) {
+      log.info('remove deleted (last tab, leaving editor)');
       EditorTabSession.clear();
       _goToHome();
       return;
     }
     final closingActive = index == _activeIndex;
-    _removeTabAt(index);
+    _removeTabAt(index, reason: 'deleted');
     if (closingActive) _scheduleReadyRefresh();
   }
 
@@ -13599,12 +13791,21 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       _isNavigatingHome = false;
       return;
     }
-    // Back with a single tab closes that tab: clear the session so opening
-    // another note later starts fresh with one tab. With several tabs the
-    // session is kept as-is and all tabs restore on the next visit.
+    // Back with a single tab closes that tab: drop it from the in-memory
+    // list AND clear the session, so opening another note later starts
+    // fresh with one tab. Clearing only the session is not enough: any
+    // _syncSession running afterwards (post-frame bump, toolbar callback,
+    // dispose during the pop transition) would resurrect the tab from the
+    // still-populated list. With several tabs the session is kept as-is and
+    // all tabs restore on the next visit.
     if (_tabs.length <= 1) {
+      log.info('back with single tab: clearing session');
+      _tabs.clear();
+      _activeIndex = 0;
       EditorTabSession.clear();
       _exitClearedSession = true;
+    } else {
+      log.info('back with ${_tabs.length} tabs: keeping session');
     }
     // Close without a jarring exit animation: pop when possible, else go recent.
     if (context.canPop()) {
@@ -13818,55 +14019,67 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       );
     }
 
-    return GestureDetector(
-      onTap: () => _switchTab(index),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 200, minHeight: 36),
-        child: Container(
-          padding: const EdgeInsets.only(left: 10, right: 4, top: 4, bottom: 4),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(12),
-            border: border,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                isActive
-                    ? Icons.description_rounded
-                    : Icons.description_outlined,
-                size: 16,
-                color: fg,
-              ),
-              const SizedBox(width: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 120),
-                child: label,
-              ),
-              if (statusDot != null) ...[
-                const SizedBox(width: 6),
-                statusDot,
-              ],
-              if (_tabs.length > 1) ...[
-                const SizedBox(width: 2),
-                InkWell(
-                  onTap: () => _closeTab(index),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: Icon(
-                      Icons.close_rounded,
-                      size: 14,
-                      color: fg.withValues(alpha: 0.8),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 200, minHeight: 36),
+      child: Container(
+        padding: const EdgeInsets.only(right: 4, top: 4, bottom: 4),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(12),
+          border: border,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Switch area and close button are siblings (never nested): a
+            // close tap must never also trigger a switch. Nested taps both
+            // win the gesture arena, which used to close one tab while
+            // spuriously switching to another.
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _switchTab(index),
+              child: Padding(
+                padding: const EdgeInsets.only(left: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isActive
+                          ? Icons.description_rounded
+                          : Icons.description_outlined,
+                      size: 16,
+                      color: fg,
                     ),
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 120),
+                      child: label,
+                    ),
+                    if (statusDot != null) ...[
+                      const SizedBox(width: 6),
+                      statusDot,
+                    ],
+                    const SizedBox(width: 2),
+                  ],
+                ),
+              ),
+            ),
+            if (_tabs.length > 1)
+              InkWell(
+                onTap: () => _closeTab(index),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 14,
+                    color: fg.withValues(alpha: 0.8),
                   ),
                 ),
-              ] else ...[
-                const SizedBox(width: 6),
-              ],
-            ],
-          ),
+              )
+            else
+              const SizedBox(width: 6),
+          ],
         ),
       ),
     );

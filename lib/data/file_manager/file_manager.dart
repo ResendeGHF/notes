@@ -41,6 +41,9 @@ import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/background_operation_lock.dart';
 import 'package:saber/services/background_operation_queue.dart';
+import 'package:saber/services/pdf_open_helper.dart';
+import 'package:saber/services/pdf_page_thumbnail_cache.dart';
+import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/sba_encryption.dart';
 import 'package:saber/services/thumbnail_cache.dart';
 import 'package:saber/services/vault_adapter.dart';
@@ -903,6 +906,17 @@ class FileManager {
       final String path = event.path
           .replaceAll('\\', '/')
           .replaceFirst(documentsDirectory, '');
+      // Internal bookkeeping must never invalidate browse counts or trigger
+      // reload loops: `.folder_props` writes happen on every rebuild.
+      final base = p.basename(path);
+      if (base == '.folder_props' ||
+          base == '.folder_count' ||
+          base == '.nomedia' ||
+          base == '.folder_order' ||
+          base.startsWith('.saber_') ||
+          base.startsWith('.saber_background_ops')) {
+        return;
+      }
       broadcastFileWrite(type, path);
     });
   }
@@ -2790,6 +2804,16 @@ class FileManager {
         newName;
     await directory.rename(documentsDirectory + newPath);
 
+    // Folder-level events (parity with vault): empty folders emit no child
+    // events, so without these browse/graph never refresh for them in disk
+    // mode and stay stale until app restart.
+    broadcastFileWrite(
+      FileOperationType.delete,
+      directoryPath,
+      removal: _removalCauseForRelocate(directoryPath, newPath),
+    );
+    broadcastFileWrite(FileOperationType.write, newPath);
+
     for (final child in children) {
       _renameReferences(directoryPath + child, newPath + child);
       broadcastFileWrite(
@@ -2902,6 +2926,14 @@ class FileManager {
       currentSize,
     );
 
+    // Folder-level events (parity with vault): see renameDirectory.
+    broadcastFileWrite(
+      FileOperationType.delete,
+      directoryPath,
+      removal: _removalCauseForRelocate(directoryPath, newPath),
+    );
+    broadcastFileWrite(FileOperationType.write, newPath);
+
     for (final child in children) {
       _renameReferences(directoryPath + child, newPath + child);
       broadcastFileWrite(
@@ -2984,6 +3016,15 @@ class FileManager {
     await directory.delete(recursive: recursive);
 
     await _updateDiskFolderProps(directoryPath, -currentCount, -currentSize);
+
+    // Folder-level event (parity with vault): empty folders emit no child
+    // events, so without this browse/graph never refresh for them in disk
+    // mode and stay stale until app restart.
+    broadcastFileWrite(
+      FileOperationType.delete,
+      directoryPath,
+      removal: FileRemovalCause.deleted,
+    );
   }
 
   static Future<DirectoryChildren?> getChildrenOfDirectory(
@@ -3473,10 +3514,10 @@ class FileManager {
       return await VaultAdapter.instance.getFolderFileCount(folderPath);
     }
 
-    // Match vault: always return a recursive countable-file total. Disk props
-    // are rebuilt when missing or stale (see [getFolderProperties]).
-    final props = await getFolderProperties(folderPath);
-    return (props?['file_count'] as num?)?.toInt() ?? 0;
+    // Disk must match vault: authoritative recursive scan, never trust the
+    // incremental `.folder_props` cache (it goes stale after vault disable,
+    // restores, or external writes that bypass [_updateDiskFolderProps]).
+    return _countDiskFilesRecursive(folderPath);
   }
 
   static Future<Map<String, int>> getFolderFileCountsBatch(
@@ -3497,7 +3538,7 @@ class FileManager {
 
     final entries = await Future.wait(
       unique.entries.map((entry) async {
-        final count = await getFolderFileCount(entry.value);
+        final count = await _countDiskFilesRecursive(entry.value);
         return MapEntry(entry.key, count);
       }),
     );
@@ -3510,8 +3551,7 @@ class FileManager {
     }
 
     // Root recursive count — same source of truth as per-folder counters.
-    final props = await getFolderProperties('/');
-    return (props?['file_count'] as num?)?.toInt() ?? 0;
+    return _countDiskFilesRecursive('/');
   }
 
   static Future<void> _updateDiskFolderProps(
@@ -3737,22 +3777,40 @@ class FileManager {
         if (entity is! File) continue;
 
         final relativePath = toRelativePath(entity.path);
+        // Never count/size internal bookkeeping files, even if filters change.
+        final base = p.basename(relativePath);
+        if (base == '.folder_props' ||
+            base == '.folder_count' ||
+            base == '.nomedia' ||
+            base == '.folder_order' ||
+            base.startsWith('.saber_')) {
+          continue;
+        }
         if (isCountableFile(relativePath)) count++;
         if (isFolderSizeTrackedFile(relativePath)) {
-          final stat = await entity.stat();
-          size += stat.size;
-          final modified = stat.modified.millisecondsSinceEpoch;
-          if (modified > latestModified) latestModified = modified;
+          try {
+            final stat = await entity.stat();
+            size += stat.size;
+            final modified = stat.modified.millisecondsSinceEpoch;
+            if (modified > latestModified) latestModified = modified;
+          } catch (_) {}
         }
       }
 
       final propsFile = File(p.join(dir.path, '.folder_props'));
       final now = DateTime.now().millisecondsSinceEpoch;
       int created = dir.statSync().changed.millisecondsSinceEpoch;
+      Map<String, dynamic>? existing;
       if (await propsFile.exists()) {
         try {
           final content = jsonDecode(await propsFile.readAsString());
-          created = content['created_at'] ?? created;
+          if (content is Map<String, dynamic>) {
+            existing = content;
+            created = content['created_at'] ?? created;
+          } else if (content is Map) {
+            existing = Map<String, dynamic>.from(content);
+            created = (content['created_at'] as num?)?.toInt() ?? created;
+          }
         } catch (_) {}
       }
 
@@ -3763,11 +3821,193 @@ class FileManager {
         'created_at': created,
         'last_modified': max(latestModified, now),
       };
-      await propsFile.writeAsString(jsonEncode(props));
+      // Avoid touching the props file (and spamming the root watcher) when
+      // nothing changed — only the count/size/version matter for readers.
+      final sameCount =
+          (existing?['file_count'] as num?)?.toInt() == count &&
+          (existing?['total_size'] as num?)?.toInt() == size &&
+          existing?['bundle_size_version'] == _folderBundleSizeVersion;
+      if (!sameCount) {
+        try {
+          await propsFile.writeAsString(jsonEncode(props));
+        } catch (_) {}
+      }
       return props;
     } catch (_) {
       return null;
     }
+  }
+
+  /// Authoritative recursive count for disk mode (vault-off).
+  ///
+  /// Unlike the incremental `.folder_props` cache (which goes stale when files
+  /// are written outside [writeFile]/[deleteFile] — e.g. vault disable via
+  /// [VaultAdapter.migrateToDisk], restores, or external file managers), this
+  /// scans the subtree and applies the same [isCountableFile] filter the vault
+  /// DB rebuild uses, so vault-on and vault-off agree on every level.
+  static Future<int> _countDiskFilesRecursive(String folderPath) async {
+    try {
+      final normalized = _sanitisePath(folderPath);
+      final dir = Directory(documentsDirectory + normalized);
+      if (!await dir.exists()) return 0;
+      var count = 0;
+      await for (final entity in dir.list(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (entity is! File) continue;
+        final relativePath = toRelativePath(entity.path);
+        final base = p.basename(relativePath);
+        if (base == '.folder_props' ||
+            base == '.folder_count' ||
+            base == '.nomedia' ||
+            base == '.folder_order' ||
+            base.startsWith('.saber_')) {
+          continue;
+        }
+        if (isCountableFile(relativePath)) count++;
+      }
+      return count;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Recompute `.folder_props` for every folder under the documents root in a
+  /// single walk. Used after bulk disk writes that bypass the incremental
+  /// counters (vault disable, physical restore) so the next browse paints the
+  /// same recursive totals the vault DB had.
+  static Future<void> rebuildAllDiskFolderCounts() async {
+    if (_shouldUseVault) return;
+    try {
+      final root = Directory(documentsDirectory);
+      if (!root.existsSync()) return;
+
+      final counts = <String, int>{};
+      final sizes = <String, int>{};
+      final latest = <String, int>{};
+
+      void bumpAncestors(String fileRelativePath, int size) {
+        var current = p.dirname(_sanitisePath(fileRelativePath));
+        while (true) {
+          counts[current] = (counts[current] ?? 0) + 1;
+          if (size > 0) sizes[current] = (sizes[current] ?? 0) + size;
+          if (current == '/' || current == '.') break;
+          current = p.dirname(current);
+        }
+      }
+
+      await for (final entity in root.list(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (entity is Directory) {
+          // Track empty folders too so stale non-zero caches are cleared.
+          try {
+            final rel = toRelativePath(entity.path);
+            final norm = _sanitisePath(rel);
+            // Skip internal dirs (data, file_picker, .tmpAssets, dot dirs).
+            final segs = norm.split('/').where((s) => s.isNotEmpty).toList();
+            if (segs.isNotEmpty) {
+              final leaf = segs.last.toLowerCase();
+              if (leaf == 'data' ||
+                  leaf == 'file_picker' ||
+                  leaf == '.tmpassets' ||
+                  leaf.startsWith('.')) {
+                continue;
+              }
+            }
+            counts.putIfAbsent(norm, () => counts[norm] ?? 0);
+            sizes.putIfAbsent(norm, () => sizes[norm] ?? 0);
+          } catch (_) {}
+          continue;
+        }
+        if (entity is! File) continue;
+        final relativePath = toRelativePath(entity.path);
+        final base = p.basename(relativePath);
+        if (base == '.folder_props' ||
+            base == '.folder_count' ||
+            base == '.nomedia' ||
+            base == '.folder_order' ||
+            base.startsWith('.saber_')) {
+          continue;
+        }
+        int size = 0;
+        if (isFolderSizeTrackedFile(relativePath)) {
+          try {
+            size = (await entity.stat()).size;
+          } catch (_) {}
+        }
+        if (isCountableFile(relativePath)) {
+          bumpAncestors(relativePath, isFolderSizeTrackedFile(relativePath) ? size : 0);
+        } else if (isFolderSizeTrackedFile(relativePath) && size > 0) {
+          // Size-only sidecars (`.p`, `.sbn2.N`) still roll up to ancestors.
+          var current = p.dirname(_sanitisePath(relativePath));
+          while (true) {
+            sizes[current] = (sizes[current] ?? 0) + size;
+            if (current == '/' || current == '.') break;
+            current = p.dirname(current);
+          }
+        }
+        if (size > 0) {
+          try {
+            final m = (await entity.stat()).modified.millisecondsSinceEpoch;
+            var current = p.dirname(_sanitisePath(relativePath));
+            while (true) {
+              if (m > (latest[current] ?? 0)) latest[current] = m;
+              if (current == '/' || current == '.') break;
+              current = p.dirname(current);
+            }
+          } catch (_) {}
+        }
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final dirs = <String>{'/', ...counts.keys, ...sizes.keys};
+      for (final dirKey in dirs) {
+        try {
+          final dir = Directory(documentsDirectory + dirKey);
+          if (!dir.existsSync()) continue;
+          final propsFile = File(p.join(dir.path, '.folder_props'));
+          int created = now;
+          Map<String, dynamic>? existing;
+          if (await propsFile.exists()) {
+            try {
+              final content = jsonDecode(await propsFile.readAsString());
+              if (content is Map<String, dynamic>) {
+                existing = content;
+              } else if (content is Map) {
+                existing = Map<String, dynamic>.from(content);
+              }
+              created =
+                  (existing?['created_at'] as num?)?.toInt() ??
+                  dir.statSync().changed.millisecondsSinceEpoch;
+            } catch (_) {}
+          } else {
+            try {
+              created = dir.statSync().changed.millisecondsSinceEpoch;
+            } catch (_) {}
+          }
+          final count = counts[dirKey] ?? 0;
+          final size = sizes[dirKey] ?? 0;
+          if ((existing?['file_count'] as num?)?.toInt() == count &&
+              (existing?['total_size'] as num?)?.toInt() == size &&
+              existing?['bundle_size_version'] ==
+                  _folderBundleSizeVersion) {
+            continue;
+          }
+          await propsFile.writeAsString(
+            jsonEncode({
+              'file_count': count,
+              'total_size': size,
+              'bundle_size_version': _folderBundleSizeVersion,
+              'created_at': created,
+              'last_modified': max(latest[dirKey] ?? now, now),
+            }),
+          );
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   static Future<Map<String, dynamic>?> getFolderProperties(
@@ -3781,25 +4021,47 @@ class FileManager {
       final dir = Directory(documentsDirectory + folderPath);
       if (!await dir.exists()) return null;
 
+      // Authoritative count first: the cached `.folder_props` file_count goes
+      // stale whenever files bypass [_updateDiskFolderProps] (vault disable via
+      // migrateToDisk, restores, external file managers). The vault DB never
+      // has this problem, so disk must validate the same way on every read.
+      final freshCount = await _countDiskFilesRecursive(folderPath);
+
       final propsFile = File(p.join(dir.path, '.folder_props'));
+      Map<String, dynamic>? cached;
       if (await propsFile.exists()) {
         try {
-          final props = jsonDecode(await propsFile.readAsString());
-          if (props['bundle_size_version'] == _folderBundleSizeVersion) {
-            return props;
+          final raw = jsonDecode(await propsFile.readAsString());
+          if (raw is Map<String, dynamic>) {
+            cached = raw;
+          } else if (raw is Map) {
+            cached = Map<String, dynamic>.from(raw);
           }
-          final rebuilt = await _rebuildDiskFolderProperties(folderPath);
-          return rebuilt ?? props;
-        } catch (_) {}
+        } catch (_) {
+          cached = null;
+        }
       }
-      return await _rebuildDiskFolderProperties(folderPath) ??
-          {
-            'file_count': 0,
-            'total_size': 0,
-            'bundle_size_version': _folderBundleSizeVersion,
-            'created_at': (dir.statSync()).changed.millisecondsSinceEpoch,
-            'last_modified': (dir.statSync()).modified.millisecondsSinceEpoch,
-          };
+      final cachedVersion = cached?['bundle_size_version'];
+      final cachedCount = (cached?['file_count'] as num?)?.toInt();
+      if (cached != null &&
+          cachedVersion == _folderBundleSizeVersion &&
+          cachedCount == freshCount) {
+        return cached;
+      }
+      final rebuilt = await _rebuildDiskFolderProperties(folderPath);
+      if (rebuilt != null) return rebuilt;
+      if (cached != null) {
+        // Rebuild failed (e.g. transient IO): at least repair the count so
+        // folder rows never show a stale zero after vault disable.
+        return {...cached, 'file_count': freshCount};
+      }
+      return {
+        'file_count': freshCount,
+        'total_size': 0,
+        'bundle_size_version': _folderBundleSizeVersion,
+        'created_at': (dir.statSync()).changed.millisecondsSinceEpoch,
+        'last_modified': (dir.statSync()).modified.millisecondsSinceEpoch,
+      };
     } catch (_) {
       return null;
     }
@@ -4060,13 +4322,7 @@ class FileManager {
 
       final assetId = await coreInfo.assetCacheAll.addPdfFast(pdfFile);
 
-      final doc = await PdfDocument.openFile(
-        pdfPath,
-        useProgressiveLoading: true,
-      );
-      unawaited(
-        doc.loadPagesProgressively().catchError((Object _, StackTrace __) {}),
-      );
+      final doc = await PdfOpenHelper.openFileProgressive(pdfPath);
 
       Future<List<PdfOutlineItem>?>? outlineFuture;
       if (pdfOutlines == null) {
@@ -4121,6 +4377,10 @@ class FileManager {
         }
       }
 
+      // Assign the note id NOW: otherwise the first open sees a missing
+      // id and fires a full saveToFile(force: true) (renumber + hash +
+      // zlib + write) right in the middle of opening the note.
+      coreInfo.ensureNoteId();
       for (final page in coreInfo.pages) {
         page.id ??= coreInfo.allocatePageId();
       }
@@ -4142,10 +4402,20 @@ class FileManager {
       await writeFile(sbnFilePath + Editor.extension, bson, awaitWrite: true);
 
       onImportProgress?.call(0.92, 'Thumbnail');
+      // Key the tile to the saved asset path (what the editor probes on
+      // open), not the transient file_picker path: the picker file is
+      // deleted after import, so its size|mtime key would MISS forever.
+      final savedAssetFile = getFile('$sbnFilePath${Editor.extension}.$assetId');
+      final thumbSourcePath =
+          savedAssetFile.existsSync() ? savedAssetFile.path : pdfPath;
       final bool thumbnailGenerated = await generateThumbnailFromPdf(
-        pdfPath,
+        thumbSourcePath,
         '$sbnFilePath${Editor.extension}.p',
         document: doc,
+        // Same stored identity the editor probe uses: import-time tiles hit
+        // open-time probes by construction (no stat, no mtime fragility).
+        fileSize: coreInfo.assetCacheAll.getAssetFileSize(assetId),
+        contentHash: coreInfo.assetCacheAll.getAssetPreviewHash(assetId),
       );
 
       if (!thumbnailGenerated) {
@@ -4444,39 +4714,97 @@ class FileManager {
     String destinationPath, {
     Uint8List? fileBytes,
     PdfDocument? document,
+    int? fileSize,
+    int? contentHash,
   }) async {
     final shouldDisposeDocument = document == null;
     try {
-      if (document == null && fileBytes != null) {
-        document = await PdfDocument.openData(fileBytes);
-      } else if (document == null && await File(pdfPath).exists()) {
-        document = await PdfDocument.openFile(pdfPath);
-      } else if (document == null) {
-        final bytes = await FileManager.readFile(pdfPath);
-        if (bytes != null) document = await PdfDocument.openData(bytes);
+      // mmap-first open: stream page 0 from SSD instead of copying the whole
+      // file into Dart RAM. An already-open document (import/save fast path)
+      // is always preferred over reopening.
+      if (document == null) {
+        if (pdfPath.isNotEmpty) {
+          try {
+            if (File(pdfPath).existsSync()) {
+              document = await PdfOpenHelper.openFileProgressive(pdfPath);
+            }
+          } catch (_) {}
+        }
+        document ??= await PdfOpenHelper.openMmapPreferred(
+          filePath: pdfPath.isEmpty ? null : pdfPath,
+          bytes:
+              fileBytes ??
+              (pdfPath.isEmpty
+                  ? null
+                  : await FileManager.readFile(pdfPath)),
+          sourceName: pdfPath.isEmpty ? 'thumbnail_pdf' : pdfPath,
+        );
       }
 
-      if (document == null || document.pages.isEmpty) return false;
+      if (document.pages.isEmpty) return false;
 
+      // Shared tile path: the same 360px JPEG the editor paints instantly.
+      // Renders on pdfrx's background worker, encodes JPEG off-thread, and
+      // populates the disk/memory tile cache for the next open.
+      final thumbKey = _pdfThumbKeyFor(
+        document,
+        pdfPath,
+        fileBytes,
+        fileSize: fileSize,
+        contentHash: contentHash,
+      );
+      File? tile;
+      if (thumbKey != null) {
+        tile = await PdfPageThumbnailCache.getOrRender(
+          doc: document,
+          pageIndex: 0,
+          cacheKey: thumbKey,
+          targetWidth: DisplayInkFeel.instance.pdfPreviewWidthPx,
+          jpegQuality: DisplayInkFeel.instance.pdfPreviewJpegQuality,
+        );
+        if (tile == null) {
+          final mem = PdfPageThumbnailCache.tryGetMemory(thumbKey);
+          if (mem != null && mem.isNotEmpty) {
+            unawaited(writeFile(destinationPath, mem, awaitWrite: false));
+            return true;
+          }
+        }
+      }
+      if (tile != null) {
+        try {
+          // Copy (not move): the tile stays cached for instant editor paint.
+          await tile.copy(destinationPath);
+          return true;
+        } catch (_) {
+          final bytes = await tile.readAsBytes();
+          unawaited(writeFile(destinationPath, bytes, awaitWrite: false));
+          return true;
+        }
+      }
+
+      // Fallback: direct low-res render when the tile cache missed (e.g.
+      // vault memory-only mode without a cached entry yet).
       final page = document.pages[0];
-
-      final double scale = 360.0 / page.width;
-      final int width = (page.width * scale).toInt();
-      final int height = (page.height * scale).toInt();
-
-      final pdfImage = await page.render(
-        fullWidth: width.toDouble(),
-        fullHeight: height.toDouble(),
-
-        backgroundColor: Colors.white.value,
+      const targetWidth = 360.0;
+      final aspect = page.height <= 0 ? 1.0 : page.width / page.height;
+      final targetHeight = (targetWidth / (aspect <= 0 ? 1.0 : aspect)).clamp(
+        1.0,
+        1024.0,
       );
 
-      if (pdfImage != null) {
+      final pdfImage = await page.render(
+        fullWidth: targetWidth,
+        fullHeight: targetHeight,
+        backgroundColor: Colors.white.value,
+      );
+      if (pdfImage == null) return false;
+      try {
         final image = await pdfImage.createImage();
-        final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-        image.dispose();
-
-        if (byteData != null) {
+        try {
+          final byteData = await image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (byteData == null) return false;
           unawaited(
             writeFile(
               destinationPath,
@@ -4485,15 +4813,65 @@ class FileManager {
             ),
           );
           return true;
+        } finally {
+          image.dispose();
         }
+      } finally {
+        pdfImage.dispose();
       }
-      return false;
     } catch (e) {
       log.warning('Failed to generate thumbnail directly from PDF: $e');
       return false;
     } finally {
       if (shouldDisposeDocument) document?.dispose();
     }
+  }
+
+  /// Tile-cache key for the thumbnail's page 0. Prefers the asset
+  /// identity (size + content hash from note metadata: stable across mtime
+  /// churn, no filesystem I/O) so import-time tiles hit the open-time probe
+  /// by construction; stat fallback otherwise, then a content hash of the
+  /// provided bytes when no file exists.
+  static String? _pdfThumbKeyFor(
+    PdfDocument document,
+    String pdfPath,
+    Uint8List? fileBytes, {
+    int? fileSize,
+    int? contentHash,
+  }) {
+    try {
+      // Same profile width the render below uses: key and pixels must agree
+      // or every lookup misses.
+      final w = DisplayInkFeel.instance.pdfPreviewWidthPx;
+      final key = PdfPageThumbnailCache.keyForPage(
+        fileSize: fileSize,
+        identityHash: contentHash,
+        filePath: pdfPath,
+        pageIndex: 0,
+        targetWidth: w,
+      );
+      if (key != null) return key;
+    } catch (_) {}
+    try {
+      final bytes = fileBytes;
+      if (bytes != null && bytes.isNotEmpty) {
+        var hash = 0x811C9DC5;
+        hash ^= (bytes.length & 0xFF);
+        hash = (hash * 0x01000193) & 0xFFFFFFFF;
+        final n = bytes.length < 4096 ? bytes.length : 4096;
+        for (var i = 0; i < n; i++) {
+          hash ^= bytes[i];
+          hash = (hash * 0x01000193) & 0xFFFFFFFF;
+        }
+        return PdfPageThumbnailCache.cacheKeyFor(
+          fileSize: bytes.length,
+          mtimeMs: hash,
+          pageIndex: 0,
+          targetWidth: PdfPageThumbnailCache.defaultThumbWidthPx,
+        );
+      }
+    } catch (_) {}
+    return null;
   }
 }
 
@@ -5325,6 +5703,14 @@ class BackupManager {
 
         report(1, 'Restore complete', indeterminate: false);
       }
+
+      // Restored `.folder_props` (if any) come from the backup and are stale
+      // by definition — bulk copies bypass [_updateDiskFolderProps]. Rebuild
+      // once when vault is off so browse counts match the restored tree.
+      // (No-op when vault is on; vault counts come from the DB.)
+      try {
+        await FileManager.rebuildAllDiskFolderCounts();
+      } catch (_) {}
 
       FileManager.documentsDirectory =
           await FileManager.getDocumentsDirectory();

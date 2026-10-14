@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:saber/data/editor/stroke_paint_shader_cache.dart';
 
 /// Butterfly-style stroke surface: solid, tiled image/SVG, gradient, or
-/// procedural pencil noise (Advanced Pencil).
+/// procedural pencil noise (pencil).
 enum StrokePaintMode {
   solid,
   image,
@@ -39,7 +39,7 @@ class StrokePaintStop {
   }
 }
 
-/// Default Advanced Pencil grain (cellular speckles, world-anchored).
+/// Default pencil grain (cellular speckles, world-anchored).
 class PencilNoiseDefaults {
   /// Smaller = finer grains.
   static const double grainScale = 0.05;
@@ -79,7 +79,7 @@ class StrokePaint {
   factory StrokePaint.solid({Color tint = const Color(0xFFFFFFFF)}) =>
       StrokePaint(mode: StrokePaintMode.solid, tint: tint);
 
-  /// Efficient default pencil grain for Advanced Pencil.
+  /// Efficient default pencil grain.
   factory StrokePaint.pencilNoiseDefault() => const StrokePaint(
     mode: StrokePaintMode.pencilNoise,
     noiseGrainScale: PencilNoiseDefaults.grainScale,
@@ -105,7 +105,7 @@ class StrokePaint {
   final double gradientRadius;
   final List<StrokePaintStop> stops;
 
-  /// Procedural pencil noise (Advanced Pencil shader uniforms).
+  /// Procedural pencil noise (pencil shader uniforms).
   final double noiseGrainScale;
   final double noiseThreshold;
   final double noiseContrast;
@@ -114,7 +114,7 @@ class StrokePaint {
   /// When true, stylus pressure changes grain coverage instead of stroke width.
   final bool pressureMapsToCoverage;
 
-  /// Cheap page-space contact shadow under Advanced Pencil grain.
+  /// Cheap page-space contact shadow under pencil grain.
   final bool pencilShadow;
 
   bool get isSolid => mode == StrokePaintMode.solid;

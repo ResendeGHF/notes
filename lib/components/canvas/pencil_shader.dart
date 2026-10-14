@@ -14,7 +14,7 @@ import 'package:saber/data/stroke_geometry/point_vector.dart';
 
 final _log = Logger('PencilShader');
 
-/// Advanced Pencil grain via [FragmentProgram] (`shaders/pencil.frag`).
+/// pencil grain via [FragmentProgram] (`shaders/pencil.frag`).
 ///
 /// Path-oriented, page-anchored grain. Live and committed use the same
 /// painter with zoom LOD. One [ui.FragmentShader] per page; stays off tiles.

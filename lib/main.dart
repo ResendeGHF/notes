@@ -123,7 +123,7 @@ Future<void> appRunner(List<String> args) async {
   StrokeOptionsExtension.setDefaults();
   Stows.markAsOnMainIsolate();
 
-  // Warm Advanced Pencil grain shader (non-blocking).
+  // Warm pencil grain shader (non-blocking).
   unawaited(PencilShader.init());
 
   // On-device vision engine for page-to-LaTeX (models download on demand).

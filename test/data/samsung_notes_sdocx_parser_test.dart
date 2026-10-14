@@ -6,7 +6,10 @@ import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:saber/data/editor/canvas_background_pattern.dart';
+import 'package:saber/data/samsung_notes/sdocx_importer.dart';
 import 'package:saber/data/samsung_notes/sdocx_parser.dart';
+import 'package:saber/data/tools/_tool.dart';
 
 Map<String, Uint8List> _unzip(File file) {
   final bytes = file.readAsBytesSync();
@@ -89,6 +92,24 @@ void main() {
       doc.mediaByBindId[3]!.bytes!.sublist(0, 5),
       [0x25, 0x50, 0x44, 0x46, 0x2D], // %PDF-
     );
+
+    // String table resolves the pen used by every stroke.
+    expect(doc.stringTable[0], contains('InkPen2'));
+    for (final s in first.strokes) {
+      expect(s.penName, 'InkPen2');
+    }
+    // Reference pages carry no stock template: blank.
+    for (final p in doc.pages) {
+      expect(p.templateUri, isNull);
+      expect(p.templateType, isNull);
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+          templateType: p.templateType,
+          templateUri: p.templateUri ?? doc.defaultTemplateUri,
+        ),
+        CanvasBackgroundPattern.none,
+      );
+    }
   });
 
   test('sdocx stroke delta decoding matches stored bbox', () {
@@ -117,5 +138,185 @@ void main() {
         expect((maxY - minY), closeTo(h, h * 0.05 + 2));
       }
     }
+  });
+
+  group('samsung pen detection', () {
+    test('resolvePenName prefers modern id, strips preload prefix', () {
+      const table = {
+        0: 'com.samsung.android.sdk.pen.pen.preload.InkPen2',
+        1: '9;',
+      };
+      expect(
+        SdocxParser.resolvePenName(table, penNameId: 0, legacyPenNameId: 5),
+        'InkPen2',
+      );
+      // Modern -1 falls back to legacy.
+      expect(
+        SdocxParser.resolvePenName(table, penNameId: -1, legacyPenNameId: 0),
+        'InkPen2',
+      );
+      expect(SdocxParser.resolvePenName(table), isNull);
+      expect(SdocxParser.resolvePenName(const {}, penNameId: 0), isNull);
+    });
+
+    test('pen names map to Saber equivalents', () {
+      // Ballpoint family.
+      for (final name in [
+        'InkPen',
+        'InkPen2',
+        'StraightInkPen2',
+        'DefaultPen',
+      ]) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.ballpointPen,
+          reason: name,
+        );
+      }
+      // Fountain.
+      for (final name in ['FountainPen', 'MontblancFountainPen']) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.fountainPen,
+          reason: name,
+        );
+      }
+      // Calligraphy.
+      for (final name in [
+        'MontblancCalligraphyPen',
+        'ChineseBrush',
+        'ObliquePen',
+      ]) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.calligraphyPen,
+          reason: name,
+        );
+      }
+      // Pencil.
+      for (final name in ['Pencil', 'Pencil2', 'Pencil3', 'ColoredPencil']) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.pencil,
+          reason: name,
+        );
+      }
+      // Highlighter / markers.
+      for (final name in [
+        'Marker',
+        'Marker2',
+        'Marker3',
+        'Marker4',
+        'StraightMarker',
+        'StraightHighlighter',
+      ]) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.highlighter,
+          reason: name,
+        );
+      }
+      // Brush ("bush") and anything unknown fall back to ballpoint.
+      for (final name in [
+        'Brush',
+        'BrushPen',
+        'WaterColorBrush',
+        'OilBrush3',
+        'LaserPen',
+        'TapePen',
+        'SomeFuturePen',
+        null,
+      ]) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(name),
+          ToolId.ballpointPen,
+          reason: '$name',
+        );
+      }
+      // Translucent unknown ink still behaves like a highlighter.
+      expect(
+        SamsungNotesImporter.samsungPenToToolId('SomeFuturePen',
+            colorArgb: 0x80123456),
+        ToolId.highlighter,
+      );
+    });
+
+    test('reference strokes map to ballpoint', () {
+      final file = File('test/Over_the_Horizon_261010_011234.sdocx');
+      final doc = SdocxParser.parseArchive(_unzip(file));
+      for (final s in doc.pages.first.strokes) {
+        expect(
+          SamsungNotesImporter.samsungPenToToolId(s.penName,
+              colorArgb: s.colorArgb),
+          ToolId.ballpointPen,
+        );
+      }
+    });
+  });
+
+  group('samsung background patterns', () {
+    test('built-in ids map to Saber equivalents', () {
+      const lined = CanvasBackgroundPattern.lined;
+      const grid = CanvasBackgroundPattern.grid;
+      const dots = CanvasBackgroundPattern.dots;
+      const blank = CanvasBackgroundPattern.none;
+      for (final id in [1, 2, 3]) {
+        expect(
+          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          lined,
+          reason: 'id $id',
+        );
+      }
+      for (final id in [4, 5, 6]) {
+        expect(
+          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          grid,
+          reason: 'id $id',
+        );
+      }
+      for (final id in [7, 8, 9]) {
+        expect(
+          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          dots,
+          reason: 'id $id',
+        );
+      }
+      for (final id in [null, 0, 42]) {
+        expect(
+          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          blank,
+          reason: 'id $id',
+        );
+      }
+    });
+
+    test('template URIs map by keyword', () {
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+            templateUri: ' honor_grid_normal '),
+        CanvasBackgroundPattern.grid,
+      );
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+            templateUri: 'something_lined_narrow'),
+        CanvasBackgroundPattern.lined,
+      );
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+            templateUri: 'DOT_big'),
+        CanvasBackgroundPattern.dots,
+      );
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+            templateUri: 'blank_template'),
+        CanvasBackgroundPattern.none,
+      );
+      // URI keywords win over a conflicting numeric id.
+      expect(
+        SamsungNotesImporter.samsungTemplateToPattern(
+            templateType: 1, templateUri: 'my_grid'),
+        CanvasBackgroundPattern.grid,
+      );
+    });
   });
 }

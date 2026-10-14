@@ -134,6 +134,16 @@ class Stows {
     volatile: !_isOnMainIsolate,
   );
 
+  /// Canvas raster-LOD performance preset: 0 = Performance (fastest settle,
+  /// sharpest motion), 1 = Balanced (current behavior), 2 = Battery saver
+  /// (slower settle, cheapest motion). Read live by [DisplayInkFeel], so
+  /// switching presets applies without restart.
+  final canvasPerfPreset = PlainStow<int>(
+    'canvasPerfPreset',
+    1,
+    volatile: !_isOnMainIsolate,
+  );
+
   final highlighterAutoStraightenLines = PlainStow(
     'highlighterAutoStraightenLines',
     false,
@@ -411,56 +421,32 @@ class Stows {
       ),
       lastAdvancedPenOptions = PlainStow.json(
         'lastAdvancedPenProperties',
-        Pen.defaultOptions.copyWith(
-          size: 5,
-          thinning: 0.45,
-          smoothing: 0.55,
-          streamline: 0.45,
-          simulatePressure: false,
-          pressureSensitivity: 1.0,
-          velocityThinning: 1.0,
-          minSizeRatio: 0.12,
-          maxSizeRatio: 1.0,
-          start: StrokeEndOptions.start(
-            taperEnabled: false,
-            customTaper: 0,
-            cap: true,
-          ),
-          end: StrokeEndOptions.end(
-            taperEnabled: false,
-            customTaper: 0,
-            cap: true,
-          ),
-        ),
+        Pen.defaultOptions.copyWith(size: 2),
         fromJson: _strokeOptionsFromJson,
         volatile: !_isOnMainIsolate,
       ),
-      lastAdvancedPencilOptions = PlainStow.json(
-        'lastAdvancedPencilProperties',
-        Pen.defaultOptions.copyWith(
-          size: 2,
-          thinning: 0.45,
-          smoothing: 0.55,
-          streamline: 0.45,
-          simulatePressure: true,
-          pressureSensitivity: 1.0,
-          velocityThinning: 0.15,
-          minSizeRatio: 0.12,
-          maxSizeRatio: 1.0,
-          start: StrokeEndOptions.start(
-            taperEnabled: true,
-            customTaper: 10,
-            cap: true,
-          ),
-          end: StrokeEndOptions.end(
-            taperEnabled: true,
-            customTaper: 10,
-            cap: true,
-          ),
-        ),
+      lastPencilOptions = PlainStow.json(
+        'lastPencilProperties',
+        Pen.ballpointPenOptions,
         fromJson: _strokeOptionsFromJson,
         volatile: !_isOnMainIsolate,
       );
+  static AdvancedPenOptions _advancedPenBrushOptionsFromJson(Object json) {
+    try {
+      return AdvancedPenOptions.fromJson((json as Map).cast<String, dynamic>());
+    } catch (_) {
+      return AdvancedPenOptions.advancedDefaults();
+    }
+  }
+
+  /// Brush style of the Advanced pen (builder, pressure curve, caps and
+  /// all modeler params). Width lives in [lastAdvancedPenOptions].
+  final lastAdvancedPenBrushOptions = PlainStow.json(
+    'lastAdvancedPenBrushProperties',
+    AdvancedPenOptions.advancedDefaults(),
+    fromJson: _advancedPenBrushOptionsFromJson,
+    volatile: !_isOnMainIsolate,
+  );
   final lastFountainPenColor = PlainStow('lastFountainPenColor', Colors.black.toARGB32(), volatile: !_isOnMainIsolate), lastBallpointPenColor = PlainStow('lastBallpointPenColor', Colors.black.toARGB32(), volatile: !_isOnMainIsolate), lastCalligraphyPenColor = PlainStow('lastCalligraphyPenColor', Colors.black.toARGB32(), volatile: !_isOnMainIsolate), lastHighlighterColor = PlainStow(
     'lastHighlighterColor',
     Colors.yellow.withValues(alpha: 0.4).toARGB32(),
@@ -469,11 +455,7 @@ class Stows {
     'lastShapePenColor',
     const Color(0xFF5B7C99).toARGB32(),
     volatile: !_isOnMainIsolate,
-  ), lastAdvancedPenColor = PlainStow('lastAdvancedPenColor', Colors.black.toARGB32(), volatile: !_isOnMainIsolate), lastAdvancedPencilColor = PlainStow('lastAdvancedPencilColor', 0xFF374151, volatile: !_isOnMainIsolate), lastAdvancedPenMainEasingId = PlainStow('lastAdvancedPenMainEasingId', 'identity', volatile: !_isOnMainIsolate), lastAdvancedPenStartEasingId = PlainStow('lastAdvancedPenStartEasingId', 'easeInOut', volatile: !_isOnMainIsolate), lastAdvancedPenEndEasingId = PlainStow('lastAdvancedPenEndEasingId', 'easeOutCubic', volatile: !_isOnMainIsolate), lastAdvancedPencilMainEasingId = PlainStow('lastAdvancedPencilMainEasingId', 'identity', volatile: !_isOnMainIsolate), lastAdvancedPencilStartEasingId = PlainStow('lastAdvancedPencilStartEasingId', 'easeInOut', volatile: !_isOnMainIsolate), lastAdvancedPencilEndEasingId = PlainStow('lastAdvancedPencilEndEasingId', 'easeOutCubic', volatile: !_isOnMainIsolate), lastAdvancedPenPaint = PlainStow.json('lastAdvancedPenPaint', <String, dynamic>{'m': 0}, volatile: !_isOnMainIsolate), lastAdvancedPencilPaint = PlainStow.json(
-    'lastAdvancedPencilPaint',
-    StrokePaint.pencilNoiseDefault().toJson(embedBytes: false),
-    volatile: !_isOnMainIsolate,
-  );
+  ), lastAdvancedPenColor = PlainStow('lastAdvancedPenColor', Colors.black.toARGB32(), volatile: !_isOnMainIsolate), lastPencilColor = PlainStow('lastPencilColor', 0xFF374151, volatile: !_isOnMainIsolate);
 
   final lastBallpointPenNeon = PlainStow(
         'lastBallpointPenNeon',
@@ -487,11 +469,6 @@ class Stows {
       ),
       lastCalligraphyPenNeon = PlainStow(
         'lastCalligraphyPenNeon',
-        false,
-        volatile: !_isOnMainIsolate,
-      ),
-      lastAdvancedPenNeon = PlainStow(
-        'lastAdvancedPenNeon',
         false,
         volatile: !_isOnMainIsolate,
       );
@@ -548,7 +525,7 @@ class Stows {
       ToolId.calligraphyPen.id: List<int>.from(modernPalette),
       ToolId.fountainPen.id: List<int>.from(modernPalette),
       ToolId.advancedPen.id: List<int>.from(modernPalette),
-      ToolId.advancedPencil.id: List<int>.from(modernPalette),
+      ToolId.pencil.id: List<int>.from(modernPalette),
       ToolId.shapePen.id: List<int>.from(modernPalette),
       ToolId.highlighter.id: List<int>.from(highlighterPalette),
       ToolId.laserPointer.id: List<int>.from(laserPalette),
@@ -563,7 +540,7 @@ class Stows {
     ToolId.fountainPen,
     ToolId.shapePen,
     ToolId.advancedPen,
-    ToolId.advancedPencil,
+    ToolId.pencil,
   ];
 
   static Map<String, List<int>> _penFavoriteColorsFromJson(Object? json) {
@@ -620,13 +597,6 @@ class Stows {
 
   final advancedPenPresets = PlainStow.json(
     'advancedPenPresets',
-    <Map<String, dynamic>>[],
-    fromJson: _advancedPenPresetsFromJson,
-    volatile: !_isOnMainIsolate,
-  );
-
-  final advancedPencilPresets = PlainStow.json(
-    'advancedPencilPresets',
     <Map<String, dynamic>>[],
     fromJson: _advancedPenPresetsFromJson,
     volatile: !_isOnMainIsolate,

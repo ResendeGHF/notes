@@ -253,6 +253,9 @@ abstract class SBNBinaryKeys {
 
   /// Stable note identity independent of display path / filename.
   static const int noteId = 115;
+
+  /// Per-note toggle for PDF link boxes overlay (default true when absent).
+  static const int showPdfLinkBoxes = 116;
 }
 
 abstract class PageBinaryKeys {
@@ -353,6 +356,10 @@ abstract class StrokeBinaryKeys {
 
   /// JSON string of [StrokePaint] for textured/gradient fills.
   static const int strokePaint = 121;
+
+  /// JSON string of Advanced pen brush options (pressure curve, builder,
+  /// modeler params).
+  static const int advancedBrushOptions = 125;
 
   /// Removed Google Ink snapshot (experimental pen). Keys reserved: old
   /// files still carry them and readers drain-and-discard the values.

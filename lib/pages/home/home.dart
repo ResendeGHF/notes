@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:saber/components/navbar/responsive_navbar.dart';
 import 'package:saber/components/theming/dynamic_material_app.dart';
 import 'package:saber/data/home_data_cache.dart';
+import 'package:pdfrx/pdfrx.dart' as pdfrx;
 import 'package:saber/pages/home/browse.dart';
 import 'package:saber/pages/home/graph.dart';
 import 'package:saber/pages/home/recent_notes.dart';
@@ -33,6 +34,11 @@ class HomePage extends StatefulWidget {
   ];
 }
 
+/// One-shot pdfrx prewarm per process (isolate spawn + PDFium lib load,
+/// ~200-500ms). Runs idle-seconds after home paints so the first PDF open
+/// never pays cold-start costs on its critical path. Best-effort, silent.
+bool _pdfEnginePrewarmed = false;
+
 class _HomePageState extends State<HomePage> {
   @override
   void initState() {
@@ -40,6 +46,20 @@ class _HomePageState extends State<HomePage> {
     DynamicMaterialApp.addFullscreenListener(_setState);
     HomeDataCache.instance.preload();
     _showDialogs();
+    _prewarmPdfEngine();
+  }
+
+  void _prewarmPdfEngine() {
+    if (_pdfEnginePrewarmed) return;
+    _pdfEnginePrewarmed = true;
+    Future<void>.delayed(const Duration(seconds: 3), () async {
+      try {
+        final doc = await pdfrx.PdfDocument.createNew(
+          sourceName: 'startup_warmup',
+        );
+        await doc.dispose();
+      } catch (_) {}
+    });
   }
 
   void _showDialogs() async {

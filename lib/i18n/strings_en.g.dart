@@ -2107,8 +2107,8 @@ class Translations$editor$pens$en {
 	/// en: 'Advanced pen'
 	String get advancedPen => 'Advanced pen';
 
-	/// en: 'Advanced pencil'
-	String get advancedPencil => 'Advanced pencil';
+	/// en: 'Pencil'
+	String get pencil => 'Pencil';
 
 	/// en: 'Highlighter'
 	String get highlighter => 'Highlighter';

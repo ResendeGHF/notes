@@ -13,6 +13,7 @@ import 'package:mutex/mutex.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
+import 'package:saber/services/pdf_open_helper.dart';
 import 'package:saber/services/vault_adapter.dart';
 
 const int _largeAssetThresholdBytes = 50 * 1024 * 1024;
@@ -340,12 +341,126 @@ class AssetCacheAll {
   /// PDFs. Opening with progressive mode and finishing metadata in the background
   /// lets the editor show the first page quickly; [PdfPageView] listens for page
   /// updates when each page's real size is known.
-  void _schedulePdfBackgroundPageLoad(PdfDocument doc) {
-    unawaited(
-      doc.loadPagesProgressively().catchError((Object e, StackTrace st) {
-        log.warning('PDF background page metadata load failed: $e');
-      }),
-    );
+  ///
+  /// pdfrx funnels open, page parsing, renders and text extraction through a
+  /// SINGLE background isolate queue. The endless page-metadata jobs must NOT
+  /// start on open: they would queue ahead of the visible page's render and
+  /// turn instant open into a 1-2 s wait. Instead each opened document waits
+  /// for [kickProgressiveLoad] (first paint of a visible page) or a 3 s
+  /// fallback (background tabs, headless renders) before streaming.
+  final Set<int> _progressiveLoadStarted = {};
+  final Set<int> _progressiveLoadPending = {};
+
+  /// Kicks that arrived before open completed (frame-1 native paint).
+  /// Honored at open completion instead of waiting for the 3 s fallback.
+  final Set<int> _progressiveKickRequested = {};
+
+  void _registerDocForDeferredProgressiveLoad(int assetId) {
+    if (_disposed || _progressiveLoadStarted.contains(assetId)) return;
+    _progressiveLoadPending.add(assetId);
+    Future.delayed(const Duration(seconds: 3), () {
+      kickProgressiveLoad(assetId);
+    });
+  }
+
+  /// Starts background page-metadata streaming for [assetId]'s document.
+  /// Called after first paint so the visible render wins the worker queue.
+  /// Safe to call any number of times and before open completes.
+  void kickProgressiveLoad(int assetId) {
+    if (_progressiveLoadStarted.contains(assetId)) return;
+    if (_disposed || assetId < 0 || assetId >= _items.length) {
+      _progressiveLoadPending.remove(assetId);
+      return;
+    }
+    final item = _items[assetId];
+    final doc = item._pdfDocument;
+    // Open still in flight (frame-1 native paint kicked before pdfrx
+    // arrived): remember the kick so open completion starts streaming at
+    // the earliest possible moment instead of losing it.
+    if (doc == null) {
+      _progressiveKickRequested.add(assetId);
+      return;
+    }
+    _progressiveLoadPending.remove(assetId);
+    _progressiveKickRequested.remove(assetId);
+    _progressiveLoadStarted.add(assetId);
+    PdfOpenHelper.startBackgroundPageLoad(doc);
+  }
+
+  void _forgetProgressiveLoad(int assetId) {
+    _progressiveLoadPending.remove(assetId);
+    _progressiveLoadStarted.remove(assetId);
+    _progressiveKickRequested.remove(assetId);
+    _visibleLoads.remove(assetId);
+  }
+
+  final Map<int, Future<void>> _visibleLoads = {};
+
+  /// Phase-1 parse: loads ONLY the visible window (page [pageIndex] ±
+  /// [radius]) from the visible page outward, then STOPS. Critical because
+  /// [PdfPage.ensureLoaded] is passive (it waits for someone else to parse):
+  /// without this, page N paints only after full progressive streaming
+  /// parses pages 0..N in order (~seconds deep in a big doc). Coalesced per
+  /// asset; the post-paint kick streams the rest. Safe any number of times.
+  Future<void> ensureVisiblePagesLoaded(
+    int assetId,
+    int pageIndex, {
+    int radius = 2,
+  }) {
+    if (_disposed || assetId < 0 || assetId >= _items.length) {
+      return Future.value();
+    }
+    final existing = _visibleLoads[assetId];
+    if (existing != null) return existing;
+    final fut = _ensureVisiblePagesLoadedInner(assetId, pageIndex, radius);
+    _visibleLoads[assetId] = fut;
+    fut.whenComplete(() {
+      if (identical(_visibleLoads[assetId], fut)) {
+        _visibleLoads.remove(assetId);
+      }
+    });
+    return fut;
+  }
+
+  Future<void> _ensureVisiblePagesLoadedInner(
+    int assetId,
+    int pageIndex,
+    int radius,
+  ) async {
+    try {
+      if (_disposed || assetId < 0 || assetId >= _items.length) return;
+      final item = _items[assetId];
+      final doc = item._pdfDocument;
+      if (doc == null) return;
+      final n = doc.pages.length;
+      if (n == 0) return;
+      final lo = (pageIndex - radius).clamp(0, n - 1);
+      final hi = (pageIndex + radius).clamp(0, n - 1);
+      bool windowLoaded() {
+        try {
+          final pages = doc.pages;
+          for (var i = lo; i <= hi; i++) {
+            if (!pages[i].isLoaded) return false;
+          }
+          return true;
+        } catch (_) {
+          return true;
+        }
+      }
+
+      if (windowLoaded()) return;
+      await doc.loadPagesProgressively(
+        startPageNumber: pageIndex + 1,
+        onPageLoadProgress: (loaded, total, data) {
+          if (_disposed) return false;
+          // Stop as soon as the visible window is parsed; the kick streams
+          // the remainder after first paint.
+          return !windowLoaded();
+        },
+      );
+    } catch (_) {
+      // Best effort: the deferred full streaming covers any gap.
+    }
   }
 
   bool allowRemovingAssets = true;
@@ -420,6 +535,18 @@ class AssetCacheAll {
           item._pdfDocument = doc;
           item.pdfDocumentNotifier.value = doc;
           _openingDocs.remove(assetId);
+          // Deferred: page-metadata streaming starts after first paint
+          // (kickProgressiveLoad) or the 3 s fallback, so the visible
+          // render wins the single pdfrx worker queue. A kick that arrived
+          // before open completed (frame-1 native paint) starts NOW — the
+          // earliest moment anything can stream.
+          if (_progressiveKickRequested.remove(assetId)) {
+            _progressiveLoadPending.remove(assetId);
+            _progressiveLoadStarted.add(assetId);
+            PdfOpenHelper.startBackgroundPageLoad(doc);
+          } else {
+            _registerDocForDeferredProgressiveLoad(assetId);
+          }
         }).catchError((e, st) {
           _pdfOpenFailedAt[assetId] = DateTime.now();
           _pdfProgressMap.remove(assetId);
@@ -447,6 +574,27 @@ class AssetCacheAll {
   ValueNotifier<double>? getPdfProgressNotifier(int assetId) {
     if (assetId < 0 || assetId >= _items.length) return null;
     return _pdfProgressMap[assetId];
+  }
+
+  /// Synchronously resolvable on-disk path for a PDF asset, for frame-1
+  /// native rendering without waiting on pdfrx. Prefers the vault-managed
+  /// decrypted temp (Temp mode), then any live File handle, then the stored
+  /// path. May point at a file that does not exist yet (decrypt in flight);
+  /// callers must existence-check before use.
+  String? getResolvedPdfPath(int assetId) {
+    if (assetId < 0 || assetId >= _items.length) return null;
+    final temp = _pdfTempPaths[assetId];
+    if (temp != null && temp.isNotEmpty) return temp;
+    final item = _items[assetId];
+    try {
+      if (item.originalFile != null && item.originalFile!.existsSync()) {
+        return item.originalFile!.path;
+      }
+      if (item.value is File && (item.value as File).existsSync()) {
+        return (item.value as File).path;
+      }
+    } catch (_) {}
+    return item.filePath;
   }
 
   static String _pdfLabelFromPath(String path) {
@@ -491,18 +639,45 @@ class AssetCacheAll {
   }
 
   Future<PdfDocument> _openPdfDocument(int assetId, CacheItem item) async {
+    log.info('PDFTIMING assetCache._openPdfDocument start id=$assetId');
     try {
       final path = item.filePath;
 
       if (item.value is Uint8List) {
         final bytes = item.value as Uint8List;
 
+        // mmap: large RAM-only payloads are spilled to a temp file so PDFium
+        // streams from SSD instead of holding a Dart-side copy for the
+        // document lifetime. Small payloads open directly (openData): forcing
+        // a disk write for kilobytes would be slower than the RAM path.
+        // Vault-unlocked plaintext must never touch disk, so the RAM path
+        // (openData) always stays for that case.
+        if (!VaultAdapter.isUnlocked &&
+            bytes.length > PdfOpenHelper.smallBytesDirectOpenThreshold) {
+          final tempPath = await PdfOpenHelper.spillBytesToTempFile(
+            bytes,
+            sourceName: 'memory_asset_$assetId',
+          );
+          if (tempPath != null) {
+            _pdfTempPaths[assetId] = tempPath;
+            return await PdfOpenHelper.openFileProgressive(
+              tempPath,
+              startBackgroundPageLoad: false,
+            );
+          }
+        }
+
+        // MemDocument (single bulk copy, zero per-read FFI callbacks
+        // afterwards): with RAM-only bytes the FileAccess alternative pays a
+        // native->Dart round trip per PDFium block read (seconds on MBs).
         final doc = await PdfDocument.openData(
           bytes,
           sourceName: 'memory_asset_$assetId',
           useProgressiveLoading: true,
+          maxSizeToCacheOnMemory: bytes.length,
         );
-        _schedulePdfBackgroundPageLoad(doc);
+        // Deferred: background page streaming starts after first paint
+        // (kickProgressiveLoad) so the visible render wins the worker queue.
         return doc;
       }
 
@@ -556,11 +731,11 @@ class AssetCacheAll {
               throw StateError('Failed to decrypt vault PDF: $path');
             }
             _pdfTempPaths[assetId] = tempPath;
+            // Deferred: background page streaming starts after first paint.
             final mmapDoc = await PdfDocument.openFile(
               tempPath,
               useProgressiveLoading: true,
             );
-            _schedulePdfBackgroundPageLoad(mmapDoc);
             return mmapDoc;
           }
 
@@ -573,24 +748,40 @@ class AssetCacheAll {
             );
           }
 
-          final bytes = await FileManager.readFile(
+          // Consume the load-time prefetch when available: one decrypt
+          // total for open (the prefetch future is shared, not re-read).
+          final prefetched = await VaultAdapter.instance.takeOpenPrefetch(
             path,
-            onProgress: reportVaultProgress,
           );
+          final bytes =
+              prefetched ??
+              await FileManager.readFile(path, onProgress: reportVaultProgress);
           if (bytes == null || bytes.isEmpty) {
             throw StateError('Failed to read vault PDF: $path');
           }
+          // MemDocument: single bulk copy then pure-native parsing with
+          // zero per-read FFI callbacks. The FileAccess alternative bounces
+          // every PDFium block read through a Dart isolate hop + byte loop
+          // (seconds on multi-MB vault PDFs). Costs one extra native copy,
+          // freed on dispose; vault RAM-only already pins the Dart bytes.
+          Logger('PDFTIMING').info(
+            'PDFTIMING assetCache.openData start id=$assetId bytes=${bytes.length}',
+          );
           final ramDoc = await PdfDocument.openData(
             bytes,
             sourceName: path,
             useProgressiveLoading: true,
+            maxSizeToCacheOnMemory: bytes.length,
+          );
+          Logger('PDFTIMING').info(
+            'PDFTIMING assetCache.openData done id=$assetId',
           );
           // Avoid holding a second full copy in the vault decrypt LRU while
           // pdfrx already owns [bytes] for this open.
           if (bytes.length > 12 * 1024 * 1024) {
             VaultAdapter.instance.invalidateCachedReadForPath(path);
           }
-          _schedulePdfBackgroundPageLoad(ramDoc);
+          // Deferred: background page streaming starts after first paint.
           return ramDoc;
         } finally {
           clearPdfProgress();
@@ -607,12 +798,16 @@ class AssetCacheAll {
       }
 
       if (diskFile.existsSync()) {
-        final diskDoc = await PdfDocument.openFile(
+        // mmap path: the OS streams pages from SSD on demand; no Dart-side
+        // copy, no initial RAM load. Background page streaming stays
+        // deferred until first paint (kickProgressiveLoad).
+        log.info('PDFTIMING assetCache.openFile start id=$assetId');
+        final d = await PdfOpenHelper.openFileProgressive(
           diskFile.path,
-          useProgressiveLoading: true,
+          startBackgroundPageLoad: false,
         );
-        _schedulePdfBackgroundPageLoad(diskDoc);
-        return diskDoc;
+        log.info('PDFTIMING assetCache.openFile done id=$assetId');
+        return d;
       }
 
       throw StateError('PDF file does not exist: $path');
@@ -627,6 +822,7 @@ class AssetCacheAll {
     if (item.assetType != AssetType.pdf) return;
 
     _cancelledPdfAssetIds.add(assetId);
+    _forgetProgressiveLoad(assetId);
     _pdfProgressMap.remove(assetId);
     _pdfLoadingLabels.remove(assetId);
     _updatePdfLoadingState();
@@ -1357,7 +1553,13 @@ class AssetCacheAll {
 
         final idOnSave = item.assetIdOnSave;
         final newPath = '$relativeNotePath.$idOnSave';
-        final pathUnchanged = item.filePath == newPath;
+        // Compare normalized: item.filePath may be absolute (freshly opened
+        // note) while newPath is relative. A naive != rewrites (decrypt +
+        // re-encrypt + mtime churn on) every untouched asset on every save.
+        final currentRel = item.filePath != null
+            ? FileManager.toRelativePath(item.filePath!)
+            : null;
+        final pathUnchanged = currentRel == newPath;
 
         if (pathUnchanged && !item.isDirtyForSave) continue;
 
@@ -1481,6 +1683,9 @@ class AssetCacheAll {
     _items.clear();
     _cleanupCacheAll();
     _openingDocs.clear();
+    _progressiveLoadPending.clear();
+    _progressiveLoadStarted.clear();
+    _progressiveKickRequested.clear();
     _previewHashIndex.clear();
     _filePathIndex.clear();
   }

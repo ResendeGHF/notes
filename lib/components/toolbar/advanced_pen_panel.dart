@@ -9,8 +9,12 @@ import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/i18n/strings.g.dart';
 
-/// Tunable Advanced pen geometry + named presets.
-/// Advanced Pen Presets Section
+/// Tunable Advanced pen brush + named presets.
+///
+/// The Advanced pen smooths input with a spring-mass model (a pure-Dart port
+/// of Rnote's `PenPathModeledBuilder` / ink-stroke-modeler) and draws a
+/// variable-width ribbon. Width comes from the shared pen size slider;
+/// everything else is tuned here.
 class AdvancedPenPresets extends StatefulWidget {
   const AdvancedPenPresets({
     super.key,
@@ -40,55 +44,42 @@ class _AdvancedPenPresetsState extends State<AdvancedPenPresets> {
     super.dispose();
   }
 
-  StrokeOptions get _opts => widget.pen.options;
-
   void _persist() {
-    stows.lastAdvancedPenOptions.value = _opts.copyWith();
+    stows.lastAdvancedPenOptions.value = widget.pen.options.copyWith();
+    stows.lastAdvancedPenBrushOptions.value =
+        widget.pen.brushOptions.copyWith();
+    stows.lastAdvancedPenColor.value = widget.pen.color.toARGB32();
     widget.onChanged();
     setState(() {});
   }
 
   Map<String, dynamic> _presetPayload(String name) => {
-    'name': name,
-    'options': _opts.toJson(),
-    'colorArgb': widget.pen.color.toARGB32(),
-    'easingId': stows.lastAdvancedPenMainEasingId.value,
-    'startEasingId': stows.lastAdvancedPenStartEasingId.value,
-    'endEasingId': stows.lastAdvancedPenEndEasingId.value,
-  };
+        'name': name,
+        'options': widget.pen.options.toJson(),
+        'colorArgb': widget.pen.color.toARGB32(),
+        'brush': widget.pen.brushOptions.toJson(),
+      };
 
   void _applyPreset(Map<String, dynamic> preset) {
     final raw = preset['options'];
-    if (raw is! Map) return;
-    final opts = StrokeOptions.fromJson(
-      Map<String, dynamic>.from(raw),
-      easing: StrokeEasingCatalog.byId(preset['easingId'] as String?),
-      startEasing: StrokeEasingCatalog.byId(preset['startEasingId'] as String?),
-      endEasing: StrokeEasingCatalog.byId(preset['endEasingId'] as String?),
-    );
-    widget.pen.options
-      ..size = opts.size
-      ..thinning = opts.thinning
-      ..smoothing = opts.smoothing
-      ..streamline = opts.streamline
-      ..simulatePressure = opts.simulatePressure
-      ..pressureSensitivity = opts.pressureSensitivity
-      ..velocityThinning = opts.velocityThinning
-      ..minSizeRatio = opts.minSizeRatio
-      ..maxSizeRatio = opts.maxSizeRatio
-      ..easing = opts.easing
-      ..start = opts.start
-      ..end = opts.end;
-    stows.lastAdvancedPenMainEasingId.value =
-        (preset['easingId'] as String?) ?? StrokeEasingCatalog.identity;
-    stows.lastAdvancedPenStartEasingId.value =
-        (preset['startEasingId'] as String?) ?? StrokeEasingCatalog.easeInOut;
-    stows.lastAdvancedPenEndEasingId.value =
-        (preset['endEasingId'] as String?) ?? StrokeEasingCatalog.easeOutCubic;
+    if (raw is Map) {
+      final size = (Map<String, dynamic>.from(raw)['s'] as num?)?.toDouble();
+      if (size != null) widget.pen.options.size = size;
+    }
+    // Old presets (easing ids) carry no brush style: keep the current one.
+    final brushRaw = preset['brush'];
+    if (brushRaw is Map) {
+      try {
+        widget.pen.brushOptions = AdvancedPenOptions.fromJson(
+          Map<String, dynamic>.from(brushRaw),
+        );
+      } catch (_) {
+        // Keep the current brush style when the payload is invalid.
+      }
+    }
     final colorArgb = preset['colorArgb'];
     if (colorArgb is int) {
       widget.pen.color = Color(colorArgb);
-      stows.lastAdvancedPenColor.value = colorArgb;
     }
     _persist();
   }
@@ -130,29 +121,31 @@ class _AdvancedPenPresetsState extends State<AdvancedPenPresets> {
     final presets = stows.advancedPenPresets.value;
 
     Widget sectionTitle(String title) => Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 8),
-      child: Text(
-        title,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: colorScheme.primary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
+          padding: const EdgeInsets.only(top: 8, bottom: 8),
+          child: Text(
+            title,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        sectionTitle("Presets"),
+        sectionTitle('Presets'),
         Row(
           children: [
             Expanded(
               child: TextField(
                 controller: _presetNameController,
                 decoration: InputDecoration(
-                  isDense: true, 
-                  hintText: t.editor.penOptions.presetNameHint, 
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  isDense: true,
+                  hintText: t.editor.penOptions.presetNameHint,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
               ),
             ),
@@ -177,13 +170,16 @@ class _AdvancedPenPresetsState extends State<AdvancedPenPresets> {
               children: [
                 IconButton(
                   tooltip: t.toolbar.updatePreset,
-                  icon: const Icon(Icons.edit_outlined, size: 20), 
-                  onPressed: () { _presetNameController.text = name; _savePreset(replaceIndex: i); }
+                  icon: const Icon(Icons.edit_outlined, size: 20),
+                  onPressed: () {
+                    _presetNameController.text = name;
+                    _savePreset(replaceIndex: i);
+                  },
                 ),
                 IconButton(
                   tooltip: t.toolbar.deletePreset,
-                  icon: const Icon(Icons.delete_outline, size: 20), 
-                  onPressed: () => _deletePreset(i)
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  onPressed: () => _deletePreset(i),
                 ),
               ],
             ),
@@ -194,7 +190,7 @@ class _AdvancedPenPresetsState extends State<AdvancedPenPresets> {
   }
 }
 
-/// Advanced Pen Settings Section
+/// Advanced pen settings: brush style + all modeler parameters.
 class AdvancedPenSettings extends StatefulWidget {
   const AdvancedPenSettings({
     super.key,
@@ -210,29 +206,26 @@ class AdvancedPenSettings extends StatefulWidget {
 }
 
 class _AdvancedPenSettingsState extends State<AdvancedPenSettings> {
-  StrokeOptions get _opts => widget.pen.options;
+  AdvancedPenOptions get _opts => widget.pen.brushOptions;
+  AdvancedPenModelerParams get _modeler => _opts.modeler;
 
   void _persist() {
-    stows.lastAdvancedPenOptions.value = _opts.copyWith();
+    stows.lastAdvancedPenOptions.value = widget.pen.options.copyWith();
+    stows.lastAdvancedPenBrushOptions.value = _opts.copyWith();
+    stows.lastAdvancedPenColor.value = widget.pen.color.toARGB32();
     widget.onChanged();
     setState(() {});
   }
 
-  void _setMainEasing(String id) {
-    stows.lastAdvancedPenMainEasingId.value = id;
-    widget.pen.options.easing = StrokeEasingCatalog.byId(id);
-    _persist();
-  }
-
-  void _setStartEasing(String id) {
-    stows.lastAdvancedPenStartEasingId.value = id;
-    widget.pen.options.start.easing = StrokeEasingCatalog.byId(id);
-    _persist();
-  }
-
-  void _setEndEasing(String id) {
-    stows.lastAdvancedPenEndEasingId.value = id;
-    widget.pen.options.end.easing = StrokeEasingCatalog.byId(id);
+  void _setModeler(AdvancedPenModelerParams next) {
+    final err = next.validate();
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(err)),
+      );
+      return;
+    }
+    _opts.modeler = next;
     _persist();
   }
 
@@ -242,49 +235,149 @@ class _AdvancedPenSettingsState extends State<AdvancedPenSettings> {
     final colorScheme = theme.colorScheme;
 
     Widget sectionTitle(String title) => Padding(
-      padding: const EdgeInsets.only(top: 16, bottom: 8),
-      child: Text(
-        title,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: colorScheme.primary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
+          padding: const EdgeInsets.only(top: 16, bottom: 8),
+          child: Text(
+            title,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text("Advanced Pen Settings", style: theme.textTheme.titleMedium),
-        
-        sectionTitle("Stroke Dynamics"),
-        _slider(label: "Thinning", value: _opts.thinning, min: -0.5, max: 1.0, onChanged: (v) { _opts.thinning = v; _persist(); }),
-        _slider(label: "Smoothing", value: _opts.smoothing, onChanged: (v) { _opts.smoothing = v; _persist(); }),
-        _slider(label: "Streamline", value: _opts.streamline, onChanged: (v) { _opts.streamline = v; _persist(); }),
-        
-        sectionTitle("Pressure"),
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          title: Text(t.toolbar.simulatePressure, style: theme.textTheme.bodyMedium),
-          value: _opts.simulatePressure,
-          onChanged: (v) { _opts.simulatePressure = v; _persist(); },
+        Text('Advanced Pen Settings', style: theme.textTheme.titleMedium),
+        Text(
+          'Spring-mass smoothing + variable-width ribbon. '
+          'Width comes from the pen size slider.',
+          style: theme.textTheme.bodySmall,
         ),
-        _slider(label: "Sensitivity", value: _opts.pressureSensitivity, min: 0.0, max: 2.0, onChanged: (v) { _opts.pressureSensitivity = v; _persist(); }),
-        _slider(label: "Velocity Thinning", value: _opts.velocityThinning, onChanged: (v) { _opts.velocityThinning = v; _persist(); }),
-        _slider(label: "Min Size Ratio", value: _opts.minSizeRatio, min: 0.02, max: 1.0, onChanged: (v) { _opts.minSizeRatio = v; _persist(); }),
-        _slider(label: "Max Size Ratio", value: _opts.maxSizeRatio, min: 0.2, max: 2.0, onChanged: (v) { _opts.maxSizeRatio = v; _persist(); }),
-
-        sectionTitle("Tapering & Caps"),
-        _slider(label: "Start Taper", value: (_opts.start.customTaper ?? 0).clamp(0, 40), min: 0, max: 40, onChanged: (v) { _opts.start.customTaper = v <= 0 ? null : v; _opts.start.taperEnabled = v > 0; _persist(); }),
-        SwitchListTile.adaptive(contentPadding: EdgeInsets.zero, dense: true, title: Text("Start Cap", style: theme.textTheme.bodyMedium), value: _opts.start.cap, onChanged: (v) { _opts.start.cap = v; _persist(); }),
-        _slider(label: "End Taper", value: (_opts.end.customTaper ?? 0).clamp(0, 40), min: 0, max: 40, onChanged: (v) { _opts.end.customTaper = v <= 0 ? null : v; _opts.end.taperEnabled = v > 0; _persist(); }),
-        SwitchListTile.adaptive(contentPadding: EdgeInsets.zero, dense: true, title: Text("End Cap", style: theme.textTheme.bodyMedium), value: _opts.end.cap, onChanged: (v) { _opts.end.cap = v; _persist(); }),
-
-        sectionTitle("Easing"),
-        _easingDropdown(label: "Main Easing", value: stows.lastAdvancedPenMainEasingId.value, onChanged: _setMainEasing),
-        _easingDropdown(label: "Start Easing", value: stows.lastAdvancedPenStartEasingId.value, onChanged: _setStartEasing),
-        _easingDropdown(label: "End Easing", value: stows.lastAdvancedPenEndEasingId.value, onChanged: _setEndEasing),
+        sectionTitle('Brush Style'),
+        _OverlayDropdown<AdvancedPenBuilderType>(
+          label: 'Builder',
+          value: _opts.builderType,
+          values: AdvancedPenBuilderType.values,
+          labelOf: (v) => v.id,
+          onChanged: (v) {
+            _opts.builderType = v;
+            _persist();
+          },
+        ),
+        _OverlayDropdown<AdvancedPenPressureCurve>(
+          label: 'Pressure curve',
+          value: _opts.pressureCurve,
+          values: AdvancedPenPressureCurve.values,
+          labelOf: (v) => v.id,
+          onChanged: (v) {
+            _opts.pressureCurve = v;
+            _persist();
+          },
+        ),
+        _OverlayDropdown<AdvancedPenLineCap>(
+          label: 'Line cap',
+          value: _opts.lineCap,
+          values: AdvancedPenLineCap.values,
+          labelOf: (v) => v.id,
+          onChanged: (v) {
+            _opts.lineCap = v;
+            _persist();
+          },
+        ),
+        sectionTitle('Wobble Smoother'),
+        _slider(
+          label: 'Timeout',
+          value: _modeler.wobbleTimeout,
+          min: 0.005,
+          max: 0.2,
+          onChanged: (v) => _setModeler(_modeler.copyWith(wobbleTimeout: v)),
+        ),
+        _slider(
+          label: 'Speed floor',
+          value: _modeler.wobbleSpeedFloor,
+          min: 0.1,
+          max: 8,
+          onChanged: (v) =>
+              _setModeler(_modeler.copyWith(wobbleSpeedFloor: v)),
+        ),
+        _slider(
+          label: 'Speed ceiling',
+          value: _modeler.wobbleSpeedCeiling,
+          min: 0.2,
+          max: 10,
+          onChanged: (v) =>
+              _setModeler(_modeler.copyWith(wobbleSpeedCeiling: v)),
+        ),
+        sectionTitle('Tip Physics (spring-mass)'),
+        _slider(
+          label: 'Spring-mass',
+          value: _modeler.springMassConstant,
+          min: 0.00005,
+          max: 0.005,
+          onChanged: (v) =>
+              _setModeler(_modeler.copyWith(springMassConstant: v)),
+        ),
+        _slider(
+          label: 'Drag',
+          value: _modeler.dragConstant,
+          min: 1,
+          max: 200,
+          onChanged: (v) => _setModeler(_modeler.copyWith(dragConstant: v)),
+        ),
+        sectionTitle('Sampling'),
+        _slider(
+          label: 'Min output rate',
+          value: _modeler.minOutputRate,
+          min: 30,
+          max: 360,
+          onChanged: (v) => _setModeler(_modeler.copyWith(minOutputRate: v)),
+        ),
+        _slider(
+          label: 'End-of-stroke stop dist',
+          value: _modeler.endOfStrokeStoppingDistance,
+          min: 0.0005,
+          max: 0.1,
+          onChanged: (v) => _setModeler(
+            _modeler.copyWith(endOfStrokeStoppingDistance: v),
+          ),
+        ),
+        _slider(
+          label: 'End-of-stroke iterations',
+          value: _modeler.endOfStrokeMaxIterations.toDouble(),
+          min: 1,
+          max: 100,
+          onChanged: (v) => _setModeler(
+            _modeler.copyWith(endOfStrokeMaxIterations: v.round()),
+          ),
+        ),
+        _slider(
+          label: 'Max outputs / call',
+          value: _modeler.maxOutputsPerCall.toDouble(),
+          min: 5,
+          max: 1000,
+          onChanged: (v) => _setModeler(
+            _modeler.copyWith(maxOutputsPerCall: v.round()),
+          ),
+        ),
+        _slider(
+          label: 'Stylus window',
+          value: _modeler.maxInputSamples.toDouble(),
+          min: 1,
+          max: 60,
+          onChanged: (v) => _setModeler(
+            _modeler.copyWith(maxInputSamples: v.round()),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: () {
+            widget.pen.brushOptions = Pen.advancedBrushDefaults;
+            _persist();
+          },
+          icon: const Icon(Icons.restart_alt_outlined, size: 18),
+          label: const Text('Reset defaults'),
+        ),
       ],
     );
   }
@@ -303,54 +396,56 @@ class _AdvancedPenSettingsState extends State<AdvancedPenSettings> {
         children: [
           Row(
             children: [
-              Expanded(child: Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))),
-              Text(value.toStringAsFixed(2), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              Text(
+                value.toStringAsFixed(value < 0.01 ? 5 : 2),
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
             ],
           ),
-          Slider(value: value.clamp(min, max), min: min, max: max, onChanged: onChanged),
+          Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            onChanged: onChanged,
+          ),
         ],
       ),
     );
   }
-
-  Widget _easingDropdown({
-    required String label,
-    required String value,
-    required ValueChanged<String> onChanged,
-  }) {
-    final safe = StrokeEasingCatalog.ids.contains(value)
-        ? value
-        : StrokeEasingCatalog.identity;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: _OverlayEasingDropdown(
-        label: label,
-        value: safe,
-        onChanged: onChanged,
-      ),
-    );
-  }
 }
 
-/// Easing picker that inserts its menu [OverlayEntry] above the parent pen
+/// Dropdown that inserts its menu [OverlayEntry] above the parent pen
 /// popover. [DropdownButton] menus use the navigator overlay and end up
 /// behind the pen card, so taps dismiss the modal instead of selecting.
-class _OverlayEasingDropdown extends StatefulWidget {
-  const _OverlayEasingDropdown({
+class _OverlayDropdown<T> extends StatefulWidget {
+  const _OverlayDropdown({
     required this.label,
     required this.value,
+    required this.values,
+    required this.labelOf,
     required this.onChanged,
   });
 
   final String label;
-  final String value;
-  final ValueChanged<String> onChanged;
+  final T value;
+  final List<T> values;
+  final String Function(T) labelOf;
+  final ValueChanged<T> onChanged;
 
   @override
-  State<_OverlayEasingDropdown> createState() => _OverlayEasingDropdownState();
+  State<_OverlayDropdown<T>> createState() => _OverlayDropdownState<T>();
 }
 
-class _OverlayEasingDropdownState extends State<_OverlayEasingDropdown> {
+class _OverlayDropdownState<T> extends State<_OverlayDropdown<T>> {
   final _layerLink = LayerLink();
   final _fieldKey = GlobalKey();
   OverlayEntry? _menuEntry;
@@ -405,12 +500,12 @@ class _OverlayEasingDropdownState extends State<_OverlayEasingDropdown> {
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     shrinkWrap: true,
                     children: [
-                      for (final id in StrokeEasingCatalog.ids)
+                      for (final v in widget.values)
                         ListTile(
                           dense: true,
-                          selected: id == widget.value,
-                          title: Text(StrokeEasingCatalog.label(id)),
-                          trailing: id == widget.value
+                          selected: v == widget.value,
+                          title: Text(widget.labelOf(v)),
+                          trailing: v == widget.value
                               ? Icon(
                                   Icons.check,
                                   size: 18,
@@ -418,7 +513,7 @@ class _OverlayEasingDropdownState extends State<_OverlayEasingDropdown> {
                                 )
                               : null,
                           onTap: () {
-                            widget.onChanged(id);
+                            widget.onChanged(v);
                             _close();
                           },
                         ),
@@ -443,7 +538,7 @@ class _OverlayEasingDropdownState extends State<_OverlayEasingDropdown> {
   }
 
   @override
-  void didUpdateWidget(covariant _OverlayEasingDropdown oldWidget) {
+  void didUpdateWidget(covariant _OverlayDropdown<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (_isOpen) {
       _menuEntry?.markNeedsBuild();
@@ -460,32 +555,35 @@ class _OverlayEasingDropdownState extends State<_OverlayEasingDropdown> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return CompositedTransformTarget(
-      link: _layerLink,
-      child: Material(
-        key: _fieldKey,
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: _toggle,
-          borderRadius: BorderRadius.circular(8),
-          child: InputDecorator(
-            isFocused: _isOpen,
-            decoration: InputDecoration(
-              labelText: widget.label,
-              isDense: true,
-              border: const OutlineInputBorder(),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: CompositedTransformTarget(
+        link: _layerLink,
+        child: Material(
+          key: _fieldKey,
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: _toggle,
+            borderRadius: BorderRadius.circular(8),
+            child: InputDecorator(
+              isFocused: _isOpen,
+              decoration: InputDecoration(
+                labelText: widget.label,
+                isDense: true,
+                border: const OutlineInputBorder(),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                suffixIcon: Icon(
+                  _isOpen ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+                ),
               ),
-              suffixIcon: Icon(
-                _isOpen ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+              child: Text(
+                widget.labelOf(widget.value),
+                style: theme.textTheme.bodyMedium,
+                overflow: TextOverflow.ellipsis,
               ),
-            ),
-            child: Text(
-              StrokeEasingCatalog.label(widget.value),
-              style: theme.textTheme.bodyMedium,
-              overflow: TextOverflow.ellipsis,
             ),
           ),
         ),

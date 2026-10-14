@@ -63,7 +63,7 @@ class InkPresetProfile {
       ToolId.fountainPen,
       ToolId.shapePen,
       ToolId.advancedPen,
-      ToolId.advancedPencil,
+      ToolId.pencil,
     ];
     const specialKeys = [
       ToolId.highlighter,
@@ -662,7 +662,7 @@ abstract final class InkPresetLibrary {
       ToolId.fountainPen.id: List<int>.from(ink),
       ToolId.shapePen.id: List<int>.from(ink),
       ToolId.advancedPen.id: List<int>.from(ink),
-      ToolId.advancedPencil.id: List<int>.from(ink),
+      ToolId.pencil.id: List<int>.from(ink),
       ToolId.highlighter.id: List<int>.from(hi ?? hiDef),
       ToolId.laserPointer.id: List<int>.from(laser ?? laserDef),
     };

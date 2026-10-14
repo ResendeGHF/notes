@@ -5,7 +5,6 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:saber/data/tools/highlighter.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/i18n/strings.g.dart';
 
@@ -31,9 +30,9 @@ class _SizePickerState extends State<SizePicker> {
   Widget build(BuildContext context) {
     final colorScheme = ColorScheme.of(context);
 
-    final displaySize = widget.pen is Highlighter
-        ? widget.pen.options.size
-        : widget.pen.options.size * 2;
+    // Display convention: visible size = internal size x 2 for every tool
+    // (internal 0.5-50 -> visible 1.0-100.0), so 100 is big but still usable.
+    final displaySize = widget.pen.options.size * 2;
 
     return Flex(
       direction: widget.axis,

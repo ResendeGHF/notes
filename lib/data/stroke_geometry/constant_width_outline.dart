@@ -44,7 +44,7 @@ List<Offset> getStroke(
 
   /// Legacy: tipTravelTangent on the decimated spine (stops at the first
   /// corner). Production Advanced Pen leaves this off — short put-down stems
-  /// rotate caps off the travel tangent that Ballpoint / Advanced Pencil use.
+  /// rotate caps off the travel tangent that Ballpoint / pencil use.
   bool preferStemCapTangents = false,
 
   /// Advanced Pen: Ballpoint-style hemispheres along the local travel chord,
@@ -159,7 +159,7 @@ List<Offset> buildConstantWidthOutline(
 
   final spine = decimateStrokeSpine(
     points,
-    minDistance: math.max(0.5, radius * 0.28),
+    minDistance: math.max(0.2, math.min(0.6, radius * 0.12)),
   );
   if (spine.isEmpty) return const [];
   if (spine.length == 1) {
@@ -361,6 +361,10 @@ List<Offset> buildVariableWidthOutline(
     final len = math.sqrt(tx * tx + ty * ty);
     return len > 1e-6 ? (tx / len, ty / len) : (1.0, 0.0);
   }
+  // Look past put-down jitter and short L-bend stems into the travel
+  // direction: the cap must sit on the stroke's travel, not on a micro-edge.
+  // (The Advanced pen has its own stem-following tangent in the composer;
+  // these shared chords stay jitter-robust for ballpoint/pencil/fountain.)
   const maxEdges = 8;
   var maxArc = math.min(math.max(baseSize * 2.25, 5.5), 16.5);
   if (minLookahead != null) {
@@ -407,6 +411,7 @@ List<Offset> buildVariableWidthOutline(
     final len = math.sqrt(tx * tx + ty * ty);
     return len > 1e-6 ? (tx / len, ty / len) : (1.0, 0.0);
   }
+  // Mirror of the opening chord: look back past lift-off jitter into travel.
   const maxEdges = 8;
   var maxArc = math.min(math.max(baseSize * 2.25, 5.5), 16.5);
   if (minLookahead != null) {
@@ -777,12 +782,13 @@ List<PointVector> decimateStrokeSpine(
   final prev = out.last;
   final dx = last.x - prev.x;
   final dy = last.y - prev.y;
-  if (dx * dx + dy * dy >= minDistSq * 0.25) {
+  // Require a full minDistance step before the tip so sub-pixel lift-off
+  // samples are absorbed into the tip rather than creating a crooked cap neck.
+  if (dx * dx + dy * dy >= minDistSq) {
     out.add(last);
   } else if (out.length == 1) {
     out.add(last);
   } else {
-    // Keep the true tip; replace the last intermediate sample.
     out[out.length - 1] = last;
   }
   return out;
@@ -1027,32 +1033,37 @@ List<Offset> _outlineFromRadii(
     final r0 = Offset(px - n0x * r, py - n0y * r);
     final r1 = Offset(px - n1x * r, py - n1y * r);
 
-    if (align > 0.995) {
-      // Nearly straight — one averaged offset.
-      final ax = n0x + n1x;
-      final ay = n0y + n1y;
-      final al = math.sqrt(ax * ax + ay * ay);
-      if (al > 1e-9) {
-        addLeft(Offset(px + ax / al * r, py + ay / al * r));
-        addRight(Offset(px - ax / al * r, py - ay / al * r));
-      } else {
-        addLeft(l0);
-        addRight(r0);
-      }
+    var bx = n0x + n1x;
+    var by = n0y + n1y;
+    final bLen = math.sqrt(bx * bx + by * by);
+    if (bLen > 1e-6) {
+      bx /= bLen;
+      by /= bLen;
+    } else {
+      bx = n0x;
+      by = n0y;
+    }
+
+    if (align > 0.95) {
+      // Smooth bend: use the exact miter-bisector on the outer rail and unit
+      // bisector on the inner rail so gentle curves never facet or step back.
+      final miter = (1.0 / math.sqrt(math.max(0.25, (1.0 + align) * 0.5)))
+          .clamp(1.0, 1.25);
+      final leftScale = turn < 0 ? miter : 1.0;
+      final rightScale = turn >= 0 ? miter : 1.0;
+      addLeft(Offset(px + bx * r * leftScale, py + by * r * leftScale));
+      addRight(Offset(px - bx * r * rightScale, py - by * r * rightScale));
       continue;
     }
 
-    // Ballpoint mesh fans normals whenever the join is sharp (dot < 0.5).
-    // Advanced Pen mirrors that on the outline: round BOTH sides into a tip
-    // bulb. Collapsing the inner side onto the centerline left a flat diameter.
-    if (dualSidedReturnJoins && align < 0.5) {
-      final cuspSegments = math.max(joinSegs, align < -0.5 ? 14 : 8);
+    // True hairpin return (> 115 degrees): round both sides into a tip bulb.
+    if (dualSidedReturnJoins && align < -0.42) {
+      final cuspSegments = math.max(joinSegs, 14);
       final apex = Offset(px, py);
       var outX = -(n0x + n1x);
       var outY = -(n0y + n1y);
       var outLen = math.sqrt(outX * outX + outY * outY);
       if (outLen < 1e-6) {
-        // Exact reverse: normals cancel — aim the bulb along the tip bisector.
         outX = t0x - t1x;
         outY = t0y - t1y;
         outLen = math.sqrt(outX * outX + outY * outY);
@@ -1093,9 +1104,8 @@ List<Offset> _outlineFromRadii(
       continue;
     }
 
-    // Legacy single-sided hairpin (ballpoint / pencil outline path).
     if (align < -0.5) {
-      final cuspSegments = math.max(joinSegs, 10);
+      final cuspSegments = math.max(joinSegs, 12);
       addLeft(l0);
       _appendArc(
         left,
@@ -1108,26 +1118,24 @@ List<Offset> _outlineFromRadii(
         segments: cuspSegments,
       );
       addLeft(l1);
-      addRight(r0);
-      addRight(r1);
+      addRight(Offset(px - bx * r, py - by * r));
       continue;
     }
 
-    // Outer side gets a round join; inner side bevels (avoids spikes/holes).
-    // Arc "outward" direction is the outer normal (not the travel tangent).
-    final joinSteps = align < 0.5 ? math.max(joinSegs, 8) : joinSegs;
+    // Outer side gets a high-resolution round join; inner side uses the single
+    // bisector point so inner rails never cross in retrograde order.
+    final joinSteps = align < 0.5 ? math.max(joinSegs, 10) : joinSegs;
     if (turn >= 0) {
       // Left turn: left is inner, right is outer.
-      addLeft(l0);
-      addLeft(l1);
+      addLeft(Offset(px + bx * r, py + by * r));
       addRight(r0);
       _appendArc(
         right,
         center: Offset(px, py),
         from: r0,
         to: r1,
-        outwardTangentX: -(n0x + n1x),
-        outwardTangentY: -(n0y + n1y),
+        outwardTangentX: -bx,
+        outwardTangentY: -by,
         radius: r,
         segments: joinSteps,
       );
@@ -1140,14 +1148,13 @@ List<Offset> _outlineFromRadii(
         center: Offset(px, py),
         from: l0,
         to: l1,
-        outwardTangentX: n0x + n1x,
-        outwardTangentY: n0y + n1y,
+        outwardTangentX: bx,
+        outwardTangentY: by,
         radius: r,
         segments: joinSteps,
       );
       addLeft(l1);
-      addRight(r0);
-      addRight(r1);
+      addRight(Offset(px - bx * r, py - by * r));
     }
   }
 

@@ -1062,6 +1062,15 @@ class InnerCanvasState extends State<InnerCanvas> {
     !widget.isPreview &&
     !widget.isPrint;
 
+    // O cache de tinta exige um manager não-nulo. Previews (CanvasPreview),
+    // export/print (isPrint) e thumbnails headless (Screenshot.captureFromWidget)
+    // não fornecem PageRasterCacheManager — nesses casos usa vetor puro
+    // (CanvasPainter) em vez de _PageRasterInkLayerPainter.
+    final usePageRasterInk =
+    widget.pageRasterCache != null &&
+    !widget.isPreview &&
+    !widget.isPrint;
+
     final pageRasterRepaint = _pageRasterRepaintListenable;
     final devicePixelRatio = _canvasDevicePixelRatio();
     final isMoving = PageRasterCacheManager.viewportMoving;
@@ -1384,7 +1393,8 @@ class InnerCanvasState extends State<InnerCanvas> {
             child: RepaintBoundary(
               child: CustomPaint(
                 isComplex: true,
-                painter: _PageRasterInkLayerPainter(
+                painter: usePageRasterInk
+                ? _PageRasterInkLayerPainter(
                   repaint: _inkRepaintListenable,
                   manager: widget.pageRasterCache!,
                   invert: invert,
@@ -1413,6 +1423,28 @@ class InnerCanvasState extends State<InnerCanvas> {
                       _pdfBgReady,
                   tiledCache: _strokePictureCache,
                   liveStrokes: _liveTiledStrokes,
+                )
+                : CanvasPainter(
+                  repaint: _inkRepaintListenable,
+                  invert: invert,
+                  strokes: committedInkStrokes,
+                  quadTree: paintQuadTree,
+                  laserStrokes: const [],
+                  currentStroke: null,
+                  currentSelection: null,
+                  primaryColor: colorScheme.primary,
+                  page: page,
+                  showPageIndicator: false,
+                  pageIndex: widget.pageIndex,
+                  totalPages: widget.coreInfo.pages.length,
+                  currentScale: widget.currentScale,
+                  defaultTextStyle: theme.textTheme.bodyMedium!,
+                  lineHeight: widget.lineHeight,
+                  lineThickness: widget.lineThickness?.toDouble(),
+                  lineColor: widget.lineColor,
+                  doneSelecting: true,
+                  preferPathFill: false,
+                  pendingStrokes: _pendingInk.isEmpty ? null : _pendingInk,
                 ),
                 size: Size(widget.width, widget.height),
               ),
@@ -2031,7 +2063,8 @@ class TiledStrokePictureCache {
   static double effectiveScale(double fallback) =>
       PageRasterCacheManager.effectiveScale(fallback);
 
-  static bool usesVectorStrokes(double scale) => scale >= vectorLodMinScale;
+  static bool usesVectorStrokes(double scale) =>
+      scale >= DisplayInkFeel.instance.vectorLodThreshold;
 
   @visibleForTesting
   static void debugResetViewportLod() {
@@ -2328,17 +2361,17 @@ class TiledStrokePictureCache {
                 movingRaster.width.toDouble(),
                 movingRaster.height.toDouble(),
               ),
-              tileRect,
+tileRect,
               Paint()
-              ..filterQuality =
-              DisplayInkFeel.instance.movingBlitFilterQuality,
+              ..filterQuality = DisplayInkFeel.instance
+                  .movingBlitFilterQualityForScale(scale),
             );
-            return;
-          }
+          return;
         }
-        canvas.drawPicture(picture);
-        return;
       }
+      canvas.drawPicture(picture);
+      return;
+    }
       final raster = _rasters[key];
       // Blit a zoom LOD raster when we have one — settled, moving, and while
       // the user is drawing a new stroke on the live overlay.
@@ -2355,14 +2388,14 @@ class TiledStrokePictureCache {
           tileRect,
           Paint()
           ..filterQuality = viewportMoving
-          ? DisplayInkFeel.instance.movingBlitFilterQuality
+          ? DisplayInkFeel.instance.movingBlitFilterQualityForScale(scale)
           : (stale ? FilterQuality.low : FilterQuality.medium),
         );
         return;
       }
       // No raster yet (cold tile, mid-zoom before bake, eviction): keep drawing
-      // the Picture so strokes do not blink off during pan/zoom. Recording new
-      // tiles is still forbidden while viewportMoving (tileBudget == 0).
+      // the Picture so strokes do not blink off during pan/zoom. New recording
+      // while moving is limited to slow pans and eager refills (see tileBudget).
       canvas.drawPicture(picture);
     }
 
@@ -3048,17 +3081,20 @@ final pathOnly = needsMesh;
     }
 
     /// Linear blend of [RasterLodTuning] sparse → medium → dense multipliers.
+    /// The sparse end follows the canvas performance preset (sharper cheap
+    /// bakes on Performance, plain on Battery saver).
     static double densityQualityMul(int strokeCount) {
       const sparse = RasterLodTuning.sparseStrokeCount;
       const medium = RasterLodTuning.mediumStrokeCount;
       const dense = RasterLodTuning.denseStrokeCount;
-      if (strokeCount <= sparse) return RasterLodTuning.sparseQualityMul;
+      final sparseMul = DisplayInkFeel.instance.sparseQualityBoost;
+      if (strokeCount <= sparse) return sparseMul;
       if (strokeCount >= dense) return RasterLodTuning.denseQualityMul;
       if (strokeCount <= medium) {
         final t = (strokeCount - sparse) / (medium - sparse);
-        return RasterLodTuning.sparseQualityMul +
+        return sparseMul +
         (RasterLodTuning.mediumQualityMul -
-        RasterLodTuning.sparseQualityMul) *
+        sparseMul) *
         t;
       }
       final t = (strokeCount - medium) / (dense - medium);

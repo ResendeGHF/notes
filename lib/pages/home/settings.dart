@@ -37,6 +37,8 @@ import 'package:saber/pages/home/vlm_models_section.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'dart:math';
 import 'package:saber/data/backup/incremental_backup_core.dart';
+import 'package:saber/data/file_tree_cache.dart';
+import 'package:saber/data/home_data_cache.dart';
 import 'package:saber/data/locales.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
@@ -1439,6 +1441,40 @@ class _SettingsPageState extends State<SettingsPage> {
                       );
                     },
                   ),
+ValueListenableBuilder(
+                    valueListenable: stows.canvasPerfPreset,
+                    builder: (context, preset, _) {
+                      return SettingsSelection(
+                        title: 'Canvas performance',
+                        subtitle: switch (preset) {
+                          0 =>
+                            'Performance: fastest sharpening after pan/zoom, '
+                                'sharpest motion. Biggest PDF tiles (3072px), '
+                                'fastest PDF settle, sharpest PDF previews (1080px).',
+                          2 =>
+                            'Battery saver: slower sharpening, cheapest motion, '
+                                'lower heat. Smallest PDF tiles (1536px), '
+                                'lazy PDF settle, light PDF previews (360px).',
+                          _ =>
+                            'Balanced: default responsiveness and quality. '
+                                'PDF tiles at 2048px with sharp 720px previews.',
+                        },
+                        iconBuilder: (i) => switch (i) {
+                          0 => Icons.bolt,
+                          2 => Icons.battery_saver,
+                          _ => Icons.balance,
+                        },
+                        afterChange: (_) => setState(() {}),
+                        pref: stows.canvasPerfPreset,
+                        optionsWidth: 60,
+                        options: const [
+                          ToggleButtonsOption(0, Icon(Icons.bolt)),
+                          ToggleButtonsOption(1, Icon(Icons.balance)),
+                          ToggleButtonsOption(2, Icon(Icons.battery_saver)),
+                        ],
+                      );
+                    },
+                  ),
                 ]),
 
                 buildSection(t.settings.prefCategories.advanced, [
@@ -1708,6 +1744,21 @@ class _VaultEncryptionSwitchState extends State<_VaultEncryptionSwitch> {
       }
 
       stows.localEncryptionEnabled.value = false;
+
+      // Disk `.folder_props` counters went stale while the vault was active
+      // (writes bypassed the incremental disk counters and migrateToDisk
+      // writes directly). Rebuild once so vault-off browse shows the same
+      // recursive totals the vault DB had, then drop cached browse/tree
+      // snapshots (reads are authoritative scans from now on anyway).
+      try {
+        await FileManager.rebuildAllDiskFolderCounts();
+      } catch (_) {}
+      try {
+        HomeDataCache.instance.invalidate();
+      } catch (_) {}
+      try {
+        FileTreeCache.instance.invalidate();
+      } catch (_) {}
 
       if (mounted) {
         Navigator.pop(context);

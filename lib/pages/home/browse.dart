@@ -746,6 +746,9 @@ class _BrowsePageState extends State<BrowsePage> {
             }
 
             await FileManager.renameDirectory(oldPath, newName);
+            // Invalidate first: otherwise the root path repaints the stale
+            // HomeDataCache snapshot taken before the op.
+            HomeDataCache.instance.invalidate();
             findChildrenOfPath();
           },
         );
@@ -773,6 +776,9 @@ class _BrowsePageState extends State<BrowsePage> {
       }
 
       await FileManager.moveDirectory(oldPath, destination);
+      // Invalidate first: otherwise the root path repaints the stale
+      // HomeDataCache snapshot taken before the op.
+      HomeDataCache.instance.invalidate();
       findChildrenOfPath();
     }
   }
@@ -837,6 +843,9 @@ class _BrowsePageState extends State<BrowsePage> {
         stows.folderColors.value = Map<String, int>.from(newColors);
       }
       await FileManager.deleteDirectory(folderPath);
+      // Invalidate first: otherwise the root path repaints the stale
+      // HomeDataCache snapshot taken before the op.
+      HomeDataCache.instance.invalidate();
       findChildrenOfPath();
     }
   }

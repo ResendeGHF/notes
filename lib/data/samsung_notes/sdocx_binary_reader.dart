@@ -113,6 +113,43 @@ class SdocxReader {
     }
   }
 
+  /// Length-prefixed UTF-16LE string with u32 length (code units).
+  String readUtf16U32() {
+    final units = readU32();
+    if (units == 0) return '';
+    if (units > 1000000) {
+      throw FormatException('SdocxReader: unreasonable string length $units');
+    }
+    final bytes = readBytes(units * 2);
+    final codeUnits = <int>[];
+    for (var i = 0; i + 1 < bytes.length; i += 2) {
+      codeUnits.add(bytes[i] | (bytes[i + 1] << 8));
+    }
+    return String.fromCharCodes(codeUnits);
+  }
+
+  /// Nullable UTF-16LE string with u16 length; 0xFFFF means null
+  /// (used by e.g. note author name/phone/email).
+  String? readNullableUtf16U16() {
+    if (remaining < 2) {
+      throw FormatException('SdocxReader: truncated nullable string length');
+    }
+    final units = readU16();
+    if (units == 0xFFFF) return null;
+    if (units == 0) return '';
+    final bytes = readBytes(units * 2);
+    final codeUnits = <int>[];
+    for (var i = 0; i + 1 < bytes.length; i += 2) {
+      codeUnits.add(bytes[i] | (bytes[i + 1] << 8));
+    }
+    try {
+      return String.fromCharCodes(codeUnits);
+    } catch (_) {
+      return utf8.decode(utf8.encode(String.fromCharCodes(codeUnits)),
+          allowMalformed: true);
+    }
+  }
+
   String? tryReadUtf16U16() {
     if (remaining < 2) return null;
     final saved = offset;

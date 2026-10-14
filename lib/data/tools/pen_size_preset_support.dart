@@ -17,7 +17,7 @@ bool toolSupportsPenSizePresets(Tool t) {
       case ToolId.calligraphyPen:
       case ToolId.fountainPen:
       case ToolId.advancedPen:
-      case ToolId.advancedPencil:
+      case ToolId.pencil:
         return true;
       default:
         return false;

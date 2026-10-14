@@ -363,8 +363,10 @@ final class PageRasterCacheManager {
       liveViewportScale ?? fallback;
 
   /// Above this scale tiles stay as vectors (no bitmap LOD).
-  /// Mirrors [RasterLodTuning.vectorLodMinScale] without importing UI code.
-  static const double vectorLodMinScale = 1.5;
+  /// Follows the canvas performance preset ([DisplayInkFeel.vectorLodThreshold];
+  /// Balanced keeps the historical 1.5).
+  static double get vectorLodMinScale =>
+      DisplayInkFeel.instance.vectorLodThreshold;
 
   static bool usesVectorLod(double scale) => scale >= vectorLodMinScale;
 

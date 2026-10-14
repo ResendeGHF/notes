@@ -36,8 +36,9 @@ enum ToolId {
   textEditing('TextEditingTool'),
   laserPointer('LaserPointer'),
 
-  /// Procedural-noise pencil (geometry like Advanced Pen; separate presets).
-  advancedPencil('advancedPencil');
+  /// Simple pencil: ballpoint geometry with a fixed graphite-grain shader.
+  /// No tuning UI (mirrors the official Saber pencil).
+  pencil('pencil');
 
   final String id;
   const ToolId(this.id);
@@ -71,6 +72,16 @@ enum ToolId {
     // fountain pen (pressure-sensitive round tip, closest look).
     if (penType == 'experimentalPen') {
       return .fountainPen;
+    }
+    // Removed Rnote pen (unreleased): old notes keep working as the new
+    // Advanced pen, which uses the same smoothing engine.
+    if (penType == 'rnotePen') {
+      return .advancedPen;
+    }
+    // Removed Advanced Pencil: old notes keep working as the new simple
+    // pencil (same graphite look, ballpoint geometry).
+    if (penType == 'advancedPencil') {
+      return .pencil;
     }
     for (final toolId in ToolId.values) {
       if (penType == toolId.id) {
@@ -119,7 +130,8 @@ class _ToolIdPrefCodec extends AbstractCodec<ToolId, Object?> {
       ToolId.select, // 11
       ToolId.textEditing, // 12
       ToolId.laserPointer, // 13
-      ToolId.advancedPencil, // 14
+      ToolId.pencil, // 14 was advancedPencil
+      ToolId.advancedPen, // 15 was rnotePen (unreleased)
     ];
     final i = input is int
         ? input

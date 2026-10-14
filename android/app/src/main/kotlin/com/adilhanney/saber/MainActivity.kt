@@ -66,6 +66,14 @@ class MainActivity: FlutterActivity() {
         } catch (e: Throwable) {
             android.util.Log.w("MainActivity", "MlKitInkCompat install failed", e)
         }
+        // Zero-copy PDF textures: PdfRenderer mmaps the file and composites
+        // into a GPU SurfaceTexture (no Dart FFI bitmap copies). Failures are
+        // non-fatal: Dart falls back to pdfrx rendering.
+        try {
+            PdfTexturePlugin.register(flutterEngine)
+        } catch (e: Throwable) {
+            android.util.Log.w("MainActivity", "PdfTexturePlugin install failed", e)
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.resendeghf.notes/vault_crypto",

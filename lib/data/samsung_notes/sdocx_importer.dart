@@ -14,6 +14,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
+import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
@@ -24,6 +25,7 @@ import 'package:saber/data/stroke_geometry/point_vector.dart';
 import 'package:saber/data/stroke_geometry/stroke_options.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/pages/editor/editor.dart';
+import 'package:saber/services/pdf_open_helper.dart';
 
 /// Imports Samsung Notes `.sdocx` files into Saber notes.
 ///
@@ -224,7 +226,8 @@ class SamsungNotesImporter {
 
         PdfDocument? pdfDoc;
         try {
-          pdfDoc = await PdfDocument.openFile(pdfFile.path);
+          // mmap + progressive: temp import PDFs stream from SSD.
+          pdfDoc = await PdfOpenHelper.openFileProgressive(pdfFile.path);
         } catch (_) {
           continue;
         }
@@ -310,7 +313,116 @@ class SamsungNotesImporter {
     }
     final idx = nextPageIndex();
     coreInfo.pages.add(page);
+    // Stock background artwork embedded in the file wins over the pattern
+    // name; otherwise map the Samsung template to Saber's equivalent so a
+    // blank Samsung page stays blank regardless of Saber defaults.
+    final bgImage = await _toSaberBackgroundImage(doc, spage, coreInfo, page);
+    if (bgImage != null) {
+      page.backgroundImage = bgImage;
+    } else {
+      page.backgroundPattern = samsungTemplateToPattern(
+        templateType: spage.templateType,
+        templateUri: spage.templateUri ?? doc.defaultTemplateUri,
+      );
+      page.hasLocalPattern = true;
+    }
     await _addStrokesAndImages(doc, spage, coreInfo, page, idx);
+  }
+
+  /// Map a Samsung pen name to the closest Saber tool.
+  ///
+  /// Samsung preload names (prefix `…pen.preload.` already stripped):
+  /// ballpoint pens (`InkPen`, `InkPen2`, …) → [ToolId.ballpointPen],
+  /// `FountainPen` family → [ToolId.fountainPen], calligraphy nibs
+  /// (`MontblancCalligraphyPen`, `ChineseBrush`, `ObliquePen`) →
+  /// [ToolId.calligraphyPen], pencils → [ToolId.pencil], markers →
+  /// [ToolId.highlighter]. Brushes and anything unrecognized fall back to
+  /// [ToolId.ballpointPen] per requirements; translucent unknown ink still
+  /// behaves like a highlighter.
+  static ToolId samsungPenToToolId(String? penName, {int? colorArgb}) {
+    final short = (penName ?? '').trim();
+    switch (short) {
+      case 'FountainPen':
+      case 'MontblancFountainPen':
+        return ToolId.fountainPen;
+      case 'MontblancCalligraphyPen':
+      case 'ChineseBrush':
+      case 'ObliquePen':
+        return ToolId.calligraphyPen;
+      case 'Pencil':
+      case 'Pencil2':
+      case 'Pencil3':
+      case 'ColoredPencil':
+        return ToolId.pencil;
+      case 'Marker':
+      case 'Marker2':
+      case 'Marker3':
+      case 'Marker4':
+      case 'StraightMarker':
+      case 'StraightHighlighter':
+        return ToolId.highlighter;
+      case 'InkPen':
+      case 'InkPen2':
+      case 'StraightInkPen2':
+      case 'DefaultPen':
+        return ToolId.ballpointPen;
+      default:
+        final alpha = colorArgb == null ? 255 : ((colorArgb >> 24) & 0xFF);
+        if (alpha < 200) return ToolId.highlighter;
+        return ToolId.ballpointPen;
+    }
+  }
+
+  /// Map a Samsung page template to Saber's equivalent background pattern.
+  ///
+  /// Keyword matching on the template URI comes first (most descriptive);
+  /// otherwise built-in numeric ids apply: 1..3 ruled, 4..6 grid, 7..9
+  /// dots (each narrow/normal/big, which Saber renders as one pattern),
+  /// 0/absent/unknown means blank ([CanvasBackgroundPattern.none]).
+  static CanvasBackgroundPattern samsungTemplateToPattern({
+    int? templateType,
+    String? templateUri,
+  }) {
+    final uri = (templateUri ?? '').toLowerCase();
+    if (uri.isNotEmpty) {
+      if (uri.contains('grid')) return CanvasBackgroundPattern.grid;
+      if (uri.contains('dot')) return CanvasBackgroundPattern.dots;
+      if (uri.contains('line') ||
+          uri.contains('ruled') ||
+          uri.contains('lined') ||
+          uri.contains('college')) {
+        return CanvasBackgroundPattern.lined;
+      }
+      if (uri.contains('blank') ||
+          uri.contains('none') ||
+          uri.contains('plain')) {
+        return CanvasBackgroundPattern.none;
+      }
+      if (uri.contains('staff') || uri.contains('music')) {
+        return CanvasBackgroundPattern.staffs;
+      }
+      if (uri.contains('cornell')) return CanvasBackgroundPattern.cornell;
+      if (uri.contains('calligraphy')) {
+        return CanvasBackgroundPattern.calligraphy;
+      }
+      if (uri.contains('tab')) return CanvasBackgroundPattern.tablature;
+    }
+    switch (templateType) {
+      case 1:
+      case 2:
+      case 3:
+        return CanvasBackgroundPattern.lined;
+      case 4:
+      case 5:
+      case 6:
+        return CanvasBackgroundPattern.grid;
+      case 7:
+      case 8:
+      case 9:
+        return CanvasBackgroundPattern.dots;
+      default:
+        return CanvasBackgroundPattern.none;
+    }
   }
 
   static Future<void> _addStrokesAndImages(
@@ -351,11 +463,7 @@ class SamsungNotesImporter {
         color = Color(s.colorArgb!);
       } catch (_) {}
     }
-    // Heuristic pen mapping: translucent Samsung ink behaves like Saber's
-    // highlighter; everything else maps to the pressure-sensitive fountain
-    // pen (closest generic match for InkPen2/ballpoint without textures).
-    final alpha = ((s.colorArgb ?? 0xFF000000) >> 24) & 0xFF;
-    final toolId = alpha < 200 ? ToolId.highlighter : ToolId.fountainPen;
+    final toolId = samsungPenToToolId(s.penName, colorArgb: s.colorArgb);
 
     var size = s.penWidth;
     if (!size.isFinite || size <= 0) {
@@ -475,6 +583,76 @@ class SamsungNotesImporter {
       return image;
     } catch (e) {
       log.warning('Samsung import: image skipped: $e');
+      return null;
+    }
+  }
+
+  /// Import a Samsung stock background artwork image as the Saber page
+  /// background (full-page). Returns null when the page references no
+  /// embedded image or the bytes aren't a decodable raster image.
+  static Future<EditorImage?> _toSaberBackgroundImage(
+    SdocxDocument doc,
+    SdocxPage spage,
+    EditorCoreInfo coreInfo,
+    EditorPage page,
+  ) async {
+    try {
+      final bgId = spage.backgroundImageId;
+      if (bgId == null) return null;
+      final entry = doc.mediaByBindId[bgId];
+      final bytes = entry?.bytes;
+      if (bytes == null || bytes.isEmpty) return null;
+
+      var ext = '.png';
+      final lower = (entry?.fileName ?? '').toLowerCase();
+      if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+        ext = '.jpg';
+      } else if (lower.endsWith('.webp')) {
+        ext = '.webp';
+      } else if (lower.endsWith('.png')) {
+        ext = '.png';
+      } else if (!_looksLikeImage(bytes)) {
+        return null;
+      }
+
+      final file = coreInfo.assetCacheAll.createRuntimeFile(ext, bytes);
+      final assetId = await coreInfo.assetCacheAll.add(
+        file,
+        copyFromSource: false,
+        forceNew: true,
+      );
+      coreInfo.assetCacheAll.setImageProvider(assetId, MemoryImage(bytes));
+
+      var natural = page.size;
+      try {
+        final decoded = img.decodeImage(bytes);
+        if (decoded != null && decoded.width > 0 && decoded.height > 0) {
+          natural = Size(decoded.width.toDouble(), decoded.height.toDouble());
+        }
+      } catch (_) {}
+
+      final image = PngEditorImage(
+        id: coreInfo.nextImageId++,
+        assetCacheAll: coreInfo.assetCacheAll,
+        assetId: assetId,
+        extension: ext,
+        imageProviderNotifier: coreInfo.assetCacheAll.getImageProviderNotifier(
+          assetId,
+        ),
+        pageIndex: 0,
+        pageSize: page.size,
+        backgroundFit: BoxFit.cover,
+        onMoveImage: null,
+        onDeleteImage: null,
+        onMiscChange: null,
+        onLoad: null,
+        dstRect: Rect.fromLTWH(0, 0, page.size.width, page.size.height),
+        naturalSize: natural,
+      );
+      coreInfo.assetCacheAll.addUse(assetId);
+      return image;
+    } catch (e) {
+      log.warning('Samsung import: background image skipped: $e');
       return null;
     }
   }

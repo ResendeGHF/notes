@@ -447,6 +447,43 @@ class VaultAdapter {
   /// the vault locks (avoids a second full AES pass once [inflight] completed).
   final Map<String, String> _decryptedTempFileByVaultPath = {};
 
+  /// In-flight open prefetches ([prefetchFileForOpen]): the note loader
+  /// warms the first PDF asset while parsing the body, and the asset open
+  /// consumes the SAME future via [takeOpenPrefetch] — exactly one decrypt
+  /// total, zero extra RAM (bytes flow prefetch -> opener, not prefetched +
+  /// re-read). Single-consumer: entries vanish on take or completion.
+  final Map<String, Future<Uint8List?>> _openPrefetchFutures = {};
+
+  /// Starts (or joins) a background warm decrypt for an imminent open.
+  Future<Uint8List?> prefetchFileForOpen(String filePath) {
+    final normPath = _normalizePath(filePath);
+    final existing = _openPrefetchFutures[normPath];
+    if (existing != null) return existing;
+    final fut = readFile(filePath);
+    _openPrefetchFutures[normPath] = fut;
+    fut.whenComplete(() {
+      if (identical(_openPrefetchFutures[normPath], fut)) {
+        _openPrefetchFutures.remove(normPath);
+      }
+    });
+    return fut;
+  }
+
+  /// Consumes a pending open prefetch (single consumer). Returns null when
+  /// absent, failed, or empty — caller falls back to its own read.
+  Future<Uint8List?> takeOpenPrefetch(String filePath) async {
+    final normPath = _normalizePath(filePath);
+    final fut = _openPrefetchFutures.remove(normPath);
+    if (fut == null) return null;
+    try {
+      final bytes = await fut;
+      if (bytes == null || bytes.isEmpty) return null;
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Concurrent [readFile] calls for the same path share one decrypt (e.g. note
   /// body read overlapping with `.sbn2.0` warm-up).
   final Map<String, Future<Uint8List?>> _readFileInflight = {};
@@ -879,7 +916,10 @@ class VaultAdapter {
 
   Uint8List? _getCachedRead(String normPath) {
     final cached = _readCache.remove(normPath);
-    if (cached == null) return null;
+    if (cached == null) {
+      log.info('PDFTIMING vaultCache MISS $normPath');
+      return null;
+    }
 
     // LRU touch — return the same buffer (callers must not mutate).
     // Copying on every hit defeated warm-open latency.
@@ -904,6 +944,7 @@ class VaultAdapter {
     final stored = data;
     _readCache[normPath] = stored;
     _readCacheBytes += stored.length;
+    log.info('PDFTIMING vaultCache PUT $normPath bytes=${data.length}');
 
     while (_readCache.length > _maxReadCacheEntries ||
         _readCacheBytes > _maxReadCacheBytes) {
@@ -928,6 +969,27 @@ class VaultAdapter {
       final f = File(path);
       if (f.existsSync()) f.deleteSync();
     } catch (_) {}
+  }
+
+  /// Registers a copy of already-plaintext [sourcePath] as the decrypted
+  /// temp for [virtualPath], so the next open reuses it with zero decrypt.
+  /// Only for disk-backed-decrypt paths; best-effort and never awaited.
+  Future<void> _seedPlaintextTempForReuse(
+    String virtualPath,
+    String sourcePath,
+  ) async {
+    try {
+      final normPath = _normalizePath(virtualPath);
+      if (_decryptedTempFileByVaultPath.containsKey(normPath)) return;
+      final src = File(sourcePath);
+      if (!src.existsSync()) return;
+      final tempDir = await getTemporaryDirectory();
+      final path = p.join(tempDir.path, 'vault_aes_${const Uuid().v4()}.tmp');
+      await src.copy(path);
+      _decryptedTempFileByVaultPath[normPath] = path;
+    } catch (e) {
+      log.fine('Vault plain-temp seed skipped: $e');
+    }
   }
 
   void _invalidateDecryptedTempFilesByPrefix(String prefix) {
@@ -1019,6 +1081,7 @@ class VaultAdapter {
   }
 
   void invalidateCachedReadForPath(String path) {
+    log.info('PDFTIMING vaultCache INVALIDATE $path');
     _invalidateCachedRead(_normalizePath(path));
   }
 
@@ -1055,6 +1118,9 @@ class VaultAdapter {
     }
     _readCache.clear();
     _readCacheBytes = 0;
+    // Drop pending open prefetches: pre-lock plaintext must never be
+    // consumed after lock (in-flight futures complete harmlessly).
+    _openPrefetchFutures.clear();
     _clearAllDecryptedTempFiles();
   }
 
@@ -1969,6 +2035,15 @@ class VaultAdapter {
     _logPerf(perfLabel, sw, extra: '(size=${result.size})');
 
     _invalidateDecryptedTempFile(result.virtualPath);
+
+    // Seed plaintext temp for instant reopen: the source bytes are already
+    // plaintext on disk right now, so registering a copy avoids a full AES
+    // re-decrypt when the note opens moments later (e.g. a just-imported
+    // PDF). Temp mode only — RAM-only policy never materializes plaintext.
+    // Session-scoped (startup cleanup wipes vault_*.tmp); never awaited.
+    if (vaultPathAllowsDiskBackedDecrypt(result.virtualPath)) {
+      unawaited(_seedPlaintextTempForReuse(result.virtualPath, sourcePath));
+    }
 
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     _putCachedMeta(

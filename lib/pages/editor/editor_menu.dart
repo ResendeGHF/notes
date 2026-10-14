@@ -148,12 +148,12 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
+    // Sem animacao: o menu apenas aparece no estado final.
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
+      duration: Duration.zero,
       constraints: const BoxConstraints(),
       child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
+        duration: Duration.zero,
         child: switch (_page) {
           _MenuPage.main => _buildMainMenu(context, colorScheme),
           _MenuPage.layers => _LayersSettingsView(

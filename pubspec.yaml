@@ -82,7 +82,12 @@ dependencies:
   slang: ^4.10.0
   slang_flutter:
 
-  flex_color_picker: ^4.0.0
+  # Pinned to 3.x: v4 requires Flutter's decoupled material_ui/cupertino_ui
+  # packages, while this app still uses package:flutter/material.dart.
+  # Using v4 with flutter/material causes MaterialLocalizations.of() to throw
+  # ("Null check operator used on a null value") in showColorPickerDialog.
+  # See https://docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui
+  flex_color_picker: ^3.8.0
 
   font_awesome_flutter: ^11.0.0
 
