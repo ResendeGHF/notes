@@ -9,6 +9,7 @@ import 'package:saber/components/canvas/_rectangle_stroke.dart';
 import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/stroke_geometry/advanced_pen_options.dart';
 
 /// Background mesh triangulation for dense pages.
 ///
@@ -42,7 +43,7 @@ const int kMeshWarmupMinStrokes = 300;
 bool strokeNeedsMeshWarmup(Stroke s) {
   if (s.points.length < 2 || s.hasCachedMesh) return false;
   final tool = s.toolId;
-  if (tool == ToolId.highlighter || tool == ToolId.advancedPen) {
+  if (tool == ToolId.highlighter) {
     return false;
   }
   if (s is ShapeStroke || s is CircleStroke || s is RectangleStroke) {
@@ -79,6 +80,9 @@ Map<String, Object?> meshWarmupRequestFor(Stroke s) {
     'flat': s.flatEdge,
     'pmc': s.paint.pressureMapsToCoverage,
     'pe': s.pressureEnabled,
+    'brushType': s.brushOptions.builderType.index,
+    'brushCurve': s.brushOptions.pressureCurve.index,
+    'brushCap': s.brushOptions.lineCap.index,
   };
 }
 
@@ -128,6 +132,12 @@ Map<String, Object?>? _warmOneStroke(Map<String, Object?> r) {
       pressureMapsToCoverage: r['pmc'] as bool,
       pressureEnabled: r['pe'] as bool,
       targetScale: 1.0,
+      brushOptions: AdvancedPenOptions(
+        builderType: AdvancedPenBuilderType.values[(r['brushType'] as num?)?.toInt() ?? 0],
+        pressureCurve: AdvancedPenPressureCurve.values[(r['brushCurve'] as num?)?.toInt() ?? 0],
+        lineCap: AdvancedPenLineCap.values[(r['brushCap'] as num?)?.toInt() ?? 0],
+        modeler: AdvancedPenModelerParams.advancedDefaults,
+      ),
     );
     if (arrays == null ||
         arrays.positions.isEmpty ||

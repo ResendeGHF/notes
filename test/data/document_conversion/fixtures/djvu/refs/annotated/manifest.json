@@ -1,0 +1,28 @@
+{
+  "pageCount": 3,
+  "rootChunks": [["DIRM", 67],["NAVM", 79],["FORM", 1538],["FORM", 1382],["FORM", 1268],["FORM", 1294]],
+  "bookmarks": [{"title": "Chapter 1 — Beginning", "url": "#page_1", "children": [{"title": "Section 1.1", "url": "#page_1", "children": []},{"title": "Section 1.2", "url": "#page_2", "children": []}]},{"title": "Chapter 2 — End", "url": "#page_3", "children": []}],
+  "pages": [
+    {
+      "index": 0, "width": 1240, "height": 1600, "dpi": 300,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["Sjbz", 1196],["ANTz", 125]],
+      "mask": [1240, 1600],
+      "linkCount": 3,
+      "done": true
+    },
+    {
+      "index": 1, "width": 1240, "height": 1600, "dpi": 300,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["Sjbz", 1216]],
+      "mask": [1240, 1600],
+      "done": true
+    },
+    {
+      "index": 2, "width": 1240, "height": 1600, "dpi": 300,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["Sjbz", 1241]],
+      "mask": [1240, 1600],
+      "done": true
+    }]
+}

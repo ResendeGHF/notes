@@ -23,7 +23,10 @@ class PdfLink {
 
   bool contains(Offset position) {
     if (rects.isNotEmpty) {
-      return rects.any((r) => r.contains(position));
+      for (int i = 0; i < rects.length; i++) {
+        if (rects[i].contains(position)) return true;
+      }
+      return false;
     }
     return rect.contains(position);
   }
@@ -31,27 +34,45 @@ class PdfLink {
 
 class PdfLinkDetector {
   static final log = Logger('PdfLinkDetector');
+  
+  // Utilização de Expando para acoplar os caches ao ciclo de vida do próprio PdfDocument 
+  // sem interferir no Garbage Collector da linguagem. O(1) de complexidade.
+  static final Expando<Map<int, List<PdfLink>>> _linkCache = Expando();
 
   static Future<List<PdfLink>> detectLinksOnPage(
     PdfDocument pdfDocument,
     int pageIndex,
   ) async {
+    if (pageIndex < 0 || pageIndex >= pdfDocument.pages.length) {
+      return const [];
+    }
+
+    var docCache = _linkCache[pdfDocument];
+    if (docCache == null) {
+      docCache = {};
+      _linkCache[pdfDocument] = docCache;
+    }
+
+    if (docCache.containsKey(pageIndex)) {
+      return docCache[pageIndex]!;
+    }
+
     try {
-      if (pdfDocument.pages.isEmpty) {
-        return [];
-      }
-      if (pageIndex < 0 || pageIndex >= pdfDocument.pages.length) {
-        return [];
-      }
-
-      // Progressive loading: loadLinks() returns [] until the page is fully
-      // loaded. Wait so highlights appear on first open, not only after a
-      // remount (sidebar/scroll).
-      final page = await pdfDocument.pages[pageIndex].ensureLoaded();
+      final page = pdfDocument.pages[pageIndex];
+      // Carrega os dados nativos do dicionário de PDF sem travar a engine pedindo 
+      // renderização/rasterização via ensureLoaded().
       final pdfrxLinks = await page.loadLinks();
-      final double pageWidth = page.width;
+      
+      if (pdfrxLinks.isEmpty) {
+        docCache[pageIndex] = const [];
+        return const [];
+      }
 
-      return pdfrxLinks.map((link) {
+      final double pageWidth = page.width;
+      final result = <PdfLink>[];
+
+      for (int i = 0; i < pdfrxLinks.length; i++) {
+        final link = pdfrxLinks[i];
         int? targetPage;
         Rect? targetRect;
         String? uri;
@@ -82,32 +103,29 @@ class PdfLinkDetector {
         }
 
         final normalizedRects = <Rect>[];
-        for (final r in link.rects) {
-          normalizedRects.add(r.toRect(page: page));
+        for (int k = 0; k < link.rects.length; k++) {
+          normalizedRects.add(link.rects[k].toRect(page: page));
         }
 
-        final linkRect = normalizedRects.isNotEmpty
-            ? normalizedRects.first
-            : Rect.zero;
+        final linkRect = normalizedRects.isNotEmpty ? normalizedRects.first : Rect.zero;
 
-        return PdfLink(
+        result.add(PdfLink(
           rect: linkRect,
           rects: normalizedRects,
           targetPageIndex: targetPage,
           targetRegion: targetRect,
           uri: uri,
-        );
-      }).toList();
+        ));
+      }
+
+      docCache[pageIndex] = result;
+      return result;
     } catch (e, stackTrace) {
       final errStr = e.toString();
       if (!errStr.contains('not yet loaded')) {
-        log.warning(
-          'Failed to detect links on page $pageIndex: $e',
-          e,
-          stackTrace,
-        );
+        log.warning('Failed to detect links on page $pageIndex: $e', e, stackTrace);
       }
-      return [];
+      return const [];
     }
   }
 
@@ -117,9 +135,9 @@ class PdfLinkDetector {
     Offset position,
   ) async {
     final links = await detectLinksOnPage(pdfDocument, pageIndex);
-    for (final link in links) {
-      if (link.contains(position)) {
-        return link;
+    for (int i = 0; i < links.length; i++) {
+      if (links[i].contains(position)) {
+        return links[i];
       }
     }
     return null;

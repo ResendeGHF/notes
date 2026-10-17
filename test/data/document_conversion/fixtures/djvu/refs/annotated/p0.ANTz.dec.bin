@@ -1,0 +1,5 @@
+(zoom d100)
+(mode color)
+(maparea "#page_2" "next page" (rect 40 40 200 40))
+(maparea "https://example.com/" "external" (rect 40 100 220 40))
+(maparea "#page_3" "circle" (oval 300 150 120 80))

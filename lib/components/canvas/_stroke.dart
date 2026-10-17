@@ -2515,12 +2515,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// keeps every cut buried inside a neighbor's body, so cuts can never show
   /// seams or holes — opaque overdraw is pixel-identical. Typical handwriting
   /// letters (<100 pts) still take the exact legacy single-build path.
-  int get _liveStageTailPoints =>
-      toolId == ToolId.advancedPen ? 64 : kLiveStageTailPoints;
-  int get _liveStageMinFreeze =>
-      toolId == ToolId.advancedPen ? 32 : kLiveStageMinFreeze;
-  int get _liveStageTailOverrun =>
-      toolId == ToolId.advancedPen ? 96 : kLiveStageTailOverrun;
+  int get _liveStageTailPoints => kLiveStageTailPoints;
+  int get _liveStageMinFreeze => kLiveStageMinFreeze;
+  int get _liveStageTailOverrun => kLiveStageTailOverrun;
 
   /// Overlap (in raw points) between adjacent Advanced live chunks. Only for
   /// opaque ink (alpha 1): translucent overdraw would double-darken the band.
@@ -2528,8 +2525,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// exact edges; highlighter blending is not idempotent).
   static const int _liveStageOverlap = 8;
 
-  bool get _liveStageOverlaps =>
-      toolId == ToolId.advancedPen && color.alpha == 0xFF;
+  bool get _liveStageOverlaps => false;
 
   /// Freeze another prefix chunk once the tail outgrows its window.
   void _extendLiveStaging() {
@@ -2624,7 +2620,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final bool isMeshFamily =
         toolId == ToolId.ballpointPen ||
         toolId == ToolId.fountainPen ||
-        toolId == ToolId.calligraphyPen;
+        toolId == ToolId.calligraphyPen ||
+        toolId == ToolId.advancedPen;
     final bool isPencil = toolId == ToolId.pencil;
     final bool isNeon = neon && toolId == ToolId.ballpointPen;
 
@@ -2668,20 +2665,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    if (toolId == ToolId.advancedPen) {
-      final spine = [...tipSub, if (isTip) ..._brushPredictionTail()];
-      final poly = _buildBrushPolygonFor(
-        spine,
-        startRounded: startIsTrue
-            ? brushOptions.lineCap == AdvancedPenLineCap.rounded
-            : false,
-        endRounded: isTip
-            ? brushOptions.lineCap == AdvancedPenLineCap.rounded
-            : false,
-      );
-      path = _stagedPathFor(poly);
-      bounds = path.getBounds();
-    } else if (toolId == ToolId.highlighter) {
+    if (toolId == ToolId.highlighter) {
       final poly = _buildHighlighterRangePoly(
         tipSub,
         startCap: startIsTrue,
@@ -2799,35 +2783,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       pressureMapsToCoverage: paint.pressureMapsToCoverage,
       pressureEnabled: pressureEnabled,
       targetScale: 1.0,
+      brushOptions: brushOptions,
     );
-  }
-
-  /// Advanced outline over an explicit spine (live staging). Mirrors
-  /// [_getBrushPolygon] exactly for full ranges.
-  List<Offset> _buildBrushPolygonFor(
-    List<PointVector> spine, {
-    required bool startRounded,
-    required bool endRounded,
-  }) {
-    if (spine.isEmpty) return const [];
-    List<PointVector> shaped = spine;
-    if (brushOptions.builderType == AdvancedPenBuilderType.curved &&
-        shaped.length >= 4) {
-      shaped = sampleCatmullRom(shaped);
-    }
-    try {
-      return composeAdvancedOutline(
-        shaped,
-        strokeWidth: options.size,
-        curve: brushOptions.pressureCurve,
-        roundedCaps: brushOptions.lineCap == AdvancedPenLineCap.rounded,
-        startRounded: startRounded,
-        endRounded: endRounded,
-      );
-    } catch (e, st) {
-      log.warning('composeAdvancedOutline crashed in staging: $e', e, st);
-      return shaped.map((p) => Offset(p.x, p.y)).toList();
-    }
   }
 
   /// Highlighter outline over an explicit raw-point range (live staging).
@@ -4568,7 +4525,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   bool get canBatchSolidMesh {
     if (hasCarve) return false;
     if (toolId == ToolId.highlighter) return false;
-    if (toolId == ToolId.advancedPen) return false;
     if (hasNonSolidPaint) return false;
     if (this is ShapeStroke ||
         this is CircleStroke ||
@@ -4729,7 +4685,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       (toolId == ToolId.ballpointPen ||
           toolId == ToolId.pencil ||
           toolId == ToolId.fountainPen ||
-          toolId == ToolId.calligraphyPen);
+          toolId == ToolId.calligraphyPen ||
+          toolId == ToolId.advancedPen);
 
   List<ui.Vertices>? get liveIncrementalMeshes => null;
 
@@ -4811,7 +4768,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // only the paint differs (graphite grain). Neon ballpoint still builds
     // a mesh via [ensureMeshVertices] for the core.
     if ((neon && toolId == ToolId.ballpointPen) ||
-        toolId == ToolId.advancedPen ||
         toolId == ToolId.highlighter ||
         toolId == ToolId.laserPointer) {
       return null;
@@ -5264,6 +5220,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // via [startTaper]/[endTaper] (pass false for interior).
     bool openStart = false,
     bool openEnd = false,
+    AdvancedPenOptions? brushOptions,
   }) {
     final double scale = targetScale;
     // Mild overview LOD for hemisphere tessellation only — writing zoom unchanged.
@@ -5290,7 +5247,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         (toolId == ToolId.ballpointPen ||
             toolId == ToolId.pencil ||
             toolId == ToolId.fountainPen ||
-            toolId == ToolId.calligraphyPen);
+            toolId == ToolId.calligraphyPen ||
+            toolId == ToolId.advancedPen);
     if (liveCheapSpineMesh && predictedTail != null) {
       final src = packedBase;
       packed = Float32List(src.length + predictedTail.length);
@@ -5316,6 +5274,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         toolId == ToolId.ballpointPen || toolId == ToolId.pencil;
     final bool isCalligraphy = toolId == ToolId.calligraphyPen;
     final bool isFountain = toolId == ToolId.fountainPen;
+    final bool isAdvanced = toolId == ToolId.advancedPen;
 
     final double baseSize = isHighlighter
         ? (size / 2.0) * highlighterStrokeScaleFactor
@@ -5388,12 +5347,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     /// Round mesh caps: ballpoint & pencil always; fountain when [cap] is on.
     final bool roundCapOverridesTaper = isFountain || isBallpoint;
 
+    final bool advancedWantsRounded = isAdvanced &&
+        brushOptions != null &&
+        brushOptions.lineCap == AdvancedPenLineCap.rounded;
+
     var generateStartCap =
         !openStart &&
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : (startCap || isBallpoint || isCalligraphy || isFountain)) &&
+            : isAdvanced 
+                ? advancedWantsRounded 
+                : (startCap || isBallpoint || isCalligraphy || isFountain)) &&
         (!startTaper || !canTaper || roundCapOverridesTaper);
 
     final bool generateEndCap =
@@ -5401,7 +5366,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : (endCap || isBallpoint || isCalligraphy || isFountain)) &&
+            : isAdvanced 
+                ? advancedWantsRounded 
+                : (endCap || isBallpoint || isCalligraphy || isFountain)) &&
         (!endTaper || !canTaper || roundCapOverridesTaper);
 
     final bool useCoverage = toolId == ToolId.pencil && pressureMapsToCoverage;
@@ -5540,6 +5507,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       } else if (isFountain) {
         final p = hemisP0.clamp(0.0, 1.0);
         width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
+      } else if (isAdvanced && brushOptions != null) {
+        final p = hemisP0.clamp(0.0, 1.0);
+        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
       } else {
         width = math.max(0.1, baseSize * (0.2 + 0.8 * hemisP0 * 2));
       }
@@ -5680,6 +5650,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       } else if (isFountain) {
         final p = pressure.clamp(0.0, 1.0);
         width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
+      } else if (isAdvanced && brushOptions != null) {
+        final p = pressure.clamp(0.0, 1.0);
+        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
       } else {
         width = math.max(0.1, baseSize * (0.2 + 0.8 * pressure * 2));
       }
@@ -5755,6 +5728,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       } else if (isFountain) {
         final p = hemisP.clamp(0.0, 1.0);
         width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
+      } else if (isAdvanced && brushOptions != null) {
+        final p = hemisP.clamp(0.0, 1.0);
+        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
       } else {
         width = math.max(0.1, baseSize * (0.2 + 0.8 * hemisP * 2));
       }
@@ -5866,6 +5842,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       pressureMapsToCoverage: paint.pressureMapsToCoverage,
       pressureEnabled: pressureEnabled,
       targetScale: _targetScale,
+      brushOptions: brushOptions,
     );
     if (arrays == null) return null;
     final ui.Vertices verts = ui.Vertices.raw(

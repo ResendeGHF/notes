@@ -1,0 +1,12 @@
+{
+  "pageCount": 1,
+  "rootChunks": [["INFO", 10],["BGjp", 15867]],
+  "bookmarks": [],
+  "pages": [
+    {
+      "index": 0, "width": 512, "height": 384, "dpi": 25600,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["BGjp", 15867]],
+      "done": true
+    }]
+}

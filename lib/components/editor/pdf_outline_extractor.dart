@@ -7,21 +7,26 @@ import 'package:saber/data/editor/pdf_outline.dart';
 
 class PdfOutlineExtractor {
   static final log = Logger('PdfOutlineExtractor');
+  
+  static final Expando<List<PdfOutlineItem>> _outlineCache = Expando();
 
   static Future<List<PdfOutlineItem>?> extractOutlines(
     PdfDocument pdfDocument,
   ) async {
-    try {
+    final cached = _outlineCache[pdfDocument];
+    if (cached != null) return cached;
 
+    try {
       final outlines = await pdfDocument.loadOutline();
       
       if (outlines.isEmpty) {
-        log.info('PDF reportou 0 outlines via pdfrx');
+        _outlineCache[pdfDocument] = const [];
         return null;
       }
 
-      log.info('Pdfrx extraiu ${outlines.length} itens de outline');
-      return _mapPdfrxOutlines(outlines);
+      final result = _mapPdfrxOutlines(outlines);
+      _outlineCache[pdfDocument] = result;
+      return result;
     } catch (e) {
       log.warning('Failed to extract PDF outlines via pdfrx: $e');
       return null;
@@ -29,22 +34,20 @@ class PdfOutlineExtractor {
   }
 
   static Future<List<PdfOutlineItem>?> extractOutlinesFromFile(dynamic file) async {
-
     return null;
   }
 
   static List<PdfOutlineItem> _mapPdfrxOutlines(List<PdfOutlineNode> nodes) {
     final result = <PdfOutlineItem>[];
 
-    for (final node in nodes) {
-
-      int pageIndex = (node.dest?.pageNumber ?? 0) - 1;
+    for (int i = 0; i < nodes.length; i++) {
+      final node = nodes[i];
+      int pageIndex = (node.dest?.pageNumber ?? 1) - 1;
       if (pageIndex < 0) pageIndex = 0;
 
       result.add(PdfOutlineItem(
         title: node.title,
         pageIndex: pageIndex,
-
         children: node.children.isNotEmpty 
             ? _mapPdfrxOutlines(node.children) 
             : null,

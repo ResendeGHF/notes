@@ -12,7 +12,7 @@
 
 import 'dart:typed_data';
 
-import 'djvu_zp_tables.dart';
+import 'package:saber/data/document_conversion/djvu/djvu_zp_tables.dart';
 
 /// Error thrown when a ZP stream cannot be initialised.
 class ZpInitException implements Exception {
@@ -35,19 +35,19 @@ class ZpInitException implements Exception {
 /// which extracts them from the struct to keep them in registers.
 class ZpDecoder {
   /// Current interval width register (16-bit value in the low 16 bits).
-  int a = 0;
+  var a = 0;
 
   /// Current code register (16-bit value in the low 16 bits).
-  int c = 0;
+  var c = 0;
 
   /// Cached upper bound for the fast decode path (`min(c, 0x7fff)`).
-  int fence = 0;
+  var fence = 0;
 
   /// Bit buffer feeding the code register.
-  int bitBuf = 0;
+  var bitBuf = 0;
 
   /// Number of valid bits remaining in [bitBuf].
-  int bitCount = 0;
+  var bitCount = 0;
 
   /// Compressed input bytes.
   final Uint8List data;
@@ -58,7 +58,7 @@ class ZpDecoder {
   /// `0xFF` padding read past the end of [data]**. The overshoot
   /// `pos - data.length` is therefore the number of synthetic bytes read so
   /// far; see [syntheticBytes].
-  int pos = 0;
+  var pos = 0;
 
   ZpDecoder(this.data) {
     if (data.length < 2) {

@@ -1,0 +1,26 @@
+{
+  "pageCount": 2,
+  "rootChunks": [["DIRM", 58],["FORM", 1676],["FORM", 4522],["FORM", 4540]],
+  "bookmarks": [],
+  "pages": [
+    {
+      "index": 0, "width": 1240, "height": 1600, "dpi": 300,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["Sjbz", 966],["BG44", 23],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 32],["BG44", 62],["BG44", 219],["BG44", 513],["FGbz", 898]],
+      "mask": [1240, 1600],
+      "bg": [104, 134],
+      "fgbzColors": 147,
+      "fgbzIndices": 626,
+      "done": true
+    },
+    {
+      "index": 1, "width": 1240, "height": 1600, "dpi": 300,
+      "rotation": "None",
+      "chunks": [["INFO", 10],["Sjbz", 978],["BG44", 23],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 16],["BG44", 32],["BG44", 62],["BG44", 219],["BG44", 513],["FGbz", 904]],
+      "mask": [1240, 1600],
+      "bg": [104, 134],
+      "fgbzColors": 146,
+      "fgbzIndices": 626,
+      "done": true
+    }]
+}

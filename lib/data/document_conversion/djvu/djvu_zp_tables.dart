@@ -12,7 +12,7 @@
 ///
 /// 251 valid entries + 5 padding entries (indices 251–255, never accessed).
 /// Each entry is an unsigned 16-bit fraction in [0, 0x8000].
-const List<int> kZpProb = <int>[
+const kZpProb = <int>[
   0x8000, 0x8000, 0x8000, 0x6bbd, 0x6bbd, 0x5d45, 0x5d45, 0x51b9, 0x51b9, 0x4813, 0x4813, 0x3fd5, 0x3fd5, 0x38b1, 0x38b1, 0x3275,
   0x3275, 0x2cfd, 0x2cfd, 0x2825, 0x2825, 0x23ab, 0x23ab, 0x1f87, 0x1f87, 0x1bbb, 0x1bbb, 0x1845, 0x1845, 0x1523, 0x1523, 0x1253,
   0x1253, 0x0fcf, 0x0fcf, 0x0d95, 0x0d95, 0x0b9d, 0x0b9d, 0x09e3, 0x09e3, 0x0861, 0x0861, 0x0711, 0x0711, 0x05f1, 0x05f1, 0x04f9,
@@ -33,7 +33,7 @@ const List<int> kZpProb = <int>[
 
 /// Adaptation threshold `THRESHOLD[state]`. When `a >= threshold[state]`,
 /// the MPS transition updates the context state via [kZpMpsNext].
-const List<int> kZpThreshold = <int>[
+const kZpThreshold = <int>[
   0x0000, 0x0000, 0x0000, 0x10a5, 0x10a5, 0x1f28, 0x1f28, 0x2bd3, 0x2bd3, 0x36e3, 0x36e3, 0x408c, 0x408c, 0x48fd, 0x48fd, 0x505d,
   0x505d, 0x56d0, 0x56d0, 0x5c71, 0x5c71, 0x615b, 0x615b, 0x65a5, 0x65a5, 0x6962, 0x6962, 0x6ca2, 0x6ca2, 0x6f74, 0x6f74, 0x71e6,
   0x71e6, 0x7404, 0x7404, 0x75d6, 0x75d6, 0x7768, 0x7768, 0x78c2, 0x78c2, 0x79ea, 0x79ea, 0x7ae7, 0x7ae7, 0x7bbe, 0x7bbe, 0x7c75,
@@ -53,7 +53,7 @@ const List<int> kZpThreshold = <int>[
 ];
 
 /// Next state on MPS (most probable symbol) occurrence.
-const List<int> kZpMpsNext = <int>[
+const kZpMpsNext = <int>[
   84, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
   18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
   34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
@@ -73,7 +73,7 @@ const List<int> kZpMpsNext = <int>[
 ];
 
 /// Next state on LPS (least probable symbol) occurrence.
-const List<int> kZpLpsNext = <int>[
+const kZpLpsNext = <int>[
   145, 4, 3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
   14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
   30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
