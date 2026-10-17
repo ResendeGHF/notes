@@ -51,17 +51,19 @@ class PathComponents extends StatelessWidget {
                 return ValueListenableBuilder<Map<String, int>>(
                   valueListenable: stows.folderColors,
                   builder: (context, folderColors, _) {
-                    Color itemColor;
-                    if (isRoot) {
-                      itemColor = isLast ? colorScheme.onSurface : colorScheme.onSurfaceVariant;
-                    } else {
-                      final colorValue = folderColors[componentPath];
-                      itemColor = colorValue != null
-                          ? Color(colorValue)
-                          : (isLast
-                              ? colorScheme.onSurface
-                              : colorScheme.onSurfaceVariant);
-                    }
+                    // Texto sempre neutro (branco no dark / preto no light):
+                    // onSurface para o item atual, onSurfaceVariant para ancestrais.
+                    // A cor da pasta aparece apenas no ícone à frente do nome.
+                    final Color textColor = isLast
+                        ? colorScheme.onSurface
+                        : colorScheme.onSurfaceVariant;
+
+                    final int? colorValue = isRoot
+                        ? null
+                        : folderColors[componentPath];
+                    final Color iconColor = colorValue != null
+                        ? Color(colorValue)
+                        : colorScheme.primary;
 
                     return Center(
                       child: Material(
@@ -82,13 +84,26 @@ class PathComponents extends StatelessWidget {
                               horizontal: 8,
                               vertical: 6,
                             ),
-                            child: Text(
-                              label,
-                              style: theme.textTheme.titleMedium?.copyWith(
-                                color: itemColor,
-                                fontWeight: isLast ? FontWeight.w600 : FontWeight.w500,
-                                letterSpacing: -0.2,
-                              ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (!isRoot) ...[
+                                  Icon(
+                                    Icons.folder_rounded,
+                                    size: 18,
+                                    color: iconColor,
+                                  ),
+                                  const SizedBox(width: 6),
+                                ],
+                                Text(
+                                  label,
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    color: textColor,
+                                    fontWeight: isLast ? FontWeight.w600 : FontWeight.w500,
+                                    letterSpacing: -0.2,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),

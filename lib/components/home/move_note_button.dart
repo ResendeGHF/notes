@@ -17,10 +17,12 @@ class MoveNoteButton extends StatelessWidget {
     super.key,
     required this.filesToMove,
     required this.unselectNotes,
+    this.onMoved,
   });
 
   final List<String> filesToMove;
   final void Function() unselectNotes;
+  final void Function()? onMoved;
 
   @override
   Widget build(BuildContext context) {
@@ -34,6 +36,7 @@ class MoveNoteButton extends StatelessWidget {
             return MoveNoteDialog(
               filesToMove: filesToMove,
               unselectNotes: unselectNotes,
+              onMoved: onMoved,
             );
           },
         );
@@ -49,10 +52,12 @@ class MoveNoteDialog extends StatefulWidget {
     super.key,
     required this.filesToMove,
     required this.unselectNotes,
+    this.onMoved,
   });
 
   final List<String> filesToMove;
   final void Function() unselectNotes;
+  final void Function()? onMoved;
 
   @override
   State<MoveNoteDialog> createState() => _MoveNoteDialogState();
@@ -334,6 +339,7 @@ class _MoveNoteDialogState extends State<MoveNoteDialog> {
                 p.join(currentFolder, '${newFileNames[i]}$extension'),
               );
             }
+            widget.onMoved?.call();
           },
           child: Text(t.home.moveNote.move),
         ),

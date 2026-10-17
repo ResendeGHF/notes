@@ -12,27 +12,51 @@ import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 
 import 'package:saber/data/tools/_tool.dart';
 
-enum EraserMode { stroke, area }
+enum EraserMode { stroke, area, carve }
+
+extension EraserModeX on EraserMode {
+  /// Area and carve share the drag session. Stroke mode deletes whole strokes.
+  bool get isAreaLike => this == EraserMode.area || this == EraserMode.carve;
+}
 
 class EraserResult {
   EraserResult({
     required this.removed,
     required this.added,
+    this.replacementGroups = const [],
     this.areaWorkRemaining = false,
+    this.contentMutated = false,
   });
+
   final List<Stroke> removed;
   final List<Stroke> added;
 
+  /// Parallel to [removed]: each entry replaces that stroke in draw order.
+  /// Empty means the stroke is gone. Missing groups are treated as empty.
+  final List<List<Stroke>> replacementGroups;
+
   final bool areaWorkRemaining;
+
+  /// True when a carve mask was extended in place (same stroke object).
+  final bool contentMutated;
 }
 
-/// One area-erase drag: originals map to their surviving fragments (xnotes
-/// [EraseSession] shape). Re-cuts coalesce into the same entry.
-class _AreaEraseEntry {
-  _AreaEraseEntry(this.original);
+/// One area-erase original and the fragments currently standing in for it.
+class _AreaEntry {
+  _AreaEntry(this.original, this.points);
 
   final Stroke original;
-  final List<Stroke> fragments = [];
+
+  /// Full centerline, unchanged for the life of the drag.
+  final List<PointVector> points;
+
+  /// Surviving polylines. Null until the first cut (the original is intact).
+  /// Every sample outside the eraser is copied through; only the bitten
+  /// span is replaced by the two boundary points.
+  List<List<PointVector>>? pieces;
+
+  /// Objects currently in the page (the original, then its fragments).
+  List<Stroke> live = [];
 }
 
 class Eraser extends Tool {
@@ -62,20 +86,27 @@ class Eraser extends Tool {
   final Set<Stroke> _added = {};
   final Set<Stroke> _toDispose = {};
   final List<Stroke> _candidateBuffer = [];
+
   Offset? _lastAppliedPos;
 
-  /// Area-erase session: originals first touched this drag.
-  final List<_AreaEraseEntry> _areaEntries = [];
-  final Map<Stroke, _AreaEraseEntry> _areaByOriginal = {};
+  /// Tip of the last sweep that was fully applied. The next call covers the
+  /// whole capsule from here to the pointer, so the bite cannot trail the pen
+  /// and fast flicks cannot leave a tunnel.
+  Offset? _coveredPos;
+
+  final List<_AreaEntry> _areaEntries = [];
+  final Map<Stroke, _AreaEntry> _areaByOriginal = {};
   final Map<Stroke, Stroke> _areaOriginOf = {};
+
+  /// Carve: page object currently wearing the mask for an original.
+  final Map<Stroke, Stroke> _carveLive = {};
+  final Map<Stroke, Stroke> _carveOriginOf = {};
 
   List<Stroke>? _orderDrawOrder;
   Map<Stroke, int>? _orderMap;
   int _orderMapRebuilds = 0;
 
   static const double _minRadius = 1e-3;
-  static const double _areaStepFactor = 0.45;
-  static const double _strokeStepFactor = 0.35;
 
   @override
   ToolId get toolId => ToolId.eraser;
@@ -86,9 +117,10 @@ class Eraser extends Tool {
       _lastAppliedPos = position;
       return true;
     }
-    final step =
-        (size * (mode == EraserMode.area ? _areaStepFactor : _strokeStepFactor))
-            .clamp(1.0, 24.0);
+    // Area/carve still gate on travel, but each accepted call covers the
+    // whole capsule back to [_coveredPos], so the hole ends on the pen.
+    final factor = mode == EraserMode.stroke ? 0.35 : 0.22;
+    final step = (size * factor).clamp(1.0, 18.0);
     final dx = position.dx - last.dx;
     final dy = position.dy - last.dy;
     if (dx * dx + dy * dy < step * step) return false;
@@ -103,178 +135,557 @@ class Eraser extends Tool {
     double? scale,
     int? areaTimeBudgetMs,
   }) {
-    final removed = <Stroke>[];
-    final added = <Stroke>[];
+    // A zero budget is the "yield before doing work" signal used by tests
+    // and by a saturated frame. Callers with a real budget finish the capsule
+    // in this call — partial cuts are what made deleted ink come back.
+    if (areaTimeBudgetMs != null && areaTimeBudgetMs <= 0 && mode.isAreaLike) {
+      return EraserResult(
+        removed: const [],
+        added: const [],
+        areaWorkRemaining: true,
+      );
+    }
 
-    final double sizeInPage = size.clamp(_minRadius, 1e6);
-    final searchRadius = sizeInPage + 30.0;
-    final searchRect = Rect.fromCenter(
-      center: eraserPos,
-      width: searchRadius * 2,
-      height: searchRadius * 2,
-    );
+    final from = _coveredPos ?? eraserPos;
+    final sizeInPage = size.clamp(_minRadius, 1e6);
+    final reach = sizeInPage + 40.0;
+    final minX = (from.dx < eraserPos.dx ? from.dx : eraserPos.dx) - reach;
+    final minY = (from.dy < eraserPos.dy ? from.dy : eraserPos.dy) - reach;
+    final maxX = (from.dx > eraserPos.dx ? from.dx : eraserPos.dx) + reach;
+    final maxY = (from.dy > eraserPos.dy ? from.dy : eraserPos.dy) + reach;
+    final searchRect = Rect.fromLTRB(minX, minY, maxX, maxY);
 
-    final List<Stroke> candidates;
+    final List<Stroke> working;
     if (spatialIndex != null) {
-      candidates = spatialIndex.query(searchRect, _candidateBuffer..clear());
+      working = spatialIndex.query(searchRect, _candidateBuffer..clear());
     } else {
-      candidates = _candidateBuffer
+      working = _candidateBuffer
         ..clear()
         ..addAll(strokes);
     }
-    _sortFrontToBack(candidates, strokes);
+
+    _sortFrontToBack(working, strokes);
+
+    final removed = <Stroke>[];
+    final added = <Stroke>[];
+    final groups = <List<Stroke>>[];
+    var mutated = false;
 
     if (mode == EraserMode.stroke) {
-      for (final stroke in candidates) {
-        if (!_shouldStrokeBeErased(eraserPos, stroke, sizeInPage)) continue;
-        removed.add(stroke);
-        _markStrokeRemoved(stroke);
+      for (final candidate in working) {
+        if (!_capsuleHits(from, eraserPos, candidate, sizeInPage)) continue;
+        removed.add(candidate);
+        groups.add(const []);
+        _markRemoved(candidate);
         break;
       }
-      return EraserResult(removed: removed, added: added);
-    }
-
-    // Area mode — xnotes EraseSession: every overlapping stroke under the
-    // circle is eligible; soft time budget only yields, never caps hit count.
-    final Stopwatch? budget = areaTimeBudgetMs != null
-        ? (Stopwatch()..start())
-        : null;
-    var areaWorkRemaining = false;
-
-    bool overBudget() {
-      if (budget == null) return false;
-      return budget.elapsedMilliseconds >= areaTimeBudgetMs!;
-    }
-
-    for (final candidate in candidates) {
-      if (overBudget()) {
-        areaWorkRemaining = true;
-        break;
-      }
-
-      final strokeHalfWidth = candidate.options.size / 2.0;
-      final hitRadius = (sizeInPage + strokeHalfWidth).clamp(_minRadius, 1e6);
-      final hitRect = Rect.fromCircle(center: eraserPos, radius: hitRadius);
-      if (!candidate.bounds.overlaps(hitRect)) continue;
-
-      final fragmentsOrNull = _erasedByCircle(
-        candidate,
+    } else if (mode == EraserMode.carve) {
+      mutated = _applyCarve(
+        from,
         eraserPos,
-        hitRadius,
+        sizeInPage,
+        working,
+        removed,
+        added,
+        groups,
       );
-      if (fragmentsOrNull == null) continue;
-
-      final fragments = fragmentsOrNull;
-      removed.add(candidate);
-      _markStrokeRemoved(candidate);
-      for (final f in fragments) {
-        added.add(f);
-        _added.add(f);
-      }
-      _recordAreaCut(candidate, fragments);
+    } else {
+      _applyArea(from, eraserPos, sizeInPage, working, removed, added, groups);
     }
 
+    _coveredPos = eraserPos;
     return EraserResult(
       removed: removed,
       added: added,
-      areaWorkRemaining: areaWorkRemaining,
+      replacementGroups: groups,
+      contentMutated: mutated,
     );
   }
 
-  /// Surviving fragments after an eraser circle passes over [stroke].
-  /// `null` = miss, empty = fully erased, otherwise replacement strokes.
-  List<Stroke>? _erasedByCircle(
-    Stroke stroke,
-    Offset center,
+  bool _applyCarve(
+    Offset from,
+    Offset to,
+    double radius,
+    List<Stroke> working,
+    List<Stroke> removed,
+    List<Stroke> added,
+    List<List<Stroke>> groups,
+  ) {
+    var mutated = false;
+    final seen = <Stroke>{};
+    for (final candidate in working) {
+      final origin = _carveOriginOf[candidate] ?? candidate;
+      if (!seen.add(origin)) continue;
+      final live = _carveLive[origin] ?? candidate;
+      if (!_capsuleHits(from, to, live, radius)) continue;
+
+      // Shapes stay the same object: a mask punches the fill without
+      // flattening them into a freehand copy.
+      if (live is ShapeStroke ||
+          live is CircleStroke ||
+          live is RectangleStroke) {
+        live.addCarveSweep(from, to, radius);
+        mutated = true;
+        continue;
+      }
+
+      if (identical(live, origin) && !_carveLive.containsKey(origin)) {
+        final carved = origin.copy();
+        carved.addCarveSweep(from, to, radius);
+        if (carved.carveCoversAllInk(radius)) {
+          removed.add(origin);
+          groups.add(const []);
+          _markRemoved(origin);
+          carved.dispose();
+          continue;
+        }
+        _carveLive[origin] = carved;
+        _carveOriginOf[carved] = origin;
+        _added.add(carved);
+        removed.add(origin);
+        added.add(carved);
+        groups.add([carved]);
+        _markRemoved(origin);
+        continue;
+      }
+
+      live.addCarveSweep(from, to, radius);
+      mutated = true;
+      if (live.carveCoversAllInk(radius)) {
+        removed.add(live);
+        groups.add(const []);
+        _markRemoved(live);
+        _carveLive.remove(origin);
+        _carveOriginOf.remove(live);
+        mutated = false;
+      }
+    }
+    return mutated;
+  }
+
+  void _applyArea(
+    Offset from,
+    Offset to,
+    double radius,
+    List<Stroke> working,
+    List<Stroke> removed,
+    List<Stroke> added,
+    List<List<Stroke>> groups,
+  ) {
+    final seen = <Stroke>{};
+    // Resolve the candidates to their entries before cutting anything.
+    // Cutting an entry replaces its live fragments, so candidates already
+    // returned by the spatial index would otherwise be mistaken for new
+    // strokes: the stale copy then creates a bogus entry and its cut drops
+    // the entry's other fragments from the page (the end-side piece of a
+    // middle cut vanished, leaving only the start side).
+    final targets = <(_AreaEntry, bool)>[];
+    for (final candidate in working) {
+      final origin = _areaOriginOf[candidate] ?? candidate;
+      if (!seen.add(origin)) continue;
+      final isShape =
+          origin is ShapeStroke ||
+          origin is CircleStroke ||
+          origin is RectangleStroke;
+      if (isShape || origin.pointsForEraser.isEmpty) {
+        if (!_capsuleHits(from, to, origin, radius)) continue;
+        targets.add((_entryFor(origin), true));
+        continue;
+      }
+      targets.add((_entryFor(origin), false));
+    }
+
+    for (final (entry, isShapeOrEmpty) in targets) {
+      if (isShapeOrEmpty) {
+        _emitReplacement(entry, const [], removed, added, groups);
+        continue;
+      }
+      final origin = entry.original;
+      final hitRadius = radius + origin.options.size / 2;
+      final next = _subtractCapsule(entry, from, to, hitRadius);
+      if (next == null) continue;
+
+      entry.pieces = next;
+      final fragments = _materialize(origin, next);
+      _emitReplacement(entry, fragments, removed, added, groups);
+    }
+  }
+
+  _AreaEntry _entryFor(Stroke origin) {
+    final existing = _areaByOriginal[origin];
+    if (existing != null) return existing;
+    final entry = _AreaEntry(origin, List<PointVector>.of(origin.pointsForEraser));
+    entry.live = [origin];
+    _areaEntries.add(entry);
+    _areaByOriginal[origin] = entry;
+    return entry;
+  }
+
+  void _emitReplacement(
+    _AreaEntry entry,
+    List<Stroke> fragments,
+    List<Stroke> removed,
+    List<Stroke> added,
+    List<List<Stroke>> groups,
+  ) {
+    final previous = List<Stroke>.of(entry.live);
+    for (var i = 0; i < previous.length; i++) {
+      final old = previous[i];
+      removed.add(old);
+      groups.add(i == 0 ? fragments : const <Stroke>[]);
+      _markRemoved(old);
+      // Keep the mapping for the life of the drag: a replaced fragment may
+      // still be returned by the spatial index in a later candidate sweep,
+      // and must resolve back to this entry instead of becoming a new one.
+    }
+    for (final frag in fragments) {
+      _added.add(frag);
+      added.add(frag);
+      _areaOriginOf[frag] = entry.original;
+    }
+    entry.live = List<Stroke>.of(fragments);
+  }
+
+  /// Returns null on a clean miss. Otherwise every surviving polyline, which
+  /// may be empty when the capsule covers the stroke.
+  ///
+  /// Samples outside the capsule are the original points. A segment that
+  /// crosses the capsule is cut at the boundary, so a sparse stroke splits
+  /// in two instead of disappearing when only one sample was inside.
+  List<List<PointVector>>? _subtractCapsule(
+    _AreaEntry entry,
+    Offset from,
+    Offset to,
     double radius,
   ) {
-    final points = stroke.pointsForEraser;
-    if (points.isEmpty) {
-      return _shouldStrokeBeErased(center, stroke, size)
-          ? const <Stroke>[]
-          : null;
+    if (entry.points.isEmpty) return const [];
+    final source = entry.pieces ?? [entry.points];
+    final out = <List<PointVector>>[];
+    var anyHit = false;
+    for (final piece in source) {
+      final split = _splitPolyline(piece, from, to, radius);
+      if (split == null) {
+        out.add(piece);
+      } else {
+        anyHit = true;
+        out.addAll(split);
+      }
+    }
+    if (!anyHit) return null;
+    return out;
+  }
+
+  List<List<PointVector>>? _splitPolyline(
+    List<PointVector> pts,
+    Offset from,
+    Offset to,
+    double radius,
+  ) {
+    if (pts.isEmpty) return const [];
+    final r2 = radius * radius;
+    final out = <List<PointVector>>[];
+    List<PointVector>? cur;
+    var anyHit = false;
+
+    void flush() {
+      final piece = cur;
+      cur = null;
+      // Keep single-point survivors as dots instead of dropping them:
+      // dropping a 1-sample tail is what made the end-point side vanish
+      // entirely on short/sparse strokes (only the start side remained).
+      if (piece != null && piece.isNotEmpty) out.add(piece);
     }
 
-    if (stroke is ShapeStroke ||
-        stroke is CircleStroke ||
-        stroke is RectangleStroke) {
-      return stroke.isHitByCircle(center, size) ? const <Stroke>[] : null;
+    void addPt(PointVector p) {
+      final list = cur ??= <PointVector>[];
+      if (list.isNotEmpty) {
+        final last = list.last;
+        final dx = last.x - p.x;
+        final dy = last.y - p.y;
+        if (dx * dx + dy * dy < 1e-8) return;
+      }
+      list.add(p);
     }
 
-    final radiusSqr = radius * radius;
-    final cx = center.dx;
-    final cy = center.dy;
-    final n = points.length;
-    var anyErased = false;
-    var runStart = -1;
-    final ranges = <(int, int)>[];
+    bool inside(PointVector p) => _distSqToSeg(p.x, p.y, from, to) <= r2;
 
-    for (var i = 0; i < n; i++) {
-      final p = points[i];
-      final dx = p.x - cx;
-      final dy = p.y - cy;
-      if (dx * dx + dy * dy <= radiusSqr) {
-        anyErased = true;
-        if (runStart >= 0) {
-          ranges.add((runStart, i - 1));
-          runStart = -1;
+    for (var i = 0; i < pts.length; i++) {
+      final p = pts[i];
+      final inn = inside(p);
+      if (i == 0) {
+        if (inn) {
+          anyHit = true;
+        } else {
+          addPt(p);
         }
-      } else if (runStart < 0) {
-        runStart = i;
+        continue;
+      }
+      final prev = pts[i - 1];
+      final prevIn = inside(prev);
+      if (!prevIn && !inn) {
+        final cuts = _segmentCuts(prev, p, from, to, r2);
+        if (cuts == null) {
+          addPt(p);
+        } else {
+          anyHit = true;
+          addPt(_lerpPoint(prev, p, cuts.$1));
+          flush();
+          addPt(_lerpPoint(prev, p, cuts.$2));
+          addPt(p);
+        }
+      } else if (!prevIn && inn) {
+        anyHit = true;
+        addPt(_lerpPoint(prev, p, _lastOutsideT(prev, p, 0, 1, from, to, r2)));
+        flush();
+      } else if (prevIn && !inn) {
+        anyHit = true;
+        addPt(_lerpPoint(prev, p, _firstOutsideT(prev, p, 0, 1, from, to, r2)));
+        addPt(p);
+      } else {
+        anyHit = true;
       }
     }
-    if (runStart >= 0) ranges.add((runStart, n - 1));
-    if (!anyErased) return null;
+    flush();
+    if (!anyHit) return null;
+    return out;
+  }
 
-    final strokeWidth = stroke.options.size;
-    final minKeepDistSq = (strokeWidth * 0.12) * (strokeWidth * 0.12);
+  /// Enter/exit parameters on [a]→[b] when both ends are outside the capsule
+  /// but the segment still crosses it. Null when the segment misses.
+  (double, double)? _segmentCuts(
+    PointVector a,
+    PointVector b,
+    Offset from,
+    Offset to,
+    double r2,
+  ) {
+    var s = _closestT(a, b, from, to);
+    var mid = _lerpPoint(a, b, s);
+    if (_distSqToSeg(mid.x, mid.y, from, to) > r2) {
+      // [_closestT] can return an outside endpoint for (near-)parallel
+      // overlapping segments (it snaps to s=0). Sample for any inside
+      // point to bracket the cut instead of missing a real crossing.
+      double? insideT;
+      const samples = [0.5, 0.25, 0.75, 0.125, 0.375, 0.625, 0.875];
+      for (final t in samples) {
+        final p = _lerpPoint(a, b, t);
+        if (_distSqToSeg(p.x, p.y, from, to) <= r2) {
+          insideT = t;
+          break;
+        }
+      }
+      if (insideT == null) return null;
+      s = insideT;
+      mid = _lerpPoint(a, b, s);
+    }
+    final enter = _lastOutsideT(a, b, 0, s, from, to, r2);
+    final exit = _firstOutsideT(a, b, s, 1, from, to, r2);
+    if (exit <= enter + 1e-4) return null;
+    return (enter, exit);
+  }
+
+  /// Highest t in [lo, hi] that is still outside. [lo] is outside, [hi] inside.
+  double _lastOutsideT(
+    PointVector a,
+    PointVector b,
+    double lo,
+    double hi,
+    Offset from,
+    Offset to,
+    double r2,
+  ) {
+    var left = lo;
+    var right = hi;
+    for (var n = 0; n < 20; n++) {
+      final mid = (left + right) * 0.5;
+      final p = _lerpPoint(a, b, mid);
+      if (_distSqToSeg(p.x, p.y, from, to) <= r2) {
+        right = mid;
+      } else {
+        left = mid;
+      }
+    }
+    return left;
+  }
+
+  /// Lowest t in [lo, hi] that is outside. [lo] is inside, [hi] outside.
+  double _firstOutsideT(
+    PointVector a,
+    PointVector b,
+    double lo,
+    double hi,
+    Offset from,
+    Offset to,
+    double r2,
+  ) {
+    var left = lo;
+    var right = hi;
+    for (var n = 0; n < 20; n++) {
+      final mid = (left + right) * 0.5;
+      final p = _lerpPoint(a, b, mid);
+      if (_distSqToSeg(p.x, p.y, from, to) <= r2) {
+        left = mid;
+      } else {
+        right = mid;
+      }
+    }
+    return right;
+  }
+
+  PointVector _lerpPoint(PointVector a, PointVector b, double t) {
+    return PointVector(
+      a.x + (b.x - a.x) * t,
+      a.y + (b.y - a.y) * t,
+      Stroke.lerpPressure(a.pressure, b.pressure, t),
+    );
+  }
+
+  /// Parameter on [a]→[b] of the point closest to the eraser segment.
+  double _closestT(PointVector a, PointVector b, Offset c, Offset d) {
+    final ux = b.x - a.x;
+    final uy = b.y - a.y;
+    final vx = d.dx - c.dx;
+    final vy = d.dy - c.dy;
+    final wx = a.x - c.dx;
+    final wy = a.y - c.dy;
+    final aa = ux * ux + uy * uy;
+    final bb = ux * vx + uy * vy;
+    final cc = vx * vx + vy * vy;
+    const tiny = 1e-12;
+    // Degenerate stroke segment (duplicate samples): every t is the same
+    // point, so the closest is trivially the start.
+    if (aa < tiny) return 0;
+    // Point eraser (tap without drag): project the eraser point onto the
+    // stroke segment. The generic segment-segment path below divides by
+    // cc (≈0 here) and always returns 0, so sparse strokes whose samples
+    // straddle a tap were never split (miss instead of two fragments).
+    if (cc < tiny) {
+      final t = ((c.dx - a.x) * ux + (c.dy - a.y) * uy) / aa;
+      if (t < 0) return 0;
+      if (t > 1) return 1;
+      return t;
+    }
+    final dd = ux * wx + uy * wy;
+    final ee = vx * wx + vy * wy;
+    final denom = aa * cc - bb * bb;
+    var sN = 0.0;
+    var sD = denom;
+    var tN = 0.0;
+    var tD = denom;
+    if (denom < tiny) {
+      sN = 0;
+      sD = 1;
+      tN = ee;
+      tD = cc;
+    } else {
+      sN = bb * ee - cc * dd;
+      tN = aa * ee - bb * dd;
+      if (sN < 0) {
+        sN = 0;
+        tN = ee;
+        tD = cc;
+      } else if (sN > sD) {
+        sN = sD;
+        tN = ee + bb;
+        tD = cc;
+      }
+    }
+    if (tN < 0) {
+      tN = 0;
+      if (-dd < 0) {
+        sN = 0;
+      } else if (-dd > aa) {
+        sN = sD;
+      } else {
+        sN = -dd;
+        sD = aa;
+      }
+    } else if (tN > tD) {
+      tN = tD;
+      if (-dd + bb < 0) {
+        sN = 0;
+      } else if (-dd + bb > aa) {
+        sN = sD;
+      } else {
+        sN = -dd + bb;
+        sD = aa;
+      }
+    }
+    if (sD.abs() < tiny) return 0;
+    final s = sN / sD;
+    if (s < 0) return 0;
+    if (s > 1) return 1;
+    return s;
+  }
+
+  List<Stroke> _materialize(Stroke origin, List<List<PointVector>> pieces) {
+    if (pieces.isEmpty) return const [];
+    final anchor = origin.paintAnchorBounds ?? origin.bounds;
     final out = <Stroke>[];
-    for (final (start, end) in ranges) {
-      final segLength = end - start + 1;
-      if (segLength < 2) continue;
-      if (segLength == 2) {
-        final first = points[start];
-        final last = points[end];
-        final dx = first.x - last.x;
-        final dy = first.y - last.y;
-        if (dx * dx + dy * dy < minKeepDistSq) continue;
+    for (var piece in pieces) {
+      if (piece.isEmpty) continue;
+      // Single-sample survivor (tiny tip after a middle cut on a short or
+      // sparse stroke): duplicate with a micro-offset so it stays valid
+      // ink (>=2 samples, like Pen.onDragEnd dots) instead of vanishing
+      // and taking the whole end-point side with it.
+      if (piece.length == 1) {
+        final p = piece.first;
+        piece = [
+          p,
+          PointVector(p.x + 0.1, p.y + 0.1, p.pressure),
+        ];
       }
-      final frag = stroke.cloneForEraserFragment();
-      frag.replacePointRangeFromEraser(points, start, end);
-      if (stroke.toolId == ToolId.highlighter) {
-        frag.color = Color(stroke.color.value);
-      }
+      final frag = origin.cloneForEraserFragment();
+      frag.replacePointsFromEraser(piece);
+      if (origin.toolId == ToolId.highlighter) frag.color = origin.color;
+      frag.paintAnchorBounds = anchor;
       out.add(frag);
     }
     return out;
   }
 
-  void _recordAreaCut(Stroke item, List<Stroke> fragments) {
-    final original = _areaOriginOf[item];
-    final entry = original != null ? _areaByOriginal[original] : null;
-    if (entry == null) {
-      final fresh = _AreaEraseEntry(item);
-      fresh.fragments.addAll(fragments);
-      _areaEntries.add(fresh);
-      _areaByOriginal[item] = fresh;
-      for (final f in fragments) {
-        _areaOriginOf[f] = item;
-      }
-      return;
+  bool _capsuleHits(Offset from, Offset to, Stroke stroke, double radius) {
+    final effective = radius + stroke.options.size / 2;
+    final rect = Rect.fromLTRB(
+      (from.dx < to.dx ? from.dx : to.dx) - effective,
+      (from.dy < to.dy ? from.dy : to.dy) - effective,
+      (from.dx > to.dx ? from.dx : to.dx) + effective,
+      (from.dy > to.dy ? from.dy : to.dy) + effective,
+    );
+    if (!stroke.bounds.overlaps(rect)) return false;
+    if ((to - from).distance < 0.5) {
+      return stroke.isHitByCircle(to, radius);
     }
-    final slot = entry.fragments.indexWhere((e) => identical(e, item));
-    if (slot >= 0) {
-      entry.fragments.removeAt(slot);
-      entry.fragments.insertAll(slot, fragments);
+    // Sample the capsule so a flick still hits strokes between events.
+    const steps = 4;
+    for (var i = 0; i <= steps; i++) {
+      final t = i / steps;
+      final c = Offset(
+        from.dx + (to.dx - from.dx) * t,
+        from.dy + (to.dy - from.dy) * t,
+      );
+      if (stroke.isHitByCircle(c, radius)) return true;
     }
-    _areaOriginOf.remove(item);
-    for (final f in fragments) {
-      _areaOriginOf[f] = entry.original;
-    }
+    return false;
   }
 
-  /// Rebuilds only when [drawOrder] identity/length changes or a candidate
-  /// is missing. Misses on a stable page must not scan every stroke again.
+  static double _distSqToSeg(double px, double py, Offset a, Offset b) {
+    final abx = b.dx - a.dx;
+    final aby = b.dy - a.dy;
+    final ab2 = abx * abx + aby * aby;
+    if (ab2 < 1e-8) {
+      final dx = px - a.dx;
+      final dy = py - a.dy;
+      return dx * dx + dy * dy;
+    }
+    var t = ((px - a.dx) * abx + (py - a.dy) * aby) / ab2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    final dx = px - (a.dx + abx * t);
+    final dy = py - (a.dy + aby * t);
+    return dx * dx + dy * dy;
+  }
+
   void _sortFrontToBack(List<Stroke> candidates, List<Stroke> drawOrder) {
     if (candidates.length < 2) return;
     var order = _orderMap;
@@ -284,7 +695,7 @@ class Eraser extends Tool {
         order.length != drawOrder.length;
     if (!rebuild) {
       for (final candidate in candidates) {
-        if (!order!.containsKey(candidate)) {
+        if (!order.containsKey(candidate)) {
           rebuild = true;
           break;
         }
@@ -305,29 +716,13 @@ class Eraser extends Tool {
 
   int get debugOrderMapRebuildCount => _orderMapRebuilds;
 
-  void _markStrokeRemoved(Stroke stroke) {
+  void _markRemoved(Stroke stroke) {
     if (_added.contains(stroke)) {
       _added.remove(stroke);
       _toDispose.add(stroke);
     } else {
       _erased.add(stroke);
     }
-  }
-
-  static bool _shouldStrokeBeErased(
-    Offset eraserPos,
-    Stroke stroke,
-    double eraserSize,
-  ) {
-    final effectiveRadius = (eraserSize + stroke.options.size / 2).clamp(
-      _minRadius,
-      1e6,
-    );
-    final hitRect = Rect.fromCircle(center: eraserPos, radius: effectiveRadius);
-
-    if (!stroke.bounds.overlaps(hitRect)) return false;
-
-    return stroke.isHitByCircle(eraserPos, eraserSize);
   }
 
   (List<Stroke> erased, List<Stroke> added, List<Stroke> toDispose)
@@ -346,6 +741,9 @@ class Eraser extends Tool {
     _areaEntries.clear();
     _areaByOriginal.clear();
     _areaOriginOf.clear();
+    _carveLive.clear();
+    _carveOriginOf.clear();
     _lastAppliedPos = null;
+    _coveredPos = null;
   }
 }

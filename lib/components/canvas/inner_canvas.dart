@@ -48,15 +48,39 @@ double _canvasDevicePixelRatio() {
   return views.first.devicePixelRatio.clamp(1.0, 4.0);
 }
 
-List<ui.Vertices> mergeStrokeMeshes(List<(Float32List, Uint16List)> chunks) {
+List<ui.Vertices> mergeStrokeMeshes(
+  List<(Float32List, Uint16List)> chunks, [
+  Rect? clip,
+]) {
   if (chunks.isEmpty) return const [];
-  if (chunks.length == 1) {
-    return [ui.Vertices.raw(ui.VertexMode.triangles, chunks.first.$1, indices: chunks.first.$2)];
+  // Tile-local bucketing: a long stroke spanning many tiles replays only
+  // its local triangles per tile instead of the whole mesh per tile.
+  var useChunks = chunks;
+  if (clip != null) {
+    final clipped = <(Float32List, Uint16List)>[];
+    for (final chunk in chunks) {
+      final part = Stroke.clipMeshArrays(
+        chunk.$1,
+        chunk.$2,
+        null,
+        clip,
+      );
+      if (part != null &&
+          part.positions.isNotEmpty &&
+          part.indices.isNotEmpty) {
+        clipped.add((part.positions, part.indices));
+      }
+    }
+    if (clipped.isEmpty) return const [];
+    useChunks = clipped;
+  }
+  if (useChunks.length == 1) {
+    return [ui.Vertices.raw(ui.VertexMode.triangles, useChunks.first.$1, indices: useChunks.first.$2)];
   }
   final out = <ui.Vertices>[];
   var posCount = 0;
   var indCount = 0;
-  for (final chunk in chunks) {
+  for (final chunk in useChunks) {
     posCount += chunk.$1.length;
     indCount += chunk.$2.length;
   }
@@ -66,7 +90,7 @@ List<ui.Vertices> mergeStrokeMeshes(List<(Float32List, Uint16List)> chunks) {
     var pOffset = 0;
     var iOffset = 0;
     var vertexOffset = 0;
-    for (final chunk in chunks) {
+    for (final chunk in useChunks) {
       pos.setAll(pOffset, chunk.$1);
       for (var i = 0; i < chunk.$2.length; i++) {
         ind[iOffset + i] = chunk.$2[i] + vertexOffset;
@@ -77,33 +101,92 @@ List<ui.Vertices> mergeStrokeMeshes(List<(Float32List, Uint16List)> chunks) {
     }
     out.add(ui.Vertices.raw(ui.VertexMode.triangles, pos, indices: ind));
   } else {
-    for (final chunk in chunks) {
+    for (final chunk in useChunks) {
       out.add(ui.Vertices.raw(ui.VertexMode.triangles, chunk.$1, indices: chunk.$2));
     }
   }
   return out;
 }
 
-Map<int, List<ui.Vertices>> mergeSolidStrokeMeshesByColor(
+/// Temporal ordered mesh batches: consecutive batchable same-color strokes
+/// merge into one run, preserving first-appearance order (newer ink ends on
+/// top across color changes). Replaces color-keyed global batching, which
+/// painted all of one color before another regardless of time. Runs carry an
+/// identity index ([OrderedMeshBatches.draw]) so culled subsets still align.
+OrderedMeshBatches? buildOrderedMeshBatches(
   List<Stroke> strokes,
-  double scale,
-) {
+  double scale, {
+  Rect? clip,
+}) {
   final clamped = scale.clamp(0.1, 5.0);
-  final byColor = <int, List<(Float32List, Uint16List)>>{};
-  for (final stroke in strokes) {
+  final runs = <MeshBatchRun>[];
+  final draw = <Stroke, MeshBatchRun?>{};
+  var curFirst = -1;
+  var curColor = -1;
+  var curMembers = 0;
+  final curChunks = <(Float32List, Uint16List)>[];
+
+  void flushCur() {
+    if (curFirst < 0 || curChunks.isEmpty || curMembers <= 0) {
+      curFirst = -1;
+      curMembers = 0;
+      curChunks.clear();
+      return;
+    }
+    final meshes = mergeStrokeMeshes(curChunks, clip);
+    if (meshes.isNotEmpty) {
+      final run = MeshBatchRun(
+        first: strokes[curFirst],
+        colorKey: curColor,
+        meshes: meshes,
+      );
+      runs.add(run);
+      // Every member maps to its run (not just the first): the painter walks
+      // a possibly culled subset, and the first present member triggers the
+      // run while a per-paint drawn-set suppresses replays.
+      for (var i = curFirst;
+          i < curFirst + curMembers && i < strokes.length;
+          i++) {
+        draw[strokes[i]] = run;
+      }
+    }
+    curFirst = -1;
+    curMembers = 0;
+    curChunks.clear();
+  }
+
+  for (var i = 0; i < strokes.length; i++) {
+    final stroke = strokes[i];
     stroke.setLodScale(clamped);
-    if (!_strokeCanMergeSolidMesh(stroke)) continue;
+    if (!_strokeCanMergeSolidMesh(stroke)) {
+      flushCur();
+      continue;
+    }
     final chunks = stroke.solidMeshChunks;
-    if (chunks.isEmpty) continue;
-    byColor.putIfAbsent(stroke.color.toARGB32(), () => []).addAll(chunks);
+    if (chunks.isEmpty) {
+      flushCur();
+      continue;
+    }
+    final key = stroke.color.toARGB32();
+    if (curFirst < 0) {
+      curFirst = i;
+      curColor = key;
+    } else if (key != curColor) {
+      flushCur();
+      curFirst = i;
+      curColor = key;
+    }
+    curChunks.addAll(chunks);
+    curMembers++;
   }
-  final merged = <int, List<ui.Vertices>>{};
-  for (final entry in byColor.entries) {
-    final meshes = mergeStrokeMeshes(entry.value);
-    if (meshes.isNotEmpty) merged[entry.key] = meshes;
-  }
-  return merged;
+  flushCur();
+  if (runs.isEmpty) return null;
+  return OrderedMeshBatches(runs, draw);
 }
+
+/// Paint-time lookup: every batchable member maps to its run (not just the
+/// first), so culled subsets still trigger their runs — the clip rect keeps
+/// offscreen parts cheap. Built once per paint content, not per frame.
 
 class InnerCanvas extends StatefulWidget {
   const InnerCanvas({
@@ -202,12 +285,99 @@ class InnerCanvasState extends State<InnerCanvas> {
 
   bool _linkMarkersCollapsed = true;
 
+  /// Raster-drag snapshot for massive selections (see
+  /// [CanvasPainter.captureSelectionRaster]): one blit per frame instead of a
+  /// full vector replay while transforming. Captured once per gesture;
+  /// cleared on gesture end, selection/page/scale/invert change, or dispose.
+  ui.Image? _selectionRasterImage;
+  Rect? _selectionRasterBounds;
+  SelectResult? _selectionRasterFor;
+  int _selectionRasterStrokeCount = -1;
+  double _selectionRasterScale = 1.0;
+  bool _selectionRasterInvert = false;
+
+  void _dropSelectionRaster() {
+    _selectionRasterImage?.dispose();
+    _selectionRasterImage = null;
+    _selectionRasterBounds = null;
+    _selectionRasterFor = null;
+    _selectionRasterStrokeCount = -1;
+  }
+
+  /// Keeps [_selectionRasterImage] in sync with the transform gesture.
+  /// Capture-once semantics: threshold + capture run only for a new selection
+  /// session; every other build just validates scale/invert drift (cheap).
+  void _syncSelectionRaster({
+    required ThemeData theme,
+    required bool invert,
+    required EditorPage page,
+  }) {
+    final selection = widget.currentSelection;
+    final preview = widget.selectionPreview;
+    if (widget.isPreview ||
+        widget.isPrint ||
+        selection == null ||
+        selection.strokes.isEmpty ||
+        preview == null) {
+      if (_selectionRasterImage != null) _dropSelectionRaster();
+      return;
+    }
+    if (identical(_selectionRasterFor, selection) &&
+        _selectionRasterImage != null &&
+        selection.strokes.length == _selectionRasterStrokeCount) {
+      // Same session: drop on zoom drift or wild gesture scale (vector
+      // fallback stays sharp; no recapture churn mid-gesture).
+      final scale = widget.currentScale;
+      if (invert != _selectionRasterInvert ||
+          (scale - _selectionRasterScale).abs() / _selectionRasterScale >
+              0.15 ||
+          preview.scale > SelectionRasterTuning.maxGestureScale) {
+        _dropSelectionRaster();
+      }
+      return;
+    }
+    // New session: threshold gate (O(N) point census once per gesture).
+    _dropSelectionRaster();
+    var points = 0;
+    for (final s in selection.strokes) {
+      points += s.sampleCount;
+    }
+    if (!SelectionRasterTuning.shouldRasterize(
+      strokeCount: selection.strokes.length,
+      pointCount: points,
+    )) {
+      return;
+    }
+    final captured = CanvasPainter.captureSelectionRaster(
+      strokes: selection.strokes,
+      selectionForTint: selection,
+      page: page,
+      invert: invert,
+      primaryColor: theme.colorScheme.primary,
+      pageIndex: widget.pageIndex,
+      totalPages: widget.coreInfo.pages.length,
+      currentScale: widget.currentScale,
+      defaultTextStyle: theme.textTheme.bodyMedium!,
+      lineHeight: widget.lineHeight,
+      lineThickness: widget.lineThickness?.toDouble(),
+      lineColor: widget.lineColor,
+    );
+    if (captured == null) return;
+    _selectionRasterImage = captured.image;
+    _selectionRasterBounds = captured.bounds;
+    _selectionRasterFor = selection;
+    _selectionRasterStrokeCount = selection.strokes.length;
+    _selectionRasterScale = widget.currentScale;
+    _selectionRasterInvert = invert;
+  }
+
   int _lastStrokeCount = 0;
   int _lastLayerOrderHash = 0;
   int _lastLaserStrokeCount = 0;
   int _lastObservedSaveBinaryRevision = -1;
   Rect? _eraserSessionDirty;
   bool _eraserNeedsFullInvalidate = false;
+  Offset? _eraserSweepFrom;
 
   TiledStrokePictureCache? _localStrokePictureCache;
 
@@ -259,9 +429,11 @@ class InnerCanvasState extends State<InnerCanvas> {
   int _cachedFlatSaveBinaryRevision = -1;
   int _cachedFlatStrokeCount = -1;
   int _cachedFlatLayerOrderHash = -1;
-  Map<int, List<ui.Vertices>>? _cachedBatchedMeshes;
-  double _cachedBatchScale = -1;
-  int _cachedBatchStrokeCount = -1;
+  // Split views cached alongside the flat list so `_buildContent` stays O(1)
+  // on frozen/live rebuilds instead of re-running two O(S) `where` scans per
+  // build (the dense-page tax on every pan/zoom/live frame).
+  List<Stroke>? _cachedCommittedInkStrokes;
+  List<Stroke>? _cachedCommittedHighlighterStrokes;
 
   final List<Stroke> _pendingInk = [];
   final Set<Stroke> _pendingInkSet = {};
@@ -278,30 +450,13 @@ class InnerCanvasState extends State<InnerCanvas> {
     _cachedFlatSaveBinaryRevision = -1;
     _cachedFlatStrokeCount = -1;
     _cachedFlatLayerOrderHash = -1;
-    _cachedBatchedMeshes = null;
-    _cachedBatchScale = -1;
-    _cachedBatchStrokeCount = -1;
-  }
-
-  Map<int, List<ui.Vertices>> _buildBatchedMeshes(
-    List<Stroke> strokes,
-    double scale,
-  ) {
-    final clamped = scale.clamp(0.1, 5.0);
-    if (_cachedBatchedMeshes != null &&
-      _cachedBatchStrokeCount == strokes.length &&
-      (_cachedBatchScale - clamped).abs() < 0.001) {
-      return _cachedBatchedMeshes!;
-      }
-      final merged = mergeSolidStrokeMeshesByColor(strokes, clamped);
-    _cachedBatchedMeshes = merged;
-    _cachedBatchScale = clamped;
-    _cachedBatchStrokeCount = strokes.length;
-    return merged;
+    _cachedCommittedInkStrokes = null;
+    _cachedCommittedHighlighterStrokes = null;
   }
 
   List<Stroke> _reuseTiledSnapshot(List<Stroke> next) {
     final prev = _tiledStrokesSnapshot;
+    if (identical(prev, next)) return prev;
     if (prev.length == next.length) {
       var same = true;
       for (var i = 0; i < next.length; i++) {
@@ -316,12 +471,67 @@ class InnerCanvasState extends State<InnerCanvas> {
     return next;
   }
 
+  /// Wet-ink overlay: finished strokes stay painted as vectors until their
+  /// tiles have actually recorded them. Without this, pen-up must synchronously
+  /// re-record every dirty dense tile in one frame (~29ms measured) or fresh
+  /// ink blinks through fallback quality — either way the next stroke starts
+  /// behind the pen. Bounded (a text letter dirties 1-2 tiles); the paint loop
+  /// already draws `pendingStrokes` without culling, and opaque replays over
+  /// baked tiles are pixel-identical, so overdraw while converging is free.
+  static const _maxWetInkStrokes = 8;
+
+  void _pushWetInk(Stroke stroke) {
+    _pendingInk.remove(stroke);
+    _pendingInk.add(stroke);
+    _pendingInkSet.add(stroke);
+    while (_pendingInk.length > _maxWetInkStrokes) {
+      final dropped = _pendingInk.removeAt(0);
+      _pendingInkSet.remove(dropped);
+    }
+    _ensureWetInkClearListener();
+  }
+
+  /// Drops wet-ink cover once tiles caught up (checked on every tile record
+  /// while cover is active — O(1) flag read). Also reconciled against removals
+  /// in [_applyPageStrokeDelta] so undone/erased strokes never ghost.
+  void _onTileRecordedForWetInk() {
+    if (_pendingInk.isEmpty) return;
+    final cache = _wetInkCache ?? _strokePictureCache;
+    if (cache.visibleTilesCaughtUp) {
+      _pendingInk.clear();
+      _pendingInkSet.clear();
+      _pendingGeneration++;
+      _pendingRepaint.value++;
+      _dropWetInkClearListener();
+    }
+  }
+
+  void _ensureWetInkClearListener() {
+    if (_wetInkListening) return;
+    final cache = _strokePictureCache;
+    _wetInkCache = cache;
+    _wetInkListening = true;
+    cache.recordGeneration.addListener(_onTileRecordedForWetInk);
+  }
+
+  void _dropWetInkClearListener() {
+    if (!_wetInkListening) return;
+    _wetInkListening = false;
+    final cache = _wetInkCache;
+    _wetInkCache = null;
+    cache?.recordGeneration.removeListener(_onTileRecordedForWetInk);
+  }
+
+  bool _wetInkListening = false;
+  TiledStrokePictureCache? _wetInkCache;
+
   void _clearPendingInk() {
     _pendingBakeTimer?.cancel();
     _pendingBakeTimer = null;
     _pendingInk.clear();
     _pendingInkSet.clear();
     _pendingGeneration++;
+    _dropWetInkClearListener();
   }
 
   void _bakePendingNow() {
@@ -344,53 +554,133 @@ class InnerCanvasState extends State<InnerCanvas> {
     _pendingRepaint.value++;
   }
 
+  /// Test hook: strokes currently painted as the wet-ink overlay above tiles.
+  List<Stroke> get debugPendingInkStrokes => List<Stroke>.of(_pendingInk);
+
   /// Keep Picture tiles in sync with page strokes. New ink is recorded into
   /// overlapping 512px tiles only (merged `drawVertices`), not deferred off
   /// the tiled layer — that path dropped strokes on pen-up.
   void _applyPageStrokeDelta(EditorPage page) {
     final previous = _pageStrokeSnapshot;
     final current = page.allStrokesInDrawOrder.toList(growable: false);
-    final prevSet = previous.toSet();
-    final currentSet = current.toSet();
 
+    // Fast path: single append (every pen-up while writing). The generic diff
+    // below builds two O(S) hash sets per commit (~1.5ms at 2000 strokes, plus
+    // GC churn at one pen-up per letter while writing text). Both snapshots
+    // are in draw order and differ by exactly one inserted stroke, so a
+    // two-pointer identity scan finds it in O(S) pointer compares with zero
+    // allocations — robust to sorted insert position and shape conversion
+    // (the converted ShapeStroke is simply the element with no match).
     Rect? dirty;
     var changed = previous.length != current.length;
-    for (final stroke in previous) {
-      if (currentSet.contains(stroke)) continue;
-      changed = true;
-      if (_pendingInkSet.remove(stroke)) {
-        _pendingInk.remove(stroke);
+    var fastPath = false;
+    Stroke? fastAdded;
+    if (current.length == previous.length + 1) {
+      Stroke? extra;
+      var i = 0, j = 0;
+      var ambiguous = false;
+      while (i < previous.length && j < current.length) {
+        if (identical(previous[i], current[j])) {
+          i++;
+          j++;
+        } else if (extra == null) {
+          extra = current[j];
+          j++;
+        } else {
+          ambiguous = true;
+          break;
+        }
       }
-      final bounds = stroke.bounds;
-      if (bounds.isFinite && !bounds.isEmpty) {
-        dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
+      if (!ambiguous) {
+        if (extra == null) {
+          // Sole remainder at the tail.
+          if (j < current.length && i >= previous.length) {
+            final rest = current.length - j;
+            if (rest == 1) extra = current[j];
+          }
+        } else {
+          // Trailing remainder beyond the insertion must be empty for a
+          // single-append.
+          if (j < current.length || i < previous.length) ambiguous = true;
+        }
+      }
+      // The wet-ink commit below paints above every tile, so it is only
+      // z-correct when the appended stroke IS the top of the draw order (the
+      // common single-layer pen-up). An append beneath existing ink falls
+      // through to the complex path, whose eager refill shows it in its real
+      // slot instead of blinking on top of newer strokes.
+      if (!ambiguous && extra != null && identical(current.last, extra)) {
+        fastPath = true;
+        fastAdded = extra;
+        changed = true;
+        final bounds = extra.bounds;
+        if (bounds.isFinite && !bounds.isEmpty) dirty = bounds;
       }
     }
-    for (final stroke in current) {
-      if (prevSet.contains(stroke)) continue;
-      changed = true;
-      final bounds = stroke.bounds;
-      if (bounds.isFinite && !bounds.isEmpty) {
-        dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
+    Set<Stroke>? prevSet;
+    Set<Stroke>? currentSet;
+    if (!fastPath) {
+      prevSet = previous.toSet();
+      currentSet = current.toSet();
+
+      for (final stroke in previous) {
+        if (currentSet.contains(stroke)) continue;
+        changed = true;
+        if (_pendingInkSet.remove(stroke)) {
+          _pendingInk.remove(stroke);
+        }
+        final bounds = stroke.bounds;
+        if (bounds.isFinite && !bounds.isEmpty) {
+          dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
+        }
+      }
+      for (final stroke in current) {
+        if (prevSet.contains(stroke)) continue;
+        changed = true;
+        if (stroke.toolId != ToolId.highlighter || stroke.hasCarve) {
+          _pushWetInk(stroke);
+        }
+        final bounds = stroke.bounds;
+        if (bounds.isFinite && !bounds.isEmpty) {
+          dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
+        }
+      }
+      // Safety net: wet cover must never outlive its stroke (undo/erase of a
+      // still-baking stroke would otherwise ghost it until catch-up).
+      if (_pendingInk.isNotEmpty) {
+        _pendingInk.removeWhere((s) => !currentSet!.contains(s));
+        _pendingInkSet
+          ..clear()
+          ..addAll(_pendingInk);
+        if (_pendingInk.isEmpty) _dropWetInkClearListener();
       }
     }
     _pageStrokeSnapshot = current;
-    final currentInk = current.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+    final currentInk = current;
     _liveTiledStrokes.strokes = currentInk;
     if (!changed) return;
 
     _pendingBakeTimer?.cancel();
     _pendingBakeTimer = null;
-    _pendingInk.clear();
-    _pendingInkSet.clear();
     _pendingGeneration++;
     _invalidateCommittedStrokesFlatCache();
     _tiledStrokesSnapshot = currentInk;
-    // Eager refill: the live overlay is cleared above, so the committed tiles
-    // must be complete in this same frame — otherwise a fresh stroke blinks
-    // (gone for a frame, then popping in progressively), most visible on
-    // dense pages. The dirty rect is small (just the delta bounds).
-    _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true);
+    if (fastPath && fastAdded != null) {
+      // Wet-ink commit (every pen-up while writing): the finished stroke stays
+      // painted as vectors via pendingStrokes, so tiles refill progressively
+      // within frame budgets instead of one ~29ms synchronous block that used
+      // to start the next stroke behind the pen. No blink (pending covers),
+      // no rush (fallback + chaining converge).
+      if (fastAdded.toolId != ToolId.highlighter || fastAdded.hasCarve) {
+        _pushWetInk(fastAdded);
+      }
+      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: false);
+    } else if (!fastPath) {
+      // Complex ops (undo/redo/erase/paste): synchronous eager refill as
+      // before — scope is computed, not assumed. Replacements render from
+      // tiles in draw order (never from the above-everything wet cover).
+      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true);
+    }
     _layer2Repaint.value++;
     _pendingRepaint.value++;
   }
@@ -534,7 +824,7 @@ class InnerCanvasState extends State<InnerCanvas> {
       _lastStrokeCount = _totalStrokesAcrossLayers(page);
       _lastObservedSaveBinaryRevision = page.saveBinaryRevision;
       _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-      _liveTiledStrokes.strokes = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+      _liveTiledStrokes.strokes = _pageStrokeSnapshot;
     }
     _syncShapePreviewTicker();
     StrokePaintImageCache.instance.revision.addListener(
@@ -695,58 +985,51 @@ class InnerCanvasState extends State<InnerCanvas> {
 
       if (pageChanged) {
         _clearPendingInk();
+        _dropSelectionRaster();
         _eraserSessionDirty = null;
         _eraserNeedsFullInvalidate = false;
+        _eraserSweepFrom = null;
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-        _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+        _tiledStrokesSnapshot = _pageStrokeSnapshot;
         _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
         _invalidateCommittedStrokesFlatCache();
         _invalidateCommittedStrokeCache();
         _layer2Repaint.value++;
         _loadPdfLinks();
       } else if (isEraserActive) {
-        // Refill only the eraser's tiles so deleted ink disappears this frame.
-        // Use the pointer circle for area splits (not the whole stroke bounds —
-        // that flashed a huge rectangle and stalled the page).
+        // Identity diff dirties only the strokes that actually changed.
+        // A full-page drop (stroke-count changed, no delta lists) used to
+        // blank every tile, including ink the eraser never touched.
         if (_pendingInk.isNotEmpty) {
           _bakePendingNow();
         }
+        _applyPageStrokeDelta(page);
         final dirtyBounds = _eraserLiveDirtyBounds(
           removed: widget.eraserDeltaRemoved,
           added: widget.eraserDeltaAdded,
         );
-        if (dirtyBounds != null || contentChanged) {
-          _invalidateCommittedStrokesFlatCache();
-          _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(
-            growable: false,
+        if (dirtyBounds != null) {
+          _eraserSessionDirty = _eraserSessionDirty == null
+              ? dirtyBounds
+              : _eraserSessionDirty!.expandToInclude(dirtyBounds);
+          _invalidateCommittedStrokeCache(
+            dirty: dirtyBounds,
+            eagerRefill: true,
+            padding: 48,
           );
-          _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
-          _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
-          if (dirtyBounds != null) {
-            _eraserSessionDirty = _eraserSessionDirty == null
-            ? dirtyBounds
-            : _eraserSessionDirty!.expandToInclude(dirtyBounds);
-            _invalidateCommittedStrokeCache(
-              dirty: dirtyBounds,
-              eagerRefill: true,
-              padding: 48,
-            );
-          } else {
-            _eraserNeedsFullInvalidate = true;
-            _invalidateCommittedStrokeCache(eagerRefill: true);
-          }
           _layer2Repaint.value++;
         }
       } else if (eraserFinished) {
         _bakePendingNow();
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
-        _tiledStrokesSnapshot = _pageStrokeSnapshot.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+        _tiledStrokesSnapshot = _pageStrokeSnapshot;
         _liveTiledStrokes.strokes = _tiledStrokesSnapshot;
         _invalidateCommittedStrokesFlatCache();
         final sessionDirty = _eraserSessionDirty;
         final needsFull = _eraserNeedsFullInvalidate;
         _eraserSessionDirty = null;
         _eraserNeedsFullInvalidate = false;
+        _eraserSweepFrom = null;
         if (needsFull) {
           _invalidateCommittedStrokeCache(eagerRefill: true);
         } else if (sessionDirty != null) {
@@ -763,6 +1046,7 @@ class InnerCanvasState extends State<InnerCanvas> {
         _applyPageStrokeDelta(page);
       } else if (selectionCleared) {
         _bakePendingNow();
+        _dropSelectionRaster();
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
         _tiledStrokesSnapshot = const [];
         _invalidateCommittedStrokesFlatCache();
@@ -798,6 +1082,8 @@ class InnerCanvasState extends State<InnerCanvas> {
 
   @override
   void dispose() {
+    _dropWetInkClearListener();
+    _dropSelectionRaster();
     _pendingBakeTimer?.cancel();
     _pendingRepaint.dispose();
     _shapePreviewTicker?.cancel();
@@ -843,9 +1129,16 @@ class InnerCanvasState extends State<InnerCanvas> {
   }) {
     final pos = widget.eraserPosition;
     final radius = (widget.eraserSize ?? 16) + 8;
-    final pointerRect = pos == null
+    Rect? pointerRect = pos == null
     ? null
     : Rect.fromCircle(center: pos, radius: radius);
+    final sweepFrom = _eraserSweepFrom;
+    if (pointerRect != null && pos != null && sweepFrom != null) {
+      pointerRect = pointerRect.expandToInclude(
+        Rect.fromCircle(center: sweepFrom, radius: radius),
+      );
+    }
+    if (pos != null) _eraserSweepFrom = pos;
 
     // Fragments after a split: keep the dirty region on the pointer.
     if (added != null && added.isNotEmpty) {
@@ -894,11 +1187,22 @@ class InnerCanvasState extends State<InnerCanvas> {
       final pos = widget.eraserPositionListenable?.value ?? widget.eraserPosition;
       if (pos != null) {
         final radius = (widget.eraserSize ?? 16) + 8;
-        final pointerRect = Rect.fromCircle(center: pos, radius: radius);
+        var pointerRect = Rect.fromCircle(center: pos, radius: radius);
+        final sweepFrom = _eraserSweepFrom;
+        if (sweepFrom != null) {
+          pointerRect = pointerRect.expandToInclude(
+            Rect.fromCircle(center: sweepFrom, radius: radius),
+          );
+        }
+        _eraserSweepFrom = pos;
         _eraserSessionDirty = _eraserSessionDirty == null
             ? pointerRect
             : _eraserSessionDirty!.expandToInclude(pointerRect);
-        _invalidateCommittedStrokeCache(dirty: pointerRect, eagerRefill: true, padding: 48);
+        _invalidateCommittedStrokeCache(
+          dirty: pointerRect,
+          eagerRefill: true,
+          padding: 48,
+        );
         _layer2Repaint.value++;
       }
       
@@ -1015,6 +1319,9 @@ class InnerCanvasState extends State<InnerCanvas> {
     }
 
     final page = widget.coreInfo.pages[_safePageIndex];
+    // Raster-drag session sync (capture-once per transform gesture; cheap
+    // validation otherwise). Needs theme/invert/page, all in scope here.
+    _syncSelectionRaster(theme: theme, invert: invert, page: page);
     final strokeCount = _totalStrokesAcrossLayers(page);
     final layerOrderHash = _layerOrderHash(page);
     final bool canReuseCommittedFlat =
@@ -1027,28 +1334,33 @@ class InnerCanvasState extends State<InnerCanvas> {
     _cachedCommittedStrokesFlat != null && widget.currentStroke != null;
 
     late final List<Stroke> committedStrokes;
-    if (freezeCommittedLayer || canReuseCommittedFlat) {
+    late final List<Stroke> committedInkStrokes;
+    late final List<Stroke> committedHighlighterStrokes;
+    if ((freezeCommittedLayer || canReuseCommittedFlat) &&
+        _cachedCommittedInkStrokes != null &&
+        _cachedCommittedHighlighterStrokes != null) {
       committedStrokes = _cachedCommittedStrokesFlat!;
+      committedInkStrokes = _cachedCommittedInkStrokes!;
+      committedHighlighterStrokes = _cachedCommittedHighlighterStrokes!;
+    } else if (freezeCommittedLayer || canReuseCommittedFlat) {
+      committedStrokes = _cachedCommittedStrokesFlat!;
+      committedInkStrokes = committedStrokes.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+      committedHighlighterStrokes = committedStrokes.where((s) => s.toolId == ToolId.highlighter).toList(growable: false);
+      _cachedCommittedInkStrokes = committedInkStrokes;
+      _cachedCommittedHighlighterStrokes = committedHighlighterStrokes;
     } else {
-      final allStrokes = page.allStrokesInDrawOrder.toList();
-      // Força os Highlighters para o início do array para serem desenhados primeiro (atrás).
-      committedStrokes = [
-        ...allStrokes.where((s) => s.toolId == ToolId.highlighter),
-        ...allStrokes.where((s) => s.toolId != ToolId.highlighter),
-      ];
+      final allStrokes = page.allStrokesInDrawOrder.toList(growable: false);
+      committedStrokes = allStrokes;
+      committedInkStrokes = allStrokes.where((s) => s.toolId != ToolId.highlighter).toList(growable: false);
+      committedHighlighterStrokes = allStrokes.where((s) => s.toolId == ToolId.highlighter).toList(growable: false);
       _cachedCommittedStrokesFlat = committedStrokes;
+      _cachedCommittedInkStrokes = committedInkStrokes;
+      _cachedCommittedHighlighterStrokes = committedHighlighterStrokes;
       _cachedFlatStrokesPage = page;
       _cachedFlatSaveBinaryRevision = page.saveBinaryRevision;
       _cachedFlatStrokeCount = strokeCount;
       _cachedFlatLayerOrderHash = layerOrderHash;
     }
-
-    final committedInkStrokes = committedStrokes
-        .where((s) => s.toolId != ToolId.highlighter)
-        .toList(growable: false);
-    final committedHighlighterStrokes = committedStrokes
-        .where((s) => s.toolId == ToolId.highlighter)
-        .toList(growable: false);
 
     final tiledStrokes = _reuseTiledSnapshot(committedInkStrokes);
     _liveTiledStrokes.strokes = tiledStrokes;
@@ -1382,6 +1694,10 @@ class InnerCanvasState extends State<InnerCanvas> {
                   lineColor: widget.lineColor,
                   doneSelecting: true,
                   preferPathFill: true,
+                  // Highlighter geometry is scale-independent: skip
+                  // scale-only repaints so pinch-zoom stays at composite
+                  // cost on highlighter-heavy pages.
+                  scaleAgnosticRepaint: true,
                 ),
                 size: Size(widget.width, widget.height),
               ),
@@ -1484,6 +1800,8 @@ class InnerCanvasState extends State<InnerCanvas> {
                     shapePreviewPulse: (_shapePreviewTick % 120) / 120.0,
                     currentSelection: widget.currentSelection,
                     selectionPreview: widget.selectionPreview,
+                    selectionRasterImage: _selectionRasterImage,
+                    selectionRasterBounds: _selectionRasterBounds,
                     eraserPosition: widget.eraserPosition,
                     eraserPositionListenable: widget.eraserPositionListenable,
                     eraserSize: widget.eraserSize,
@@ -1725,6 +2043,8 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       devicePixelRatio: devicePixelRatio,
       params: inkParams,
     );
+    final inkBitmapCurrent =
+        entry != null && entry.generation == manager.inkGenerationOf(pageIndex);
 
     final isMoving = PageRasterCacheManager.viewportMoving;
     final settling =
@@ -1732,29 +2052,45 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         !PageRasterCacheManager.zoomLodSettled;
 
     final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
-    bool useVectorFallback = isDrawing || entry == null;
-    if (entry != null && !useVectorFallback) {
+    bool useVectorFallback =
+        isDrawing || entry == null || !inkBitmapCurrent;
+
+    if (entry != null) {
       if (entry.strokeCount > committedStrokes.length) {
         // Cached bitmap contains removed strokes (eraser/undo): ghosts would
         // linger, so fall back to vectors.
         useVectorFallback = true;
-      } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
-        // Stale resolution: keep blitting the soft bitmap while moving or
-        // settling so the UI stays fluid. Switch to sharp vectors only once
-        // fully settled, and even then the settle rebake lands shortly after.
-        if (!isMoving && !settling) {
-          useVectorFallback = true;
+      } else if (isMoving) {
+        // Durante o movimento (pan/zoom), NUNCA fazemos fallback para vetores das strokes
+        // antigas se tivermos um raster base, forçando o uso do raster temporário.
+        useVectorFallback = false;
+      } else if (inkBitmapCurrent && !useVectorFallback) {
+        if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
+          // Stale resolution: keep blitting the soft bitmap while moving or
+          // settling so the UI stays fluid. Switch to sharp vectors only once
+          // fully settled, and even then the settle rebake lands shortly after.
+          if (!settling) {
+            useVectorFallback = true;
+          }
         }
       }
     }
 
     if (useVectorFallback) {
       final isInitialLoad = tiledCache.shouldDeferMeshWarmup;
-      final idleFill = Pen.currentStroke == null && !Eraser.isDragging && !TiledStrokePictureCache.viewportMoving;
+      // Wet ink (pendingStrokes) counts as drawing for budgeting: the finished
+      // stroke is covered exactly by vectors, so tiles refill progressively
+      // at draw budgets instead of one heavy idle slice on the pen-up frame.
+      final idleFill = Pen.currentStroke == null && !Eraser.isDragging && !TiledStrokePictureCache.viewportMoving && pendingStrokes.isEmpty;
       // Cold-fill suppression keeps partial work invisible, so settled slices
-      // can be generous: dense pages finish in few frames instead of a long
-      // cascade. Gesture/draw frames keep tight budgets (or blit-only).
-      final budget = isInitialLoad ? 16 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
+      // can be generous — but bounded by COUNT as well as time. Time-only
+      // budgets let a cold dense page record 8-10 tiles in one paint
+      // (≈16-20ms UI block): pen/pan input landing mid-paint queues behind
+      // it and reads as tip/pan lag, worst right after open when every tile
+      // is missing. 4 tiles/frame still converges in a few frames via
+      // chaining while keeping the worst-case paint under ~8ms.
+      // Gesture/draw frames keep tight budgets (or blit-only).
+      final budget = isInitialLoad ? 8 : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 8);
 
       tiledCache.paint(
         canvas: canvas,
@@ -1774,7 +2110,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         lineColor: lineColor,
         deferRaster: Eraser.isDragging || Pen.currentStroke != null,
         tileRecordBudgetMs: budget,
-        maxNewTilesPerPaint: isInitialLoad ? 10 : (idleFill ? 8 : 2),
+        maxNewTilesPerPaint: isInitialLoad ? 4 : (idleFill ? 4 : 2),
       );
     } else {
       final stale = !pageRasterCacheResCoversTarget(entry!.res, idealRes);
@@ -1966,18 +2302,24 @@ class TiledStrokePictureCache {
 
   /// Slow-pan recording caps: bounded tiles and milliseconds per gesture
   /// frame, so content streams in while reading-scroll without stutter.
-  static const _slowMovingMaxTiles = 3;
-  static const _slowMovingBudgetMs = 5;
+  /// Kept to ~one tile: a slow-pan frame still composites, handles input
+  /// and paints fallback inside ~8ms; more tiles converge over the next
+  /// frames via chaining instead of blocking this one.
+  static const _slowMovingMaxTiles = 2;
+  static const _slowMovingBudgetMs = 4;
 
   /// Absolute ceiling for a single tile bitmap.
   static const maxRasterEdgePx = 4096;
   static const maxConcurrentRasters = 1;
   static const vectorLodMinScale = RasterLodTuning.vectorLodMinScale;
 
-  /// Eager-refill tiles that bypass the per-paint time budget. Covers an
-  /// erase pointer rect (up to 2x2 tiles at 512px) so the dirty block redraws
-  /// in the same frame even when a dense page's grid rebuild ate the budget.
-  static const _eagerRefillUnbudgetedTiles = 4;
+  /// Eager refill bypasses budgets entirely: pen-up clears the live overlay in
+  /// the same frame, so every dirtied visible tile must be complete
+  /// immediately — otherwise a fresh stroke blinks (gone for a frame, then
+  /// popping in via fallback/progressive refill), most visible at low zoom
+  /// where a very long stroke dirties many tiles at once. Dirty scope is
+  /// always bounded to the visible tiles, so this is a single pen-up cost,
+  /// never per-frame drawing cost.
 
   /// True while the page list is scrolling/flinging or the canvas is
   /// panning/zooming. Mesh upgrades wait until this is false.
@@ -2137,6 +2479,12 @@ class TiledStrokePictureCache {
   bool get isDisposed => _disposed;
 
   bool get willEagerRefillVisibleTiles => _eagerRefillVisibleTiles;
+
+  /// True once every visible tile holds a Picture (path-only counts). The
+  /// wet-ink overlay ([InnerCanvasState._pendingInk]) retires on this: with no
+  /// missing tiles left, every committed stroke is baked and vector cover
+  /// would only double-draw.
+  bool get visibleTilesCaughtUp => _visibleTilesCaughtUp;
 
   /// Mesh triangulation waits until every visible tile has a Picture
   /// (path-only is enough). That keeps the first seconds after open on
@@ -2508,12 +2856,23 @@ tileRect,
             continue;
         }
         final tileStrokes = _strokesForTile(tileRect, strokes, page);
-        if (tileStrokes.isEmpty) continue;
+        if (tileStrokes.isEmpty) {
+          continue;
+        }
         final needsMesh = _tileNeedsMeshBuild(tileStrokes);
-        // Small eager refills (erase pointer rects) bypass the time budget
-        // so a dense page's grid rebuild cannot starve the dirty tiles into
-        // blank frames. Larger eager refills stay time-budgeted. The bypass
-        // is scoped to the eager dirty rect (null = whole page).
+        // Eager refill records dirtied visible tiles in this same paint so the
+        // change is visible this frame: the live overlay is already gone on
+        // pen-up, so any deferred tile would blink through a
+        // fallback/progressive refill — most visible at low zoom where a very
+        // long stroke dirties many tiles. Stroke/erase scopes (non-null dirty
+        // rect) bypass budgets entirely and complete synchronously; whole-page
+        // scopes (null, e.g. theme flip) stay budgeted and converge via the
+        // fallback so a full-page rebuild never freezes the UI.
+        // Unchanged tiles never sit blank across progressive refills (the
+        // erase flicker). Applies even while the viewport is moving (erase
+        // during pan inertia): only explicitly dirtied tiles re-record, so
+        // the blit-only-while-moving cost stays bounded, and no raster bakes
+        // are scheduled (allowRaster stays false while moving).
         final inEagerScope =
             _eagerDirtyRect == null ||
             _eagerDirtyRect!.overlaps(tileRect);
@@ -2521,19 +2880,84 @@ tileRect,
         movingWatch.elapsedMilliseconds >= _slowMovingBudgetMs;
         final bool countOk;
         final bool timeOk;
-        if (eagerRefill && inEagerScope) {
-          countOk = true;
-          timeOk =
-              recordedThisPaint < _eagerRefillUnbudgetedTiles || !overTime;
+        if (eagerRefill && inEagerScope && _eagerDirtyRect != null) {
+          // Pen-up / erase correctness first: dirtied tiles complete as fast
+          // as possible so fresh ink never blinks (the live overlay is
+          // already gone), but BOUNDED per paint. Uncapped, a long stroke at
+          // low zoom dirtying 10+ dense tiles re-recorded every stroke in
+          // those tiles synchronously (~29ms measured) — multi-frame jank
+          // exactly on pen-up, so the NEXT stroke starts behind the pen.
+          // Capped at 6 (covers text strokes at 1-2 tiles and the
+          // erase-drag refill the tile tests pin down, all fully
+          // synchronous with zero blink); longer scopes cover the rest with
+          // the cheap spine fallback this same frame and converge via
+          // chaining on the next settled frames. The paint time budget still
+          // applies as a backstop for pathologically dense tiles.
+          countOk = recordedThisPaint < 6;
+          timeOk = !overTime;
         } else if (slowMoving) {
           countOk = recordedThisPaint < _slowMovingMaxTiles;
           timeOk = !overTime && !movingOverTime;
         } else {
-          countOk = recordedThisPaint < tileBudget;
-          timeOk = !overTime;
+          // Live input preemption: this paint may have started settled with
+          // a generous budget, but a pen-down or fling can land mid-paint on
+          // the same vsync (typical right after open, when every tile is
+          // cold). Cached budgets would then record up to 8 tiles behind the
+          // pen/finger — a ~20ms UI block that queues input and reads as
+          // tip lag behind the pen and pan stutter. Re-check live per tile
+          // and clamp to a small bound the moment input appears (the
+          // caller-provided cap still applies below that); unrecorded tiles
+          // stay visible through the cheap spine fallback and converge via
+          // chaining on the next settled frames.
+          if (Pen.currentStroke != null || Eraser.isDragging) {
+            final liveCap = tileBudget < 4 ? tileBudget : 4;
+            countOk = recordedThisPaint < liveCap;
+            timeOk = !overTime;
+          } else if (viewportMoving) {
+            final slowNow =
+                PageRasterCacheManager.viewportSlowMotion;
+            if (!slowNow) {
+              countOk = false;
+              timeOk = false;
+            } else {
+              countOk = recordedThisPaint < _slowMovingMaxTiles;
+              timeOk = !overTime && !movingOverTime;
+            }
+          } else {
+            countOk = recordedThisPaint < tileBudget;
+            timeOk = !overTime;
+          }
         }
         final canRecord = !forbidRecord && countOk && timeOk;
         if (!canRecord) {
+          // Erase dirties the whole stroke, which shares tiles with ink the
+          // eraser never touched. A spine stand-in blanks that ink and draws
+          // the surviving stroke as a centerline until the picture lands —
+          // the "vanished, then reappeared" flash. Paint the real geometry
+          // for those tiles until the picture is recorded.
+          if (eagerRefill && inEagerScope && _eagerDirtyRect != null) {
+            canvas.save();
+            canvas.clipRect(tileRect);
+            _paintTileContents(
+              canvas: canvas,
+              tileRect: tileRect,
+              tileStrokes: tileStrokes,
+              page: page,
+              invert: invert,
+              primaryColor: primaryColor,
+              pageIndex: pageIndex,
+              totalPages: totalPages,
+              currentScale: currentScale,
+              defaultTextStyle: defaultTextStyle,
+              lineHeight: lineHeight,
+              lineThickness: lineThickness,
+              lineColor: lineColor,
+            );
+            canvas.restore();
+            missingTiles = true;
+            fallbackTiles++;
+            continue;
+          }
           // Recording is capped on this frame, but the strokes must still
           // be visible: cover this tile with the cheap spine fallback drawn
           // once after the loop (deduped across tiles, batches cached).
@@ -2556,6 +2980,7 @@ final pathOnly = needsMesh;
             lineHeight: lineHeight,
             lineThickness: lineThickness,
             lineColor: lineColor,
+            preferPathFill: pathOnly,
         );
         _pictures[key] = picture;
         _markFineInk(key, tileStrokes);
@@ -2637,9 +3062,20 @@ final pathOnly = needsMesh;
     }
 
     for (final s in strokes) {
-      // Highlighters render on a separate overlay, never in tiles.
-      if (s.toolId == ToolId.highlighter) continue;
       final color = s.color.withInversion(invert);
+      if (s.toolId == ToolId.highlighter) {
+        final pts = s.pointsForEraser;
+        if (pts.length >= 2) {
+          final path = strokePathFor(color, s.options.size);
+          path.moveTo(pts.first.x, pts.first.y);
+          final stride = pts.length > 24 ? (pts.length / 24).ceil() : 1;
+          for (var i = stride; i < pts.length; i += stride) {
+            path.lineTo(pts[i].x, pts[i].y);
+          }
+          path.lineTo(pts.last.x, pts.last.y);
+        }
+        continue;
+      }
       if (s is ShapeStroke) {
         if (s.fill) {
           final fc = s.fillColor.withInversion(invert);
@@ -2835,6 +3271,7 @@ final pathOnly = needsMesh;
         if (_pictures.containsKey(key)) continue;
         final tileStrokes = _strokesForTile(tileRect, strokeList, page);
         if (tileStrokes.isEmpty) continue;
+        final coldTile = _tileNeedsMeshBuild(tileStrokes);
         final picture = _recordTile(
           tileRect: tileRect,
           tileStrokes: tileStrokes,
@@ -2848,10 +3285,11 @@ final pathOnly = needsMesh;
           lineHeight: lineHeight,
           lineThickness: lineThickness,
           lineColor: lineColor,
+          preferPathFill: coldTile,
         );
         _pictures[key] = picture;
         _markFineInk(key, tileStrokes);
-        if (_tileNeedsMeshBuild(tileStrokes)) {
+        if (coldTile) {
           _pathOnlyKeys.add(key);
         } else {
           _pathOnlyKeys.remove(key);
@@ -3313,6 +3751,12 @@ final pathOnly = needsMesh;
     int? lineHeight,
     double? lineThickness,
     Color? lineColor,
+    // Cold tiles (meshes not yet triangulated) record authored paths only:
+    // same outlines the mesh would triangulate, without the O(n) spine-mesh
+    // trig (atan2/cos/sin per joint) + Vertices allocs + merge memcpys per
+    // stroke. The settled upgrade pass swaps in mesh tiles once warm, so
+    // cold pen-up refills on dense pages stop blocking the next stroke.
+    bool preferPathFill = false,
   }) {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, tileRect);
@@ -3320,6 +3764,7 @@ final pathOnly = needsMesh;
     canvas.clipRect(tileRect);
     _paintTileContents(
       canvas: canvas,
+      tileRect: tileRect,
       tileStrokes: tileStrokes,
       page: page,
       invert: invert,
@@ -3331,6 +3776,7 @@ final pathOnly = needsMesh;
       lineHeight: lineHeight,
       lineThickness: lineThickness,
       lineColor: lineColor,
+      preferPathFill: preferPathFill,
     );
     canvas.restore();
     return recorder.endRecording();
@@ -3338,6 +3784,7 @@ final pathOnly = needsMesh;
 
   void _paintTileContents({
     required Canvas canvas,
+    required Rect tileRect,
     required List<Stroke> tileStrokes,
     required EditorPage page,
     required bool invert,
@@ -3349,11 +3796,15 @@ final pathOnly = needsMesh;
     int? lineHeight,
     double? lineThickness,
     Color? lineColor,
+    bool preferPathFill = false,
   }) {
-    final mergedMeshes = mergeSolidStrokeMeshesByColor(
-      tileStrokes,
-      currentScale,
-    );
+    final ordered = preferPathFill
+        ? null
+        : buildOrderedMeshBatches(
+            tileStrokes,
+            1.0,
+            clip: tileRect,
+          );
 
     CanvasPainter(
       invert: invert,
@@ -3366,14 +3817,14 @@ final pathOnly = needsMesh;
       showPageIndicator: false,
       pageIndex: pageIndex,
       totalPages: totalPages,
-      currentScale: currentScale,
+      currentScale: 1.0,
       defaultTextStyle: defaultTextStyle,
       lineHeight: lineHeight,
       lineThickness: lineThickness?.toDouble(),
       lineColor: lineColor,
       doneSelecting: true,
-      batchedStrokes: mergedMeshes.isEmpty ? null : mergedMeshes,
-      preferPathFill: false,
+      orderedBatches: ordered,
+      preferPathFill: preferPathFill,
     ).paint(canvas, page.size);
   }
 
@@ -3413,8 +3864,15 @@ final pathOnly = needsMesh;
             final queryRect = tileRect.inflate(_cullPadding);
             _ensureGrid(strokes, page.saveBinaryRevision);
             final candidateIndices = _grid?.query(queryRect) ?? const <int>[];
+            // Temporal draw order: grid cells return arbitrary order, but
+            // tiles must replay strokes back-to-front (newest on top).
+            // Grid indices ARE draw-order ranks of the passed list, so sorting
+            // the small candidate set restores temporal order for merging and
+            // painting. Falls back to query order when ranks look stale.
+            final sorted = candidateIndices.toList(growable: false)
+              ..sort();
             final tileStrokes = <Stroke>[];
-            for (final index in candidateIndices) {
+            for (final index in sorted) {
               if (index >= 0 && index < strokes.length) {
                 final stroke = strokes[index];
                 if (stroke.bounds.overlaps(queryRect)) {

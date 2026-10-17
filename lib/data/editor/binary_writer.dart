@@ -55,8 +55,24 @@ class BinaryWriter {
     writeInt(key, color.toARGB32());
   }
 
-  void writeString(int key, String value) {
+  // Last-value cache: stroke serialization writes the same short strings
+  // hundreds of times in a row (shape '' on every stroke; penType grouped by
+  // insertion order). utf8.encode per call would re-encode them all.
+  String? _lastStringValue;
+  Uint8List? _lastStringBytes;
+
+  Uint8List _utf8Cached(String value) {
+    if (identical(value, _lastStringValue) || value == _lastStringValue) {
+      return _lastStringBytes!;
+    }
     final bytes = utf8.encode(value);
+    _lastStringValue = value;
+    _lastStringBytes = bytes;
+    return bytes;
+  }
+
+  void writeString(int key, String value) {
+    final bytes = _utf8Cached(value);
     _scratch4.setUint32(0, bytes.length, Endian.little);
     _buffer.addByte(key);
     _buffer.add(_scratch4.buffer.asUint8List());
@@ -370,4 +386,8 @@ abstract class StrokeBinaryKeys {
   static const int endOptions = 130;
   static const int flatEdge = 42;
   static const int neon = 43;
+
+  /// Pixel carve mask: eraser bites stored on the stroke (not a split).
+  /// Optional, written before stroke options. Absent on older files.
+  static const int carveMask = 44;
 }

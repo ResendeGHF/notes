@@ -1007,6 +1007,16 @@ class EditorPage extends ChangeNotifier implements HasSize {
       );
     }
     _toBinaryHeader(writer);
+    // Time-budgeted yields (not per-N-strokes): a 5-point stroke costs ~100x
+    // less than a 500-point one, so fixed cadence either hops pointlessly
+    // (250 hops for 1000 short strokes) or starves input on long strokes.
+    final sliceWatch = Stopwatch()..start();
+    Future<void> yieldIfDue() async {
+      if (sliceWatch.elapsedMilliseconds >= 8) {
+        await Future<void>.delayed(Duration.zero);
+        sliceWatch.reset();
+      }
+    }
 
     if (_layers.length > 1) {
       writer.writeKey(PageBinaryKeys.layers);
@@ -1016,7 +1026,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
         for (int i = 0; i < layer.strokes.length; i++) {
           layer.strokes[i].toBinary(writer);
           // Yield often enough that vault autosave encode never starves input.
-          if ((i & 3) == 0) await Future<void>.delayed(Duration.zero);
+          await yieldIfDue();
         }
         writer.writeIntNoKey(layer.images.length);
         for (final image in layer.images) {
@@ -1035,7 +1045,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
         writer.writeIntNoKey(flatStrokes.length);
         for (int i = 0; i < flatStrokes.length; i++) {
           flatStrokes[i].toBinary(writer);
-          if ((i & 3) == 0) await Future<void>.delayed(Duration.zero);
+          await yieldIfDue();
         }
       }
       if (flatImages.isNotEmpty) {
@@ -1629,6 +1639,19 @@ class EditorPage extends ChangeNotifier implements HasSize {
   /// (size and optional [id] only). Used when loading large notes without
   /// materializing every page.
   static EditorPage skipPageBinary(BinaryReader reader) {
+    final span = skipPagePayload(reader);
+    return EditorPage(
+      size: Size(span.width, span.height),
+      id: span.id,
+      isLazyShell: true,
+    );
+  }
+
+  /// Same walk as [skipPageBinary] without allocating a page (no Quill, no
+  /// focus node). Safe to run on a background isolate while indexing.
+  static ({double width, double height, int? id}) skipPagePayload(
+    BinaryReader reader,
+  ) {
     int key;
     int? pageIdRead;
 
@@ -1660,7 +1683,6 @@ class EditorPage extends ChangeNotifier implements HasSize {
       throw Exception('Page.skipPageBinary: height not set');
     }
     final double height = reader.readScaledFloat();
-    final Size size = Size(width, height);
 
     while (!reader.isEOF) {
       final nextKey = reader.peekKey();
@@ -1773,7 +1795,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
       }
     }
 
-    return EditorPage(size: size, id: pageIdRead, isLazyShell: true);
+    return (width: width, height: height, id: pageIdRead);
   }
 
   /// Optional mesh warmup. Temporal raster LOD no longer prewarms meshes
@@ -1806,6 +1828,58 @@ class EditorPage extends ChangeNotifier implements HasSize {
     _layers[_activeLayerIndex].insertStroke(newStroke);
     markSaveBinaryDirty();
     notifyListeners();
+  }
+
+  /// Draw-order spot of [stroke]: (layer index, index within layer), or null
+  /// when absent. Recorded by history before removals so undo/redo restore
+  /// exact temporal positions instead of appending.
+  (int, int)? drawOrderSpotOf(Stroke stroke) {
+    for (var li = 0; li < _layers.length; li++) {
+      final idx = _layers[li].strokes.indexOf(stroke);
+      if (idx >= 0) return (li, idx);
+    }
+    return null;
+  }
+
+  /// Restores strokes at recorded draw-order spots (ascending per layer, so
+  /// indices stay exact). Single dirty mark, no notify (callers redraw once).
+  /// Spots beyond range clamp to the end; unknown layers fall back to active.
+  void restoreStrokesAt(
+    List<Stroke> strokes,
+    List<(int, int)>? spots,
+  ) {
+    if (spots == null || spots.length != strokes.length) {
+      for (final stroke in strokes) {
+        insertStroke(stroke);
+      }
+      return;
+    }
+    final order = List<int>.generate(strokes.length, (i) => i)
+      ..sort((a, b) {
+        final sa = spots[a];
+        final sb = spots[b];
+        final c = sa.$1.compareTo(sb.$1);
+        return c != 0 ? c : sa.$2.compareTo(sb.$2);
+      });
+    for (final k in order) {
+      var layer = spots[k].$1;
+      if (layer < 0 || layer >= _layers.length) layer = _activeLayerIndex;
+      _layers[layer].insertStrokeAt(strokes[k], spots[k].$2);
+    }
+    markSaveBinaryDirty();
+  }
+
+  /// In-place 1:1 replacement (change-stroke-type): order never moves, so no
+  /// spots are needed in either direction.
+  void replaceStroke(Stroke oldStroke, Stroke newStroke) {
+    for (final layer in _layers) {
+      final idx = layer.strokes.indexOf(oldStroke);
+      if (idx >= 0) {
+        layer.strokes[idx] = newStroke;
+        markSaveBinaryDirty();
+        return;
+      }
+    }
   }
 
   void sortStrokes() {

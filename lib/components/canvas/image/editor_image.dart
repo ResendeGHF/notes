@@ -29,6 +29,7 @@ import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/pdf_native_texture.dart';
 import 'package:saber/services/pdf_page_thumbnail_cache.dart';
 import 'package:saber/services/pdf_viewport.dart';
+import 'package:saber/services/thumbnail_cache.dart';
 import 'package:saber/services/vault_adapter.dart';
 
 part 'png_editor_image.dart';

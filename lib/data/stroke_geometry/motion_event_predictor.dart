@@ -88,6 +88,7 @@ final class MotionEventPredictor {
   double _lastSeenEventTimeMs = 0;  double _lastPredictEventTimeMs = 0;
   final List<double> _reportRates = <double>[];
   double _reportRateMs = 0;
+  double _reportRateSumMs = 0;
 
   void reset() {
     _kalman.reset();
@@ -97,6 +98,7 @@ final class MotionEventPredictor {
     _lastPredictEventTimeMs = 0;
     _reportRates.clear();
     _reportRateMs = 0;
+    _reportRateSumMs = 0;
   }
 
   /// Feeds one input sample. Times are wall-clock milliseconds (any
@@ -116,15 +118,13 @@ final class MotionEventPredictor {
 
     // Average report rate over the first 20 samples. Most sensors do not
     // report at an even interval, so this is only an estimate.
+    // Running sum keeps this O(1) per sample instead of O(20).
     if (_reportRates.length < 20) {
       if (_lastSeenEventTimeMs > 0) {
         final dt = timeMs - _lastSeenEventTimeMs;
         _reportRates.add(dt);
-        var sum = 0.0;
-        for (final rate in _reportRates) {
-          sum += rate;
-        }
-        _reportRateMs = sum / _reportRates.length;
+        _reportRateSumMs += dt;
+        _reportRateMs = _reportRateSumMs / _reportRates.length;
       }
     }
     _lastSeenEventTimeMs = timeMs;
@@ -156,6 +156,7 @@ final class MotionEventPredictor {
     bool accurateTool = true,
   }) {
     if (_reportRateMs <= 0) return const [];
+    if (predictionTargetMs <= 0.01) return const [];
     if (_kalman.numIterations < _minKalmanFilterIterations) {
       return const [];
     }
@@ -244,6 +245,31 @@ final class MotionEventPredictor {
     _lastPredictEventTimeMs = predictedEventTimeMs;
 
     return tips;
+  }
+
+  /// Whether the filter state is trustworthy enough for a short live-tip
+  /// extension (the raw truth connector in live ink): calm flight and rests
+  /// extend, wild turns abstain.
+  ///
+  /// Mirrors the confidence gating of [predictPolyline] but answers for a
+  /// sub-frame hop instead of a full horizon: direction alone cannot tell a
+  /// stop from a turn (both align with travel), while jank can — a 90° turn
+  /// spikes jank and must show ink exactly under the tip (the `turning tip`
+  /// guard), whereas deceleration/rest stays calm and may reach the pen.
+  bool allowsShortLead({bool accurateTool = true}) {
+    final jx = _kalman.jankX;
+    final jy = _kalman.jankY;
+    final jankAbs = math.sqrt(jx * jx + jy * jy);
+    final double lowJank, highJank;
+    if (accurateTool) {
+      lowJank = _accurateLowJank;
+      highJank = _accurateHighJank;
+    } else {
+      lowJank = _lowJank;
+      highJank = _highJank;
+    }
+    final confidence = 1.0 - _normalizeRange(jankAbs, lowJank, highJank);
+    return confidence > 0.2;
   }
 
   /// [x] clamped into [0, 1] over [min, max]; replicates the upstream
@@ -419,48 +445,124 @@ final class _AxisKalmanFilter {
   }
 
   /// One predict + update cycle for measurement [z].
+  ///
+  /// Zero-allocation fast path: the 4-state filter has a fixed upper-
+  /// triangular transition matrix, so `F*P*F^T` is unrolled into scalar ops
+  /// on the live covariance storage. Arithmetically identical to the generic
+  /// `F*P` + `*F^T` multiplies (same terms, same order), but emits no
+  /// per-sample `List`/`_Matrix` garbage — the hot loop runs at 60-240 Hz
+  /// per active stroke.
   void step(double z) {
-    // Predict: x = F * x; P = F * P * F^T + Q.
-    final px = _matVec(_f, state);
-    final fp = _Matrix.multiply(_f, _cov);
-    final fpft = _Matrix.multiplyTransposeRight(fp, _f);
-    for (var i = 0; i < 4; i++) {
-      state[i] = px[i];
-      for (var j = 0; j < 4; j++) {
-        _cov.set(i, j, fpft.get(i, j) + _q.get(i, j));
-      }
-    }
+    // Predict: x = F * x.
+    final s0 = state[0], s1 = state[1], s2 = state[2], s3 = state[3];
+    final px0 = s0 + s1 + 0.5 * s2 + 0.16 * s3;
+    final px1 = s1 + s2 + 0.5 * s3;
+    final px2 = s2 + s3;
+    final px3 = s3;
+
+    // Predict: P = F * P * F^T + Q (unrolled, same summation order as the
+    // generic multiplies it replaces).
+    final p00 = _cov.get(0, 0), p01 = _cov.get(0, 1),
+        p02 = _cov.get(0, 2), p03 = _cov.get(0, 3);
+    final p10 = _cov.get(1, 0), p11 = _cov.get(1, 1),
+        p12 = _cov.get(1, 2), p13 = _cov.get(1, 3);
+    final p20 = _cov.get(2, 0), p21 = _cov.get(2, 1),
+        p22 = _cov.get(2, 2), p23 = _cov.get(2, 3);
+    final p30 = _cov.get(3, 0), p31 = _cov.get(3, 1),
+        p32 = _cov.get(3, 2), p33 = _cov.get(3, 3);
+
+    // FP = F * P. F rows: [1,1,.5,.16], [0,1,1,.5], [0,0,1,1], [0,0,0,1].
+    final fp00 = p00 + p10 + 0.5 * p20 + 0.16 * p30;
+    final fp01 = p01 + p11 + 0.5 * p21 + 0.16 * p31;
+    final fp02 = p02 + p12 + 0.5 * p22 + 0.16 * p32;
+    final fp03 = p03 + p13 + 0.5 * p23 + 0.16 * p33;
+    final fp10 = p10 + p20 + 0.5 * p30;
+    final fp11 = p11 + p21 + 0.5 * p31;
+    final fp12 = p12 + p22 + 0.5 * p32;
+    final fp13 = p13 + p23 + 0.5 * p33;
+    final fp20 = p20 + p30;
+    final fp21 = p21 + p31;
+    final fp22 = p22 + p32;
+    final fp23 = p23 + p33;
+    // fp3x = p3x (F row [0,0,0,1]) — reuse p30..p33 directly below.
+
+    // P' = FP * F^T + Q. (FP*F^T)[i][j] = sum_k FP[i][k]*F[j][k].
+    // j=0: +FP0+FP1+.5*FP2+.16*FP3; j=1: +FP1+FP2+.5*FP3;
+    // j=2: +FP2+FP3; j=3: +FP3.
+    final q00 = _q.get(0, 0), q01 = _q.get(0, 1),
+        q02 = _q.get(0, 2), q03 = _q.get(0, 3);
+    final q10 = _q.get(1, 0), q11 = _q.get(1, 1),
+        q12 = _q.get(1, 2), q13 = _q.get(1, 3);
+    final q20 = _q.get(2, 0), q21 = _q.get(2, 1),
+        q22 = _q.get(2, 2), q23 = _q.get(2, 3);
+    final q30 = _q.get(3, 0), q31 = _q.get(3, 1),
+        q32 = _q.get(3, 2), q33 = _q.get(3, 3);
+
+    final n00 = fp00 + fp01 + 0.5 * fp02 + 0.16 * fp03 + q00;
+    final n01 = fp01 + fp02 + 0.5 * fp03 + q01;
+    final n02 = fp02 + fp03 + q02;
+    final n03 = fp03 + q03;
+    final n10 = fp10 + fp11 + 0.5 * fp12 + 0.16 * fp13 + q10;
+    final n11 = fp11 + fp12 + 0.5 * fp13 + q11;
+    final n12 = fp12 + fp13 + q12;
+    final n13 = fp13 + q13;
+    final n20 = fp20 + fp21 + 0.5 * fp22 + 0.16 * fp23 + q20;
+    final n21 = fp21 + fp22 + 0.5 * fp23 + q21;
+    final n22 = fp22 + fp23 + q22;
+    final n23 = fp23 + q23;
+    final n30 = p30 + p31 + 0.5 * p32 + 0.16 * p33 + q30;
+    final n31 = p31 + p32 + 0.5 * p33 + q31;
+    final n32 = p32 + p33 + q32;
+    final n33 = p33 + q33;
+
+    state[0] = px0;
+    state[1] = px1;
+    state[2] = px2;
+    state[3] = px3;
+    _cov.set(0, 0, n00); _cov.set(0, 1, n01);
+    _cov.set(0, 2, n02); _cov.set(0, 3, n03);
+    _cov.set(1, 0, n10); _cov.set(1, 1, n11);
+    _cov.set(1, 2, n12); _cov.set(1, 3, n13);
+    _cov.set(2, 0, n20); _cov.set(2, 1, n21);
+    _cov.set(2, 2, n22); _cov.set(2, 3, n23);
+    _cov.set(3, 0, n30); _cov.set(3, 1, n31);
+    _cov.set(3, 2, n32); _cov.set(3, 3, n33);
+
     // Update with 1-D measurement: y = z - x[0].
     final y = z - state[0];
     // S = P[0][0] + R (H = [1,0,0,0] collapses the products to scalars).
     final s = _cov.get(0, 0) + _sigmaMeasurement;
     if (s.abs() < 1e-12) return;
-    // K[i] = P[i][0] / S, snapshot before mutating P (upstream resolves
+    // K[i] = P[i][0] / S, snapshot row 0 before mutating P (upstream resolves
     // K*H*P into a separate buffer first; reading the live row 0 here
     // would reuse already-updated entries for rows 1..3).
-    final gain = List<double>.generate(4, (i) => _cov.get(i, 0) / s);
-    final row0 = List<double>.generate(4, (j) => _cov.get(0, j));
-    for (var i = 0; i < 4; i++) {
-      state[i] += gain[i] * y;
-    }
+    final k0 = _cov.get(0, 0) / s;
+    final k1 = _cov.get(1, 0) / s;
+    final k2 = _cov.get(2, 0) / s;
+    final k3 = _cov.get(3, 0) / s;
+    final r00 = _cov.get(0, 0), r01 = _cov.get(0, 1),
+        r02 = _cov.get(0, 2), r03 = _cov.get(0, 3);
+    state[0] += k0 * y;
+    state[1] += k1 * y;
+    state[2] += k2 * y;
+    state[3] += k3 * y;
     // P -= K * H * P  <=>  P[i][j] -= K[i] * P[0][j].
-    for (var i = 0; i < 4; i++) {
-      for (var j = 0; j < 4; j++) {
-        _cov.set(i, j, _cov.get(i, j) - gain[i] * row0[j]);
-      }
-    }
-  }
-
-  static List<double> _matVec(_Matrix m, List<double> v) {
-    final out = List<double>.filled(4, 0);
-    for (var i = 0; i < 4; i++) {
-      var s = 0.0;
-      for (var k = 0; k < 4; k++) {
-        s += m.get(i, k) * v[k];
-      }
-      out[i] = s;
-    }
-    return out;
+    _cov.set(0, 0, r00 - k0 * r00);
+    _cov.set(0, 1, r01 - k0 * r01);
+    _cov.set(0, 2, r02 - k0 * r02);
+    _cov.set(0, 3, r03 - k0 * r03);
+    _cov.set(1, 0, _cov.get(1, 0) - k1 * r00);
+    _cov.set(1, 1, _cov.get(1, 1) - k1 * r01);
+    _cov.set(1, 2, _cov.get(1, 2) - k1 * r02);
+    _cov.set(1, 3, _cov.get(1, 3) - k1 * r03);
+    _cov.set(2, 0, _cov.get(2, 0) - k2 * r00);
+    _cov.set(2, 1, _cov.get(2, 1) - k2 * r01);
+    _cov.set(2, 2, _cov.get(2, 2) - k2 * r02);
+    _cov.set(2, 3, _cov.get(2, 3) - k2 * r03);
+    _cov.set(3, 0, _cov.get(3, 0) - k3 * r00);
+    _cov.set(3, 1, _cov.get(3, 1) - k3 * r01);
+    _cov.set(3, 2, _cov.get(3, 2) - k3 * r02);
+    _cov.set(3, 3, _cov.get(3, 3) - k3 * r03);
   }
 }
 

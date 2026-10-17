@@ -13,6 +13,7 @@ import 'package:saber/components/home/home_toolbar_chrome.dart';
 import 'package:saber/components/theming/adaptive_icon.dart';
 import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
+import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/i18n/strings.g.dart';
 
@@ -29,6 +30,8 @@ class EditorPageManager extends StatefulWidget {
     required this.deletePage,
     required this.transformationController,
     this.pageBuilder,
+    this.tryHydratePage,
+    this.onPageHydrated,
     this.pdfOutlines,
     this.onOutlinePageSelected,
     this.onNavigateToPage,
@@ -49,6 +52,14 @@ class EditorPageManager extends StatefulWidget {
 
   final TransformationController transformationController;
   final IndexedWidgetBuilder? pageBuilder;
+
+  /// Hydrates page [pageIndex] if it is still a lazy shell. When null, sidebar
+  /// previews hydrate directly via [EditorCoreInfo.tryHydratePageSmart].
+  /// Prefer the editor-owned callback so image/quill wiring stays centralized.
+  final bool Function(int pageIndex)? tryHydratePage;
+
+  /// Fired when a sidebar-triggered async hydrate completes (editor wiring).
+  final void Function(int pageIndex, EditorPage page)? onPageHydrated;
 
   /// Outline tree for the Outlines tab (may be empty).
   final List<PdfOutlineItem>? pdfOutlines;
@@ -74,6 +85,8 @@ class _LazyPagePreview extends StatefulWidget {
     required this.displaySize,
     required this.cupertino,
     this.pageBuilder,
+    this.tryHydratePage,
+    this.onPageHydrated,
   });
 
   final int pageIndex;
@@ -82,6 +95,8 @@ class _LazyPagePreview extends StatefulWidget {
   final Size displaySize;
   final bool cupertino;
   final IndexedWidgetBuilder? pageBuilder;
+  final bool Function(int pageIndex)? tryHydratePage;
+  final void Function(int pageIndex, EditorPage page)? onPageHydrated;
 
   @override
   State<_LazyPagePreview> createState() => _LazyPagePreviewState();
@@ -89,13 +104,42 @@ class _LazyPagePreview extends StatefulWidget {
 
 class _LazyPagePreviewState extends State<_LazyPagePreview> {
   bool _loaded = false;
+  bool _scheduled = false;
 
   @override
   void initState() {
     super.initState();
-    // Stagger heavy InnerCanvas builds across frames so opening the pages
-    // panel does not synchronously construct every preview at once.
+    _scheduleLoad();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LazyPagePreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.pageIndex != widget.pageIndex ||
+        !identical(oldWidget.coreInfo, widget.coreInfo)) {
+      // A reorder swaps which page this card shows. The inner
+      // [PageSidebarPreview] re-syncs its listener, but this gate must also
+      // re-arm so a recycled card never sticks on the old placeholder.
+      if (!_loaded) {
+        _scheduleLoad();
+      } else {
+        // Already showing a preview: keep it, the inner widget handles the
+        // instance swap + hydrate + re-bake without a placeholder flash.
+      }
+    }
+  }
+
+  void _scheduleLoad() {
+    if (_loaded || _scheduled) return;
+    _scheduled = true;
+    // Stagger heavy preview builds across frames so opening the pages panel
+    // does not synchronously construct every visible preview at once. The
+    // delay is capped: builder only mounts visible (+cacheExtent) cards, so
+    // an unbounded 12ms*dist would leave far scrolled-to cards on
+    // placeholders for seconds. Heavy hydrate/bake work itself is serialized
+    // in [PageSidebarPreview] queues.
     void load() {
+      _scheduled = false;
       if (mounted) setState(() => _loaded = true);
     }
 
@@ -104,10 +148,8 @@ class _LazyPagePreviewState extends State<_LazyPagePreview> {
     if (distFromPriority == 0) {
       WidgetsBinding.instance.addPostFrameCallback((_) => load());
     } else {
-      Future<void>.delayed(
-        Duration(milliseconds: 12 * distFromPriority),
-        load,
-      );
+      final cappedMs = (12 * distFromPriority).clamp(12, 120);
+      Future<void>.delayed(Duration(milliseconds: cappedMs), load);
     }
   }
 
@@ -134,6 +176,8 @@ class _LazyPagePreviewState extends State<_LazyPagePreview> {
       pageIndex: widget.pageIndex,
       coreInfo: widget.coreInfo,
       displaySize: widget.displaySize,
+      tryHydratePage: widget.tryHydratePage,
+      onPageHydrated: widget.onPageHydrated,
     );
   }
 }
@@ -381,6 +425,8 @@ class _EditorPageManagerState extends State<EditorPageManager> {
                                         displaySize: Size(w, h),
                                         cupertino: cupertino,
                                         pageBuilder: widget.pageBuilder,
+                                        tryHydratePage: widget.tryHydratePage,
+                                        onPageHydrated: widget.onPageHydrated,
                                       ),
                                     ),
                                   ),

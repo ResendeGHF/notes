@@ -375,16 +375,29 @@ class _SearchPageState extends State<SearchPage> {
                               ? ''
                               : selectedFiles.value.first,
                           unselectNotes: () => selectedFiles.value = [],
+                          onRenamed: () {
+                            HomeDataCache.instance.invalidate();
+                            findAllNotes();
+                          },
                         ),
                       ),
                       MoveNoteButton(
                         filesToMove: selectedFiles.value,
                         unselectNotes: () => selectedFiles.value = [],
+                        onMoved: () {
+                          HomeDataCache.instance.invalidate();
+                          findAllNotes();
+                        },
                       ),
                       DeleteNoteButton(
                         selectedFiles: selectedFiles.value,
                         unselectNotes: () => selectedFiles.value = [],
-                        onDeleted: findAllNotes,
+                        onDeleted: () {
+                          // Invalidate first so we never repaint the stale
+                          // cache snapshot (same vault-off staleness as browse).
+                          HomeDataCache.instance.invalidate();
+                          findAllNotes();
+                        },
                       ),
                       ExportNoteButton(
                         selectedFiles: selectedFiles.value,

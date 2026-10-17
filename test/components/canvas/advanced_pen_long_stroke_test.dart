@@ -62,7 +62,8 @@ void main() {
       stroke.addPoint(Offset(20.0 + i * 3.0, 80.0 + (i % 7) * 0.4));
     }
 
-    expect(stroke.length, samples);
+    // The modeled builder banks spring outputs, not raw 1:1 samples.
+    expect(stroke.length, lessThanOrEqualTo(samples));
     expect(stroke.usesSolidOutlineMesh, isFalse);
     expect(stroke.vertices, isNull);
     expect(stroke.liveIncrementalMeshes, isNull);
@@ -76,7 +77,7 @@ void main() {
     expect(stroke.options.isComplete, isTrue);
     expect(stroke.vertices, isNull);
     expect(stroke.usesSolidOutlineMesh, isFalse);
-    expect(stroke.length, samples);
+    expect(stroke.length, lessThanOrEqualTo(samples));
     final committed = stroke.highQualityPath.getBounds();
     expect(committed.isEmpty, isFalse);
     expect(committed.left, lessThanOrEqualTo(stroke.points.first.x + 16));
@@ -127,7 +128,8 @@ void main() {
     expect(stroke.vertices, isNull);
     stroke.finishLiveGeometry();
 
-    expect(stroke.length, samples);
+    // The modeled builder banks spring outputs, not raw 1:1 samples.
+    expect(stroke.length, lessThanOrEqualTo(samples));
     expect(stroke.options.isComplete, isTrue);
     expect(stroke.vertices, isNull);
     expect(stroke.canBatchSolidMesh, isFalse);
@@ -253,7 +255,7 @@ void main() {
     expect(bounds.bottom, lessThan(80 + 16));
   });
 
-  test('stroke prediction is not baked into the committed Advanced path', () {
+  test('committed Advanced path keeps the shown live tip', () {
     final stroke = _straightAdvancedPen(samples: 80);
     expect(stroke.vertices, isNull);
     final last = stroke.points.last;
@@ -264,11 +266,14 @@ void main() {
         Offset(stroke.points.last.x + 80, stroke.points.last.y),
       );
     }
-    expect(stroke.length, 160);
+    // The modeled builder banks spring outputs, not raw 1:1 samples.
+    expect(stroke.length, lessThanOrEqualTo(160));
+    // The shown tip (committed samples + prediction lookahead) is what the
+    // user saw: pen-up keeps it instead of snapping back ("ink in stone").
+    final shownTipX = stroke.points.last.x + 80;
     stroke.finishLiveGeometry();
     final committed = stroke.highQualityPath.getBounds();
-    expect(committed.right, lessThan(stroke.points.last.x + 20));
-    expect(stroke.length, 160);
+    expect(committed.right, greaterThanOrEqualTo(shownTipX - 8));
     expect(stroke.vertices, isNull);
   });
 

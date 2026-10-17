@@ -25,6 +25,7 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
+import 'package:saber/services/pdf_native_texture.dart';
 import 'package:saber/services/thumbnail_cache.dart';
 import 'package:saber/services/vault_adapter.dart';
 
@@ -497,6 +498,19 @@ class _PreviewCardState extends State<PreviewCard> {
       // while navigation + editor build runs (~0.8s): shared prefetch
       // futures the opener consumes with zero duplication. No-ops off-vault.
       warmVaultForOpen();
+      // Warm the native PDF renderer for the conventional first asset while
+      // the route transition runs: PdfRenderer init (100-700ms) then happens
+      // off the critical path and the editor's first openPageTexture reuses
+      // the hot renderer. Best-effort: no-ops for non-PDF notes, encrypted
+      // vault assets, and non-Android platforms. NOTE: the warm path must be
+      // an ABSOLUTE filesystem path (the plugin stats it with isFile); the
+      // note-relative form never exists on disk and no-ops silently.
+      String? warmAssetPath;
+      try {
+        warmAssetPath =
+            FileManager.getFile('$editPath${Editor.extension}.0').path;
+      } catch (_) {}
+      PdfNativeTexture.warmDocument(warmAssetPath);
       await context.push(RoutePaths.editFilePath(editPath));
       if (mounted) _refreshThumbnailAfterDelay();
     }

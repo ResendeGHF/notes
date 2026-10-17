@@ -355,6 +355,12 @@ class AssetCacheAll {
   /// Honored at open completion instead of waiting for the 3 s fallback.
   final Set<int> _progressiveKickRequested = {};
 
+  /// One metadata unit at a time, then a pause. A continuous
+  /// [PdfDocument.loadPagesProgressively] loop keeps pdfrx's single worker
+  /// busy and notifies the UI after every unit, which is the stall felt
+  /// while PDF pages load.
+  final Map<int, Timer> _pacedPageLoadTimers = {};
+
   void _registerDocForDeferredProgressiveLoad(int assetId) {
     if (_disposed || _progressiveLoadStarted.contains(assetId)) return;
     _progressiveLoadPending.add(assetId);
@@ -384,24 +390,70 @@ class AssetCacheAll {
     _progressiveLoadPending.remove(assetId);
     _progressiveKickRequested.remove(assetId);
     _progressiveLoadStarted.add(assetId);
-    PdfOpenHelper.startBackgroundPageLoad(doc);
+    _schedulePacedPageLoad(assetId);
+  }
+
+  void _schedulePacedPageLoad(int assetId) {
+    _pacedPageLoadTimers.remove(assetId)?.cancel();
+    if (_disposed || !_progressiveLoadStarted.contains(assetId)) return;
+    _pacedPageLoadTimers[assetId] = Timer(
+      const Duration(milliseconds: 900),
+      () {
+        _pacedPageLoadTimers.remove(assetId);
+        unawaited(_loadOnePdfPageUnit(assetId));
+      },
+    );
+  }
+
+  /// Parses a short slice of page metadata, then yields the worker back to
+  /// the visible native render before the next slice.
+  Future<void> _loadOnePdfPageUnit(int assetId) async {
+    if (_disposed || !_progressiveLoadStarted.contains(assetId)) return;
+    if (assetId < 0 || assetId >= _items.length) return;
+    final doc = _items[assetId]._pdfDocument;
+    if (doc == null) return;
+    var more = false;
+    try {
+      await doc.loadPagesProgressively(
+        loadUnitDuration: const Duration(milliseconds: 60),
+        onPageLoadProgress: (loaded, total, data) {
+          if (_disposed) return false;
+          more = loaded < total;
+          return false;
+        },
+      );
+    } catch (e) {
+      log.fine('Paced PDF page load stopped: $e');
+      return;
+    }
+    if (!more || _disposed) return;
+    _schedulePacedPageLoad(assetId);
   }
 
   void _forgetProgressiveLoad(int assetId) {
+    _pacedPageLoadTimers.remove(assetId)?.cancel();
     _progressiveLoadPending.remove(assetId);
     _progressiveLoadStarted.remove(assetId);
     _progressiveKickRequested.remove(assetId);
     _visibleLoads.remove(assetId);
+    _visibleLoadTargets.remove(assetId);
   }
 
   final Map<int, Future<void>> _visibleLoads = {};
+
+  /// Latest window target per asset: coalescing must not freeze the first
+  /// caller's page. During a pan, page 6 asks while the in-flight parse is
+  /// still on page 5 — the loop below re-runs for 6 right after, instead of
+  /// making 6 wait for the slow paced streamer (or the tile's active parse).
+  final Map<int, int> _visibleLoadTargets = {};
 
   /// Phase-1 parse: loads ONLY the visible window (page [pageIndex] ±
   /// [radius]) from the visible page outward, then STOPS. Critical because
   /// [PdfPage.ensureLoaded] is passive (it waits for someone else to parse):
   /// without this, page N paints only after full progressive streaming
-  /// parses pages 0..N in order (~seconds deep in a big doc). Coalesced per
-  /// asset; the post-paint kick streams the rest. Safe any number of times.
+  /// parses pages 0..N in order (~seconds deep in a big doc). Calls coalesce
+  /// per asset but the newest target always wins; the post-paint kick
+  /// streams the rest. Safe any number of times.
   Future<void> ensureVisiblePagesLoaded(
     int assetId,
     int pageIndex, {
@@ -410,9 +462,10 @@ class AssetCacheAll {
     if (_disposed || assetId < 0 || assetId >= _items.length) {
       return Future.value();
     }
+    _visibleLoadTargets[assetId] = pageIndex;
     final existing = _visibleLoads[assetId];
     if (existing != null) return existing;
-    final fut = _ensureVisiblePagesLoadedInner(assetId, pageIndex, radius);
+    final fut = _drainVisibleLoadTargets(assetId, radius);
     _visibleLoads[assetId] = fut;
     fut.whenComplete(() {
       if (identical(_visibleLoads[assetId], fut)) {
@@ -420,6 +473,17 @@ class AssetCacheAll {
       }
     });
     return fut;
+  }
+
+  /// Runs the visible-window parse until no newer target was requested while
+  /// the previous one ran. Bounded: each iteration consumes the latest
+  /// target; a fresh request only exists if the user actually moved.
+  Future<void> _drainVisibleLoadTargets(int assetId, int radius) async {
+    while (!_disposed) {
+      final target = _visibleLoadTargets.remove(assetId);
+      if (target == null) return;
+      await _ensureVisiblePagesLoadedInner(assetId, target, radius);
+    }
   }
 
   Future<void> _ensureVisiblePagesLoadedInner(
@@ -482,7 +546,10 @@ class AssetCacheAll {
     }
   }
 
-  ValueNotifier<PdfDocument?> getPdfNotifier(int assetId) {
+  ValueNotifier<PdfDocument?> getPdfNotifier(
+    int assetId, {
+    bool startOpen = true,
+  }) {
     if (assetId < 0 || assetId >= _items.length) {
       log.severe('getPdfNotifier: invalid assetId $assetId');
       return ValueNotifier(null);
@@ -495,6 +562,7 @@ class AssetCacheAll {
     }
 
     final canOpen =
+        startOpen &&
         item._pdfDocument == null &&
         (item.value != null || item.filePath != null);
     if (canOpen) {
@@ -543,7 +611,7 @@ class AssetCacheAll {
           if (_progressiveKickRequested.remove(assetId)) {
             _progressiveLoadPending.remove(assetId);
             _progressiveLoadStarted.add(assetId);
-            PdfOpenHelper.startBackgroundPageLoad(doc);
+            _schedulePacedPageLoad(assetId);
           } else {
             _registerDocForDeferredProgressiveLoad(assetId);
           }
@@ -1669,6 +1737,10 @@ class AssetCacheAll {
 
   void dispose() {
     _disposed = true;
+    for (final timer in _pacedPageLoadTimers.values) {
+      timer.cancel();
+    }
+    _pacedPageLoadTimers.clear();
     _pendingImageDecodes.clear();
     _imageDecodePriority.clear();
     _inflightImageDecodes.clear();

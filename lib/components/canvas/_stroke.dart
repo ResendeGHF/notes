@@ -212,6 +212,274 @@ class BinaryOptions {
   }
 }
 
+/// Pixel bites taken out of one stroke by the carve eraser.
+///
+/// The stroke geometry, pressure and paint anchor stay intact. Rendering
+/// punches these discs and round strokes out of the ink, the way a real
+/// eraser lifts pigment without splitting the mark or growing new caps.
+class StrokeCarveMask {
+  StrokeCarveMask();
+
+  final List<double> _radii = [];
+  final List<Float32List> _xy = [];
+
+  bool get isEmpty => _radii.isEmpty;
+  int get runCount => _radii.length;
+
+  double get maxRadius {
+    var m = 0.0;
+    for (final r in _radii) {
+      if (r > m) m = r;
+    }
+    return m;
+  }
+
+  int get fingerprint {
+    if (_radii.isEmpty) return 0;
+    final last = _xy.last;
+    return Object.hash(
+      _radii.length,
+      last.length,
+      _radii.last.toInt(),
+      last.isEmpty ? 0 : last[0].toInt(),
+      last.length < 2 ? 0 : last[1].toInt(),
+    );
+  }
+
+  StrokeCarveMask clone() {
+    final copy = StrokeCarveMask();
+    copy._radii.addAll(_radii);
+    for (final run in _xy) {
+      copy._xy.add(Float32List.fromList(run));
+    }
+    return copy;
+  }
+
+  /// Appends one continuous eraser contact.
+  ///
+  /// A new contact never joins the previous run: that chord is the straight
+  /// "deletion line" between the end of one gesture and the start of the next.
+  void addSweep(Offset from, Offset to, double radius) {
+    if (radius <= 0 || !from.dx.isFinite || !to.dx.isFinite) return;
+    if (_continuesLast(from, radius)) {
+      _appendPoint(_xy.length - 1, to);
+      return;
+    }
+    if ((from - to).distance < 0.4) {
+      _radii.add(radius);
+      _xy.add(Float32List.fromList([from.dx, from.dy]));
+      return;
+    }
+    final run = Float32List(4);
+    run[0] = from.dx;
+    run[1] = from.dy;
+    run[2] = to.dx;
+    run[3] = to.dy;
+    _radii.add(radius);
+    _xy.add(run);
+  }
+
+  /// True only when [from] is the end of the current run (same contact).
+  bool _continuesLast(Offset from, double radius) {
+    if (_radii.isEmpty || (_radii.last - radius).abs() > 0.05) return false;
+    final run = _xy.last;
+    if (run.length < 2) return false;
+    final dx = from.dx - run[run.length - 2];
+    final dy = from.dy - run[run.length - 1];
+    return dx * dx + dy * dy <= 1.0;
+  }
+
+  void _appendPoint(int runIndex, Offset p) {
+    final run = _xy[runIndex];
+    if (run.length >= 2) {
+      final lx = run[run.length - 2];
+      final ly = run[run.length - 1];
+      final dx = p.dx - lx;
+      final dy = p.dy - ly;
+      if (dx * dx + dy * dy < 0.36) return;
+    }
+    if (run.length >= 8000) return;
+    final next = Float32List(run.length + 2);
+    next.setRange(0, run.length, run);
+    next[run.length] = p.dx;
+    next[run.length + 1] = p.dy;
+    _xy[runIndex] = next;
+  }
+
+  void translate(Offset delta) {
+    if (delta == Offset.zero) return;
+    for (final run in _xy) {
+      for (var i = 0; i < run.length; i += 2) {
+        run[i] += delta.dx;
+        run[i + 1] += delta.dy;
+      }
+    }
+  }
+
+  void rotate(double angleRad, Offset center) {
+    if (angleRad == 0) return;
+    final cos = math.cos(angleRad);
+    final sin = math.sin(angleRad);
+    for (final run in _xy) {
+      for (var i = 0; i < run.length; i += 2) {
+        final dx = run[i] - center.dx;
+        final dy = run[i + 1] - center.dy;
+        run[i] = center.dx + dx * cos - dy * sin;
+        run[i + 1] = center.dy + dx * sin + dy * cos;
+      }
+    }
+  }
+
+  void scale(double factor, Offset center) {
+    if (factor == 1) return;
+    for (var r = 0; r < _radii.length; r++) {
+      _radii[r] *= factor;
+    }
+    for (final run in _xy) {
+      for (var i = 0; i < run.length; i += 2) {
+        run[i] = center.dx + (run[i] - center.dx) * factor;
+        run[i + 1] = center.dy + (run[i + 1] - center.dy) * factor;
+      }
+    }
+  }
+
+  /// Squared distance from a page point to the nearest carve sample/segment.
+  double distanceSq(double x, double y) {
+    var best = double.infinity;
+    for (final run in _xy) {
+      if (run.length < 2) continue;
+      if (run.length == 2) {
+        final dx = x - run[0];
+        final dy = y - run[1];
+        final d = dx * dx + dy * dy;
+        if (d < best) best = d;
+        continue;
+      }
+      for (var i = 0; i + 3 < run.length; i += 2) {
+        final d = _distSqToSeg(x, y, run[i], run[i + 1], run[i + 2], run[i + 3]);
+        if (d < best) best = d;
+      }
+    }
+    return best;
+  }
+
+  static double _distSqToSeg(
+    double px,
+    double py,
+    double ax,
+    double ay,
+    double bx,
+    double by,
+  ) {
+    final abx = bx - ax;
+    final aby = by - ay;
+    final ab2 = abx * abx + aby * aby;
+    if (ab2 < 1e-12) {
+      final dx = px - ax;
+      final dy = py - ay;
+      return dx * dx + dy * dy;
+    }
+    var t = ((px - ax) * abx + (py - ay) * aby) / ab2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    final dx = px - (ax + abx * t);
+    final dy = py - (ay + aby * t);
+    return dx * dx + dy * dy;
+  }
+
+  /// Clears the bitten pixels. Call inside a saveLayer that already holds
+  /// this stroke's ink so only that ink is removed.
+  void punch(Canvas canvas) {
+    final clear = Paint()
+      ..blendMode = BlendMode.clear
+      ..isAntiAlias = true
+      ..style = PaintingStyle.fill;
+    final strokePaint = Paint()
+      ..blendMode = BlendMode.clear
+      ..isAntiAlias = true
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    for (var i = 0; i < _radii.length; i++) {
+      final radius = _radii[i];
+      final run = _xy[i];
+      if (run.length < 2 || radius <= 0) continue;
+      if (run.length == 2) {
+        canvas.drawCircle(Offset(run[0], run[1]), radius, clear);
+        continue;
+      }
+      final path = Path()..moveTo(run[0], run[1]);
+      for (var k = 2; k + 1 < run.length; k += 2) {
+        path.lineTo(run[k], run[k + 1]);
+      }
+      strokePaint.strokeWidth = radius * 2;
+      canvas.drawPath(path, strokePaint);
+    }
+  }
+
+  void writeBinary(BinaryWriter writer) {
+    writer.writeInt(StrokeBinaryKeys.carveMask, _radii.length);
+    for (var i = 0; i < _radii.length; i++) {
+      writer.writeScaledFloatNoKey(_radii[i]);
+      final run = _xy[i];
+      final n = run.length ~/ 2;
+      writer.writeIntNoKey(n);
+      for (var k = 0; k < run.length; k++) {
+        writer.writeScaledFloatNoKey(run[k]);
+      }
+    }
+  }
+
+  static StrokeCarveMask readBinary(BinaryReader reader, int runCount) {
+    final mask = StrokeCarveMask();
+    final safeRuns = runCount.clamp(0, 4096);
+    for (var i = 0; i < safeRuns; i++) {
+      final radius = reader.readScaledFloat();
+      final n = reader.readIntNoKey().clamp(0, 8000);
+      final run = Float32List(n * 2);
+      for (var k = 0; k < run.length; k++) {
+        run[k] = reader.readScaledFloat();
+      }
+      if (radius > 0 && n > 0) {
+        mask._radii.add(radius);
+        mask._xy.add(run);
+      }
+    }
+    return mask;
+  }
+
+  List<List<double>> toJsonLists() {
+    final out = <List<double>>[];
+    for (var i = 0; i < _radii.length; i++) {
+      final run = _xy[i];
+      final row = <double>[ _radii[i] ];
+      for (var k = 0; k < run.length; k++) {
+        row.add(run[k]);
+      }
+      out.add(row);
+    }
+    return out;
+  }
+
+  static StrokeCarveMask? fromJsonLists(Object? raw) {
+    if (raw is! List || raw.isEmpty) return null;
+    final mask = StrokeCarveMask();
+    for (final row in raw) {
+      if (row is! List || row.length < 3) continue;
+      final radius = (row[0] as num).toDouble();
+      final n = (row.length - 1) ~/ 2;
+      if (radius <= 0 || n <= 0) continue;
+      final run = Float32List(n * 2);
+      for (var k = 0; k < run.length; k++) {
+        run[k] = (row[k + 1] as num).toDouble();
+      }
+      mask._radii.add(radius);
+      mask._xy.add(run);
+    }
+    return mask.isEmpty ? null : mask;
+  }
+}
+
 class Stroke implements HasBounds, Comparable<Stroke> {
   static final log = Logger('Stroke');
 
@@ -222,6 +490,262 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   final List<PointVector> points = [];
 
   int get sampleCount => points.length;
+
+  /// Live input decimation: while drawing, samples closer than this to the
+  /// last committed sample carry no visible ink (sub-pixel at any zoom) but
+  /// each one forces a full geometry rebuild. Absorbing them keeps per-frame
+  /// work bounded as the stroke grows — the same reason rnote smooths raw
+  /// input through its modeler and the Ink API coalesces MotionEvents.
+  static const kLiveMinSampleDistPx = 1.0;
+
+  /// In-place samples are still kept when pressure actually moves (pressing
+  /// harder without moving must widen fountain/brush nibs).
+  static const kLiveMinPressureDelta = 0.08;
+
+  /// Live render staging ("ink in stone"): while drawing, the committed
+  /// prefix is baked once into frozen butt-jointed chunks and only this many
+  /// trailing raw points are re-tessellated per frame. Frozen chunks never
+  /// rebuild, so already-drawn regions cannot dance, and per-frame UI
+  /// work stays constant no matter how long the stroke gets.
+  static const kLiveStageTailPoints = 192;
+
+  /// Scan-back window when choosing a freeze boundary: prefer a straight
+  /// run so butt joints join invisibly under any blend mode.
+  static const kLiveStageGateScan = 64;
+
+  /// Maximum tail overrun while no straight boundary is found (continuous
+  /// scribble through corners): freeze at the straightest point anyway so
+  /// per-frame work stays bounded.
+  static const kLiveStageTailOverrun = 256;
+
+  /// Minimum raw points per frozen chunk (degenerate ranges are deferred).
+  static const kLiveStageMinChunk = 3;
+
+  /// Minimum frozen span per extension: without this the freeze target
+  /// tracks the tip and every sample would seal a micro-chunk (hundreds of
+  /// draw calls). With it, extensions happen about every window/±, chunks
+  /// stay ~128+ points and per-frame draw calls stay in the dozens.
+  static const kLiveStageMinFreeze = 128;
+
+  /// Joint sagitta budget: sin(turn/2) * halfWidth below this reads as a
+  /// perfect joint. Scales the gate angle to the pen width.
+  static const kLiveStageGateSagittaPx = 0.75;
+
+  /// Hard cap: a single stroke never holds more raw samples than this.
+  /// Reached only by pathological input (minutes-long scribbles at 240 Hz);
+  /// enforced by visually-lossless RDP thinning so one user stroke stays one
+  /// object instead of OOMing the tessellator/file.
+  static const kMaxStrokeSamples = 6000;
+
+  /// Tessellation input cap for the spine mesh. Committed strokes beyond this
+  /// (e.g. loaded from old files) are stride-sampled with endpoints kept, so
+  /// vertex/index buffers — and the Uint16 index range below — stay bounded.
+  static const kMaxMeshSpinePoints = 4096;
+
+  /// `ui.Vertices.raw` takes Uint16 indices: never emit more than this many
+  /// vertices in one mesh (long strokes used to wrap indices → garbage/crash).
+  static const kMaxMeshVertices = 60000;
+
+  /// Spline upsampler output cap (total points). Prevents a single teleport
+  /// gap from exploding into hundreds of interpolated samples per segment.
+  static const kMaxSplineOutputPoints = 8192;
+
+  /// Minimum raw points before tile-local clipping engages. Short strokes
+  /// take the exact legacy full-geometry path (zero behavior change).
+  static const kTileClipMinPoints = 512;
+
+  /// Sutherland–Hodgman clip of a closed outline loop to [rect] (with
+  /// optional outward [bleed]). Exact for opaque fills; safe for idempotent
+  /// darken blending under overlap. Never use for translucent/additive
+  /// blends (bands) or bounds-anchored paints (gradient shift — clip the
+  /// geometry but keep the original bounds for the paint instead).
+  static List<Offset> clipPolygonToRect(
+    List<Offset> poly,
+    Rect rect, {
+    double bleed = 0,
+  }) {
+    if (poly.isEmpty) return const [];
+    final r = bleed > 0 ? rect.inflate(bleed) : rect;
+    var minX = double.infinity,
+        minY = double.infinity,
+        maxX = double.negativeInfinity,
+        maxY = double.negativeInfinity;
+    for (final p in poly) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+    if (maxX < r.left || minX > r.right || maxY < r.top || minY > r.bottom) {
+      return const [];
+    }
+    if (minX >= r.left &&
+        maxX <= r.right &&
+        minY >= r.top &&
+        maxY <= r.bottom) {
+      return poly;
+    }
+    // Closed loop: drop a duplicated trailing joint for the clip; the
+    // caller re-closes with addPolygon(..., true).
+    var src = poly;
+    if (src.length > 1 && src.first == src.last) {
+      src = src.sublist(0, src.length - 1);
+    }
+    List<Offset> clipEdge(
+      List<Offset> input,
+      bool Function(Offset p) inside,
+      Offset Function(Offset a, Offset b) intersect,
+    ) {
+      if (input.isEmpty) return const [];
+      final out = <Offset>[];
+      var s = input.last;
+      var sIn = inside(s);
+      for (final e in input) {
+        final eIn = inside(e);
+        if (eIn) {
+          if (!sIn) out.add(intersect(s, e));
+          out.add(e);
+        } else if (sIn) {
+          out.add(intersect(s, e));
+        }
+        s = e;
+        sIn = eIn;
+      }
+      return out;
+    }
+
+    Offset intersectX(Offset a, Offset b, double x) {
+      final dx = b.dx - a.dx;
+      if (dx.abs() < 1e-9) return Offset(x, a.dy);
+      final t = (x - a.dx) / dx;
+      return Offset(x, a.dy + t * (b.dy - a.dy));
+    }
+
+    Offset intersectY(Offset a, Offset b, double y) {
+      final dy = b.dy - a.dy;
+      if (dy.abs() < 1e-9) return Offset(a.dx, y);
+      final t = (y - a.dy) / dy;
+      return Offset(a.dx + t * (b.dx - a.dx), y);
+    }
+
+    var out = src;
+    out = clipEdge(out, (p) => p.dx >= r.left, (a, b) => intersectX(a, b, r.left));
+    if (out.isEmpty) return const [];
+    out = clipEdge(out, (p) => p.dx <= r.right, (a, b) => intersectX(a, b, r.right));
+    if (out.isEmpty) return const [];
+    out = clipEdge(out, (p) => p.dy >= r.top, (a, b) => intersectY(a, b, r.top));
+    if (out.isEmpty) return const [];
+    out = clipEdge(out, (p) => p.dy <= r.bottom, (a, b) => intersectY(a, b, r.bottom));
+    return out;
+  }
+
+  /// Buckets mesh triangles to [clip] (with [bleed] pad), compacting to the
+  /// referenced vertices. Returns null when nothing overlaps, or the
+  /// original arrays (no copy) when everything overlaps.
+  static ({Float32List positions, Uint16List indices, Int32List? colors})?
+  clipMeshArrays(
+    Float32List positions,
+    Uint16List indices,
+    Int32List? colors,
+    Rect clip, {
+    double bleed = 1.5,
+  }) {
+    if (positions.isEmpty || indices.isEmpty) return null;
+    final r = clip.inflate(bleed);
+    final triCount = indices.length ~/ 3;
+    var inside = 0;
+    for (var t = 0; t < triCount; t++) {
+      final o = t * 3;
+      var minX = double.infinity,
+          minY = double.infinity,
+          maxX = double.negativeInfinity,
+          maxY = double.negativeInfinity;
+      var ok = true;
+      for (var k = 0; k < 3; k++) {
+        final v = indices[o + k] * 2;
+        if (v + 1 >= positions.length) {
+          ok = false;
+          break;
+        }
+        final x = positions[v], y = positions[v + 1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      if (ok &&
+          maxX >= r.left &&
+          minX <= r.right &&
+          maxY >= r.top &&
+          minY <= r.bottom) {
+        inside++;
+      }
+    }
+    if (inside == 0) return null;
+    // Empty color buffers mean "no per-vertex colors" (solid ink): preserve
+    // null so clipped Vertices keep using the paint color. Forwarding an
+    // empty (but non-null) buffer would allocate zero-filled colors below,
+    // rendering transparent.
+    final bool hasColors = colors != null && colors.isNotEmpty;
+    if (inside == triCount) {
+      return (positions: positions, indices: indices, colors: hasColors ? colors : null);
+    }
+    final remap = <int, int>{};
+    final newPos = <double>[];
+    final newIdx = Uint16List(inside * 3);
+    final newCol = hasColors ? Int32List(inside * 2) : null;
+    var w = 0;
+    for (var t = 0; t < triCount; t++) {
+      final o = t * 3;
+      var minX = double.infinity,
+          minY = double.infinity,
+          maxX = double.negativeInfinity,
+          maxY = double.negativeInfinity;
+      var ok = true;
+      for (var k = 0; k < 3; k++) {
+        final v = indices[o + k] * 2;
+        if (v + 1 >= positions.length) {
+          ok = false;
+          break;
+        }
+        final x = positions[v], y = positions[v + 1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      if (!ok ||
+          maxX < r.left ||
+          minX > r.right ||
+          maxY < r.top ||
+          minY > r.bottom) {
+        continue;
+      }
+      for (var k = 0; k < 3; k++) {
+        final old = indices[o + k];
+        var mapped = remap[old];
+        if (mapped == null) {
+          mapped = newPos.length ~/ 2;
+          remap[old] = mapped;
+          newPos.add(positions[old * 2]);
+          newPos.add(positions[old * 2 + 1]);
+          if (newCol != null && hasColors && old * 2 + 1 < colors!.length) {
+            newCol[mapped * 2] = colors[old * 2];
+            newCol[mapped * 2 + 1] = colors[old * 2 + 1];
+          }
+        }
+        newIdx[w++] = mapped;
+      }
+    }
+    if (w == 0) return null;
+    return (
+      positions: Float32List.fromList(newPos),
+      indices: Uint16List.sublistView(newIdx, 0, w),
+      colors: newCol != null
+          ? Int32List.sublistView(newCol, 0, (w ~/ 3) * 2)
+          : null,
+    );
+  }
 
   Float32List packExportXyz() {
     final packed = Float32List(points.length * 3);
@@ -283,16 +807,117 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   void replacePointRangeFromEraser(
     List<PointVector> source,
     int start,
-    int end,
-  ) {
+    int end, {
+    double startT = 0.0,
+    double endT = 1.0,
+  }) {
+    // Fractional trims (carve mode): exact circle-boundary points interpolated
+    // in the neighboring segments instead of the last-surviving sample (which
+    // leaves up to a full sample spacing of serration/gap). startT in (0,1)
+    // trims the head into segment [start-1 → start]; endT in (0,1) trims the
+    // tail into segment [end → end+1]. Defaults reproduce the legacy
+    // whole-sample behavior bit-for-bit.
     points.clear();
-    for (int i = start; i <= end; i++) {
-      points.add(source[i]);
+    if (startT > 0.0 && startT < 1.0 && start - 1 >= 0) {
+      final a = source[start - 1];
+      final b = source[start];
+      points.add(PointVector(
+        a.x + (b.x - a.x) * startT,
+        a.y + (b.y - a.y) * startT,
+        lerpPressure(a.pressure, b.pressure, startT),
+      ));
+    }
+    for (int i = start; i <= end && i < source.length; i++) {
+      if (i >= 0) points.add(source[i]);
+    }
+    if (endT > 0.0 && endT < 1.0 && end + 1 < source.length) {
+      final a = source[end];
+      final b = source[end + 1];
+      points.add(PointVector(
+        a.x + (b.x - a.x) * endT,
+        a.y + (b.y - a.y) * endT,
+        lerpPressure(a.pressure, b.pressure, endT),
+      ));
     }
     _cachedBounds = null;
     _packedPoints = null;
     _cachedAveragePressure = null;
     markPolygonNeedsUpdating();
+  }
+
+  /// Pressure lerp for synthesized boundary points (carve/erase): null-safe,
+  /// clamped. Public for the eraser, which interpolates cut boundaries.
+  static double? lerpPressure(double? a, double? b, double t) {
+    if (a == null && b == null) return null;
+    return ((a ?? 0.5) + ((b ?? 0.5) - (a ?? 0.5)) * t).clamp(0.0, 1.0);
+  }
+
+  /// Paint anchor for area-erase fragments: bounds-anchored paints (gradients,
+  /// textures) keep the ORIGINAL stroke bounds so the shading phase does not
+  /// jump when a stroke is cut. Transient (never serialized): reloads
+  /// re-anchor, an accepted rare-case tradeoff that keeps the binary format
+  /// untouched.
+  Rect? paintAnchorBounds;
+
+  /// Carve-eraser bites. Null until the first carve. Geometry is unchanged.
+  StrokeCarveMask? carveMask;
+
+  bool get hasCarve => carveMask != null && !carveMask!.isEmpty;
+
+  /// Ensures a mask exists and records one eraser sweep through this stroke.
+  void addCarveSweep(Offset from, Offset to, double radius) {
+    final mask = carveMask ??= StrokeCarveMask();
+    mask.addSweep(from, to, radius);
+    _invalidateVectorFillPicture();
+  }
+
+  /// True when every sample's full width sits inside the carve bites, so the
+  /// stroke can be dropped instead of keeping an empty shell.
+  bool carveCoversAllInk(double eraserRadius) {
+    final mask = carveMask;
+    if (mask == null || mask.isEmpty) return false;
+    final need = eraserRadius - options.size / 2;
+    if (need <= 0) return false;
+    final pts = points;
+    if (pts.isEmpty) return false;
+    final needSq = need * need;
+    final stride = pts.length > 512 ? (pts.length / 512).ceil() : 1;
+    for (var i = 0; i < pts.length; i += stride) {
+      if (mask.distanceSq(pts[i].x, pts[i].y) > needSq) return false;
+    }
+    final last = pts.last;
+    return mask.distanceSq(last.x, last.y) <= needSq;
+  }
+
+  /// Applies butt (flat, full-width) caps on carved ends, keeping natural caps
+  /// where the fragment touches the original stroke ends. Cut ends must not
+  /// inherit round caps (they would bulge past the cut) nor tapers (they
+  /// would pinch a mid-stroke cut). [options] itself is final, so this swaps
+  /// the per-end option objects for owned copies; natural ends keep sharing
+  /// the original's (the original is discarded on carve, so no aliasing).
+  void applyCarvedCaps({required bool cutStart, required bool cutEnd}) {
+    if (!cutStart && !cutEnd) return;
+    if (cutStart) {
+      final s = options.start;
+      // customTaper: null (not s.customTaper): the ctor derives
+      // taperEnabled from a non-null customTaper, which would resurrect the
+      // taper we just disabled. A butt cut has no taper by definition.
+      options.start = s.copyWith(
+        cap: false,
+        taperEnabled: false,
+        customTaper: null,
+        easing: s.easing,
+      );
+    }
+    if (cutEnd) {
+      final e = options.end;
+      options.end = e.copyWith(
+        cap: false,
+        taperEnabled: false,
+        customTaper: null,
+        easing: e.easing,
+      );
+    }
   }
 
   bool get isEmpty => points.isEmpty;
@@ -569,6 +1194,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   void shift(Offset offset) {
     if (offset == Offset.zero) return;
 
+    _clearLiveStaging();
     _detachMeshFromGlobalCache();
     points.shift(offset);
     _packedPoints = null;
@@ -586,6 +1212,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
 
     _mapMeshPositions((x, y) => (x + offset.dx, y + offset.dy));
+    carveMask?.translate(offset);
     _rebuildCachedVerticesFromCommitted();
     _refreshSpineMeshAfterTransform();
     _invalidateVectorFillPicture();
@@ -594,6 +1221,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   void rotate(double angleRad, Offset center) {
     if (angleRad == 0.0) return;
 
+    _clearLiveStaging();
     _detachMeshFromGlobalCache();
     final cos = math.cos(angleRad);
     final sin = math.sin(angleRad);
@@ -633,6 +1261,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedPathValid = false;
     _invalidateVectorFillPicture();
     _neonInnerPath = null;
+    carveMask?.rotate(angleRad, center);
     _mapMeshPositions((x, y) {
       final dx = x - center.dx;
       final dy = y - center.dy;
@@ -647,6 +1276,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   void markPolygonNeedsUpdating({bool preserveBounds = false}) {
+    _clearLiveStaging();
+    _clearRawLiveTip();
+    _dropBrushPredictionCache();
     _lowQualityPolygon = null;
     _highQualityPolygon = null;
     _exportPolygon = null;
@@ -677,6 +1309,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       );
     }
     options.size *= factor;
+    carveMask?.scale(factor, center);
     markPolygonNeedsUpdating(preserveBounds: true);
     _mapMeshPositions((x, y) {
       return (
@@ -954,7 +1587,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..rotationDeg = toDoubleSafe(json['rot']) ?? 0
       ..flatEdge = flatEdge
       ..neon = json['n'] as bool? ?? false
-      ..paint = _strokePaintFromJson(json);
+      ..paint = _strokePaintFromJson(json)
+      ..carveMask = StrokeCarveMask.fromJsonLists(json['carve']);
     // Removed Google Ink snapshot keys (giF/giE/giS) are ignored so old
     // notes keep loading; their strokes arrive as fountain pen (see
     // ToolId.parsePenType).
@@ -1013,7 +1647,30 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       // would overwrite the paint via addAll below.
       if (!paint.isSolid) 'spi': paint.toJson(),
       if (toolId == ToolId.advancedPen) 'brush': brushOptions.toJson(),
+      if (hasCarve) 'carve': carveMask!.toJsonLists(),
     }..addAll(options.toJson());
+  }
+
+  /// Encoded brush JSON of the last serialized brush config. Hundreds of
+  /// strokes share the same pen prefs (insertion groups them), and
+  /// `toJson()+jsonEncode` rebuilds ~1KB of transient maps/strings per stroke
+  /// per save — the single hottest allocation in dense saves. Value-keyed, so
+  /// in-place edits can never serve stale bytes.
+  static AdvancedPenOptions? _lastBrushJsonOptions;
+  static String? _lastBrushJson;
+
+  static String _brushJsonFor(AdvancedPenOptions options) {
+    final cachedOptions = _lastBrushJsonOptions;
+    final cachedJson = _lastBrushJson;
+    if (cachedOptions != null &&
+        cachedJson != null &&
+        cachedOptions == options) {
+      return cachedJson;
+    }
+    final json = jsonEncode(options.toJson());
+    _lastBrushJsonOptions = options;
+    _lastBrushJson = json;
+    return json;
   }
 
   void toBinary(BinaryWriter writer) {
@@ -1022,21 +1679,26 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       options.end.cap = !flatEdge;
     }
 
-    final finitePoints = points
-        .where(
-          (point) =>
-              point.x.isFinite &&
-              point.y.isFinite &&
-              (!pressureEnabled ||
-                  point.pressure == null ||
-                  point.pressure!.isFinite),
-        )
-        .toList(growable: false);
+    bool isFinitePoint(PointVector point) =>
+        point.x.isFinite &&
+        point.y.isFinite &&
+        (!pressureEnabled ||
+            point.pressure == null ||
+            point.pressure!.isFinite);
+    // Two passes, zero temporaries: the old `.where().toList()` cloned the
+    // whole point list per stroke per save (1000+ lists on dense pages) just
+    // to print the count header. Same bytes out.
+    var finiteCount = 0;
+    for (var i = 0; i < points.length; i++) {
+      if (isFinitePoint(points[i])) finiteCount++;
+    }
 
     writer.writeString(StrokeBinaryKeys.shape, '');
-    writer.writeInt(StrokeBinaryKeys.pointCount, finitePoints.length);
+    writer.writeInt(StrokeBinaryKeys.pointCount, finiteCount);
     writer.writeBool(StrokeBinaryKeys.pressureEnabled, pressureEnabled);
-    for (final point in finitePoints) {
+    for (var i = 0; i < points.length; i++) {
+      final point = points[i];
+      if (!isFinitePoint(point)) continue;
       writer.writeScaledFloatNoKey(point.x);
       writer.writeScaledFloatNoKey(point.y);
       if (pressureEnabled) {
@@ -1059,8 +1721,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (toolId == ToolId.advancedPen) {
       writer.writeString(
         StrokeBinaryKeys.advancedBrushOptions,
-        jsonEncode(brushOptions.toJson()),
+        _brushJsonFor(brushOptions),
       );
+    }
+    if (hasCarve) {
+      carveMask!.writeBinary(writer);
     }
 
     BinaryOptions().optionsToBinary(writer, options);
@@ -1223,6 +1888,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
       key = reader.readKey();
     }
+    StrokeCarveMask? carveMask;
+    if (key == StrokeBinaryKeys.carveMask) {
+      carveMask = StrokeCarveMask.readBinary(reader, reader.readIntNoKey());
+      key = reader.readKey();
+    }
     final options = BinaryOptions().optionsFromBinary(reader, initialKey: key);
 
     // Bounds were tracked inline during the packed-points loop above using
@@ -1251,6 +1921,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       ..flatEdge = !options.start.cap
       ..neon = neon
       ..paint = paint
+      ..carveMask = carveMask
       .._cachedBounds = parsedBounds
       ..points.addAll(
         points.where(
@@ -1296,13 +1967,20 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       throw Exception('Stroke.skipFromBinary no pressureEnabled');
     }
     final pressureEnabled = reader.readBoolNoKey();
-    for (int i = 0; i < pointCount; i++) {
-      reader.readScaledFloat();
-      reader.readScaledFloat();
-      if (pressureEnabled) {
-        reader.readScaledFloat();
-      }
+    // Points are a packed run of scaled int32s (x, y, optional pressure).
+    // Jump the run in one seek — walking each float is what made indexing a
+    // dense note stall the UI isolate.
+    final stride = pressureEnabled ? 12 : 8;
+    final pointBytes = pointCount * stride;
+    if (pointCount < 0 ||
+        pointBytes < 0 ||
+        reader.offset + pointBytes > reader.data.lengthInBytes) {
+      throw Exception(
+        'Stroke.skipFromBinary point payload exceeds buffer '
+        '(count=$pointCount pressure=$pressureEnabled)',
+      );
     }
+    reader.offset += pointBytes;
 
     key = reader.readKey();
     if (key != StrokeBinaryKeys.pageIndex) {
@@ -1339,6 +2017,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       reader.readStringNoKey();
       key = reader.readKey();
     }
+    if (key == StrokeBinaryKeys.carveMask) {
+      final runs = reader.readIntNoKey();
+      StrokeCarveMask.readBinary(reader, runs);
+      key = reader.readKey();
+    }
     var giGuard = 0;
     while ((key == StrokeBinaryKeys.googleInkFamily ||
             key == StrokeBinaryKeys.googleInkEpsilon ||
@@ -1358,6 +2041,23 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   double? _prevDrawSampleTimeSec;
 
   List<PointVector>? _predictedTail;
+
+  /// Latest RAW input position in page coordinates (pre-stabilization).
+  ///
+  /// Committed samples trail it by the 1€ filter lag (tens of ms at low
+  /// speed / deceleration), while the Kalman lookahead collapses exactly
+  /// when stopping or turning — so the live tip would visibly lag the pen at
+  /// every stroke end. The live render therefore draws a short connector to
+  /// this truth position (see [_liveRawTipPoint]); pen-up commits it when
+  /// nothing else covers it (see [finishLiveGeometry]). Never serialized;
+  /// purely transient like [_predictedTail].
+  double _rawLiveTipX = double.nan;
+  double _rawLiveTipY = double.nan;
+  double? _rawLiveTipPressure;
+  Duration? _rawLiveTipTime;
+
+  bool get _hasRawLiveTip =>
+      _rawLiveTipX.isFinite && _rawLiveTipY.isFinite;
 
   /// Live-tip predictor: faithful Dart port of the `EventMotionPredictor`
   /// used with Google Ink (`androidx.input.motionprediction` Kalman stack).
@@ -1401,6 +2101,17 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       _addBrushModeledPoint(point, pressure, timestamp);
       return;
     }
+    // Truth anchor for the live tip connector (see [_liveRawTipPoint]):
+    // recorded pre-stabilization so deceleration/stop lag stays visible even
+    // though committed samples trail the filter. Guarded by event clock (see
+    // [noteRawLiveTip]) so arena focal points never regress fresher raw.
+    if (!options.isComplete) {
+      noteRawLiveTip(
+        point,
+        pressureEnabled ? pressure : null,
+        timestamp,
+      );
+    }
     if (!pressureEnabled) {
       pressure = null;
     } else if (pressure != null) {
@@ -1424,6 +2135,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         final snapped = snapLine(first, current);
         points.clear();
         _packedPoints = null;
+        // Straight-line assist rewrites the point list: staged indices reset.
+        _clearLiveStaging();
         _commitStabilizedSample(
           Offset(first.x, first.y),
           first.pressure,
@@ -1451,6 +2164,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     double? pressure,
     Duration? timestamp,
   ) {
+    // Truth anchor for the live tip connector (unused by the modeled brush
+    // itself, which predicts via its own buffer, but kept fresh so curved
+    // builders behave like other pens).
+    if (!options.isComplete) {
+      noteRawLiveTip(
+        point,
+        pressureEnabled ? pressure : null,
+        timestamp,
+      );
+    }
     final double p = pressureEnabled ? (pressure ?? 0.5).clamp(0.0, 1.0) : 0.5;
     final double nowSec = timestamp != null
         ? timestamp.inMicroseconds / 1e6
@@ -1505,8 +2228,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       _drawSampleTimeSec = nowSec;
       _packedPoints = null;
       _cachedAveragePressure = null;
-      markPolygonNeedsUpdating(preserveBounds: true);
-      _invalidateSpatialData();
+      _markLiveTailAppended(nullBounds: true);
+      _enforceSampleBudget();
+      _extendLiveStaging();
     } catch (_) {
       // Modeler rejected the sample (e.g. a huge time gap after resume):
       // restart the modeler at this sample and keep the raw point.
@@ -1534,8 +2258,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       _drawSampleTimeSec = nowSec;
       _packedPoints = null;
       _cachedAveragePressure = null;
-      markPolygonNeedsUpdating(preserveBounds: true);
-      _invalidateSpatialData();
+      _markLiveTailAppended(nullBounds: true);
+      _enforceSampleBudget();
+      _extendLiveStaging();
     }
   }
 
@@ -1573,12 +2298,32 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _brushHasOpenStroke = false;
     _packedPoints = null;
     _cachedAveragePressure = null;
+    _dropBrushPredictionCache();
   }
 
   /// Live brush prediction tail (`StrokeModeler::predict`), shown under the
   /// tip while drawing. Never committed; replaced by the next real sample
   /// or dropped on pen-up — same contract as Rnote's `prediction_buffer`.
+  ///
+  /// Memoized per modeler state: paint queries it up to 3x per frame (tail
+  /// presence, tail bake, full polygon) and `predict()` re-runs the model
+  /// each call. The cache is dropped on every modeler mutation (see
+  /// [_dropBrushPredictionCache]), so sharing the instance is exact — callers
+  /// only spread it into new lists, never mutate it.
   List<PointVector> _brushPredictionTail() {
+    if (_brushPredCache != null) return _brushPredCache!;
+    final tail = _computeBrushPredictionTail();
+    _brushPredCache = tail;
+    return tail;
+  }
+
+  List<PointVector>? _brushPredCache;
+
+  void _dropBrushPredictionCache() {
+    _brushPredCache = null;
+  }
+
+  List<PointVector> _computeBrushPredictionTail() {
     final modeler = _brushModeler;
     if (toolId != ToolId.advancedPen ||
         brushOptions.builderType != AdvancedPenBuilderType.modeled ||
@@ -1625,6 +2370,695 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     );
   }
 
+  /// True when a live sample adds no visible ink over the last committed one:
+  /// sub-[kLiveMinSampleDistPx] movement without a meaningful pressure change.
+  /// Shape-defining samples (first samples, corners, press-in-place) are kept.
+  bool _shouldAbsorbLiveSample(Offset samplePoint, double? pressure) {
+    if (points.isEmpty) return false;
+    final last = points.last;
+    final dx = samplePoint.dx - last.x;
+    final dy = samplePoint.dy - last.y;
+    if (dx * dx + dy * dy >=
+        kLiveMinSampleDistPx * kLiveMinSampleDistPx) {
+      return false;
+    }
+    final double lastPressure = last.pressure ?? 0.5;
+    final double newPressure = pressure ?? lastPressure;
+    if ((newPressure - lastPressure).abs() >= kLiveMinPressureDelta) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Enforces [kMaxStrokeSamples]: thins intermediate samples with a tight
+  /// RDP pass (endpoints always kept, so caps/joins stay put). Runs rarely —
+  /// it thins down to 3/4 of the cap — so amortized cost is negligible, while
+  /// unbounded growth (tessellator OOM, multi-MB saves) becomes impossible.
+  void _enforceSampleBudget() {
+    if (points.length <= kMaxStrokeSamples) return;
+    final int target = kMaxStrokeSamples * 3 ~/ 4;
+    double epsilon = 0.75;
+    List<PointVector> thinned = points;
+    for (var i = 0; i < 8 && thinned.length > target; i++) {
+      final next = _ramerDouglasPeucker(thinned, epsilon: epsilon);
+      if (next.length >= thinned.length) {
+        epsilon *= 2;
+        continue;
+      }
+      thinned = next;
+      epsilon *= 2;
+    }
+    if (thinned.length >= points.length) return;
+    points
+      ..clear()
+      ..addAll(thinned);
+    _packedPoints = null;
+    _cachedAveragePressure = null;
+    _cachedBounds = null;
+    markPolygonNeedsUpdating(preserveBounds: true);
+    _invalidateSpatialData();
+  }
+
+  /// Live render staging ("ink in stone").
+  ///
+  /// While a freehand stroke is being drawn, its committed prefix is baked
+  /// ONCE into frozen butt-jointed chunks; only the trailing tail is rebuilt
+  /// per frame. Frozen chunks never rebuild, so already-drawn regions cannot
+  /// reshape ("dance") no matter how long the stroke gets, and per-frame UI
+  /// work stays constant. Chunks use the exact committed pipeline settings
+  /// (full smoothing, true start/end caps only at true ends), so pen-up
+  /// changes nothing visible.
+  ///
+  /// Ranges share their joint point ([startPoint] of one chunk is [endPoint]
+  /// of the previous). Interior ends are butt-cut; freeze boundaries sit on
+  /// straight runs (see [_chooseStageBoundary]) so joints join invisibly
+  /// under any blend mode.
+  int _liveStagedEnd = -1;
+  final List<_LiveStageChunk> _liveFrozen = [];
+  _LiveStageChunk? _liveTail;
+  int _liveTailN = -1;
+  double _liveTailTipX = double.nan;
+  double _liveTailTipY = double.nan;
+  double _liveTailPredX = double.nan;
+  double _liveTailPredY = double.nan;
+  int _liveTailBrushN = -1;
+
+  /// True once a prefix has been frozen (painter then draws staged chunks).
+  /// Short strokes never stage: they use the exact legacy single-build path.
+  bool get hasLiveStaging => _liveFrozen.isNotEmpty;
+
+  /// Freehand ink families whose live rendering is staged. Textured fills
+  /// (bounds-anchored gradients/images), lasers and shapes keep the global
+  /// rebuild: deterministic like everything else post-fix, just unbounded.
+  bool get _stagesLiveGeometry {
+    if (options.isComplete) return false;
+    switch (toolId) {
+      case ToolId.ballpointPen:
+      case ToolId.fountainPen:
+      case ToolId.calligraphyPen:
+      case ToolId.pencil:
+      case ToolId.advancedPen:
+      case ToolId.highlighter:
+        break;
+      default:
+        return false;
+    }
+    if (hasNonSolidPaint && !paint.usesPencilNoise) return false;
+    return true;
+  }
+
+  void _clearLiveStaging() {
+    // Paths/Vertices are GC'd (Pictures deliberately avoided: no dispose).
+    _liveFrozen.clear();
+    _liveStagedEnd = -1;
+    _dropLiveTailCache();
+  }
+
+  void _dropLiveTailCache() {
+    _liveTail = null;
+    _liveTailN = -1;
+  }
+
+  /// Live append bookkeeping: committed caches are dropped (rebuilt lazily
+  /// post-commit, never during the gesture); the frozen prefix survives
+  /// untouched; only tail caches drop.
+  void _markLiveTailAppended({bool nullBounds = false}) {
+    if (options.isComplete) {
+      markPolygonNeedsUpdating(preserveBounds: true);
+      return;
+    }
+    _dropBrushPredictionCache();
+    _lowQualityPolygon = null;
+    _highQualityPolygon = null;
+    _exportPolygon = null;
+    _highQualitySpine = null;
+    _lowQualityPath = null;
+    _cachedPathValid = false;
+    _cachedVertices = null;
+    _cachedVerticesHash = null;
+    _packedPoints = null;
+    _neonInnerPath = null;
+    _invalidateVectorFillPicture();
+    if (nullBounds) _invalidateSpatialData();
+    _dropLiveTailCache();
+  }
+
+  /// Per-tool live staging windows. The Advanced brush composes outlines with
+  /// heavyweight round joins/caps per joint (up to 44 cap segments with
+  /// trig), so its full-rebuild cost per frame dwarfs mesh pens at the same
+  /// point count (measured ~20x ballpoint on real notes). It stages earlier
+  /// with smaller chunks at IDENTICAL pipeline/settings — and, unlike mesh
+  /// strips (explicit triangles, no winding risk), its path chunks overlap by
+  /// [_liveStageOverlap] points (see [_bakeLiveChunk]): butt-cutting a curvy
+  /// ribbon with a straight chord can self-intersect the chunk outline, and
+  /// nonZero winding then cancels into holes that vanish on commit. Overlap
+  /// keeps every cut buried inside a neighbor's body, so cuts can never show
+  /// seams or holes — opaque overdraw is pixel-identical. Typical handwriting
+  /// letters (<100 pts) still take the exact legacy single-build path.
+  int get _liveStageTailPoints =>
+      toolId == ToolId.advancedPen ? 64 : kLiveStageTailPoints;
+  int get _liveStageMinFreeze =>
+      toolId == ToolId.advancedPen ? 32 : kLiveStageMinFreeze;
+  int get _liveStageTailOverrun =>
+      toolId == ToolId.advancedPen ? 96 : kLiveStageTailOverrun;
+
+  /// Overlap (in raw points) between adjacent Advanced live chunks. Only for
+  /// opaque ink (alpha 1): translucent overdraw would double-darken the band.
+  /// Mesh-family/highlighter/pencil chunks keep exact adjacency (meshes share
+  /// exact edges; highlighter blending is not idempotent).
+  static const int _liveStageOverlap = 8;
+
+  bool get _liveStageOverlaps =>
+      toolId == ToolId.advancedPen && color.alpha == 0xFF;
+
+  /// Freeze another prefix chunk once the tail outgrows its window.
+  void _extendLiveStaging() {
+    if (!_stagesLiveGeometry) return;
+    final n = points.length;
+    final tailWindow = _liveStageTailPoints;
+    final tailCount = n - 1 - _liveStagedEnd;
+    if (tailCount <= tailWindow) return;
+    var ideal = n - 1 - tailWindow;
+    ideal = ideal.clamp(_liveStagedEnd + 1, n - 2);
+    if (ideal - _liveStagedEnd < _liveStageMinFreeze) return;
+    final force = tailCount > tailWindow + _liveStageTailOverrun;
+    final f = _chooseStageBoundary(ideal, force: force);
+    if (f <= _liveStagedEnd) return;
+    if (f - _liveStagedEnd < kLiveStageMinChunk) return;
+    final chunk = _bakeLiveChunk(_liveStagedEnd, f, isTip: false);
+    if (chunk == null) return;
+    _liveFrozen.add(chunk);
+    _liveStagedEnd = f;
+    _dropLiveTailCache();
+  }
+
+  /// Picks a freeze boundary near [ideal] on the straightest run behind the
+  /// tip, so butt joints join invisibly. Returns -1 to defer (no straight
+  /// run in the scan window) unless [force] (tail overrun bound).
+  int _chooseStageBoundary(int ideal, {required bool force}) {
+    final n = points.length;
+    const k = 8;
+    if (n < k * 2 + 2) return force ? ideal : -1;
+    ideal = ideal.clamp(k, n - 1 - k);
+    final halfW = math.max(options.size / 2, 0.5);
+    var minDot = 1.0 - 2.0 * math.pow(kLiveStageGateSagittaPx / halfW, 2);
+    minDot = minDot.clamp(0.7, 0.995);
+    final start = math.max(_liveStagedEnd + 1, ideal - kLiveStageGateScan);
+    var best = -1;
+    var bestDot = -2.0;
+    for (var f = ideal; f >= start; f--) {
+      final bx = points[f].x - points[f - k].x;
+      final by = points[f].y - points[f - k].y;
+      final dx = points[f + k].x - points[f].x;
+      final dy = points[f + k].y - points[f].y;
+      final bl = math.sqrt(bx * bx + by * by);
+      final dl = math.sqrt(dx * dx + dy * dy);
+      if (bl < 1e-6 || dl < 1e-6) continue;
+      final dot = (bx * dx + by * dy) / (bl * dl);
+      if (dot > bestDot) {
+        bestDot = dot;
+        best = f;
+      }
+      if (dot >= minDot) return f;
+    }
+    return force ? best : -1;
+  }
+
+  /// Builds one staged chunk over raw points [s]..[e] (inclusive, shared
+  /// joints). Interior ends are butt-cut; true start/end caps only when the
+  /// chunk touches the true stroke ends ([isTip] keeps the live end cap).
+  /// Returns null for degenerate ranges (caller defers).
+  _LiveStageChunk? _bakeLiveChunk(int s, int e, {required bool isTip}) {
+    final start = math.max(0, s);
+    if (e - start + 1 < 2 || e >= points.length) return null;
+    final sub = points.sublist(start, e + 1);
+    // Overlapping geometry range (Advanced opaque only): bake [lo..hi]
+    // widened by [_liveStageOverlap] on interior sides so every butt cut is
+    // buried inside a neighbor chunk's body. Without this, cutting a curvy
+    // ribbon with a straight chord self-intersects the chunk outline and
+    // nonZero winding cancels into holes that vanish on commit (live/ink
+    // mismatch). Opaque overdraw is pixel-identical; bookkeeping below still
+    // uses the exact committed [start..e] range. The live tip truth point
+    // rides on top of the widened range when it extends past it.
+    final int overlap = _liveStageOverlaps ? _liveStageOverlap : 0;
+    final int glo = start > 0 ? math.max(0, start - overlap) : start;
+    final int ghi = e < points.length - 1
+        ? math.min(points.length - 1, e + overlap)
+        : e;
+    final List<PointVector> geoSub =
+        (overlap == 0 || (glo == start && ghi == e))
+        ? sub
+        : points.sublist(glo, ghi + 1);
+    // Live tip truth shared by mesh and path tip chunks (see [_liveRawTipPoint]):
+    // computed once against committed points; mesh rides it after Kalman,
+    // path chunks append it after their sub-range. Null unless the raw truth
+    // strictly extends the live end.
+    final PointVector? tipRawPt = isTip ? _liveRawTipPoint(points) : null;
+    final List<PointVector> tipSub;
+    if (isTip) {
+      tipSub = tipRawPt == null ? geoSub : [...geoSub, tipRawPt];
+    } else {
+      tipSub = geoSub;
+    }
+    final startIsTrue = start <= 0;
+    final bool isMeshFamily =
+        toolId == ToolId.ballpointPen ||
+        toolId == ToolId.fountainPen ||
+        toolId == ToolId.calligraphyPen;
+    final bool isPencil = toolId == ToolId.pencil;
+    final bool isNeon = neon && toolId == ToolId.ballpointPen;
+
+    ui.Vertices? mesh;
+    Path? path;
+    Path? auxPath;
+    Rect? bounds;
+
+    if (isMeshFamily || isPencil || isNeon) {
+      final arrays = _buildMeshRange(
+        sub,
+        openStart: !startIsTrue,
+        openEnd: !isTip,
+        withPrediction: isTip,
+        startTaper: startIsTrue && options.start.taperEnabled,
+        endTaper: isTip && options.end.taperEnabled,
+        liveRawTip: tipRawPt,
+      );
+      if (arrays != null) {
+        mesh = ui.Vertices.raw(
+          ui.VertexMode.triangles,
+          arrays.positions,
+          indices: arrays.indices,
+          colors: arrays.colors,
+        );
+        final pos = arrays.positions;
+        var minX = double.infinity,
+            minY = double.infinity,
+            maxX = double.negativeInfinity,
+            maxY = double.negativeInfinity;
+        for (var i = 0; i + 1 < pos.length; i += 2) {
+          final x = pos[i], y = pos[i + 1];
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        if (minX <= maxX) {
+          bounds = Rect.fromLTRB(minX, minY, maxX, maxY);
+        }
+      }
+    }
+
+    if (toolId == ToolId.advancedPen) {
+      final spine = [...tipSub, if (isTip) ..._brushPredictionTail()];
+      final poly = _buildBrushPolygonFor(
+        spine,
+        startRounded: startIsTrue
+            ? brushOptions.lineCap == AdvancedPenLineCap.rounded
+            : false,
+        endRounded: isTip
+            ? brushOptions.lineCap == AdvancedPenLineCap.rounded
+            : false,
+      );
+      path = _stagedPathFor(poly);
+      bounds = path.getBounds();
+    } else if (toolId == ToolId.highlighter) {
+      final poly = _buildHighlighterRangePoly(
+        tipSub,
+        startCap: startIsTrue,
+        endCap: isTip,
+      );
+      path = _stagedPathFor(poly);
+      bounds = path.getBounds();
+    } else if (isPencil || isNeon) {
+      final poly = _buildBallpointRangePoly(
+        tipSub,
+        startCap: startIsTrue,
+        endCap: isTip,
+      );
+      path = _stagedPathFor(poly);
+      if (isNeon) {
+        final inner = buildBallpointStylePolygon(
+          tipSub,
+          size: options.size * 0.4,
+          targetScale: 1.0,
+          startCap: startIsTrue,
+          endCap: isTip,
+        );
+        auxPath = _stagedPathFor(inner);
+      }
+      final b = path.getBounds();
+      if (bounds == null) {
+        bounds = b;
+      } else if (!b.isEmpty) {
+        bounds = bounds.expandToInclude(b);
+      }
+    }
+
+    if (mesh == null && (path == null || path.getBounds().isEmpty)) {
+      return null;
+    }
+    return _LiveStageChunk(
+      startPoint: start,
+      endPoint: e,
+      firstX: sub.first.x,
+      firstY: sub.first.y,
+      lastX: sub.last.x,
+      lastY: sub.last.y,
+      mesh: mesh,
+      path: path,
+      auxPath: auxPath,
+      bounds: bounds,
+    );
+  }
+
+  /// Mesh triangulation over an explicit raw-point range (live staging).
+  /// Mirrors [_generateSpineMeshLOD] inputs with full committed settings.
+  ///
+  /// [liveRawTip] (from [_liveRawTipPoint]) rides at the END of the Kalman
+  /// tail — the same [..., kalman..., raw] order as the polygon live path, so
+  /// mesh and path renders agree exactly and no hook can form (the helper
+  /// only returns a tip strictly beyond the Kalman end).
+  ({Float32List positions, Uint16List indices, Int32List? colors})?
+  _buildMeshRange(
+    List<PointVector> sub, {
+    required bool openStart,
+    required bool openEnd,
+    required bool withPrediction,
+    required bool startTaper,
+    required bool endTaper,
+    PointVector? liveRawTip,
+  }) {
+    if (sub.length < 2) return null;
+    final packed = Float32List(sub.length * 3);
+    for (var i = 0; i < sub.length; i++) {
+      packed[i * 3] = sub[i].x;
+      packed[i * 3 + 1] = sub[i].y;
+      packed[i * 3 + 2] = sub[i].pressure ?? 0.5;
+    }
+    Float32List? tail;
+    if (withPrediction && _usesLiveCheapSpineMesh && _predictedTail != null) {
+      final src = _predictedTail!;
+      final extra = liveRawTip == null ? 0 : 1;
+      tail = Float32List((src.length + extra) * 3);
+      for (var i = 0; i < src.length; i++) {
+        tail[i * 3] = src[i].x;
+        tail[i * 3 + 1] = src[i].y;
+        tail[i * 3 + 2] = src[i].pressure ?? 0.5;
+      }
+      if (liveRawTip != null) {
+        final o = src.length * 3;
+        tail[o] = liveRawTip.x;
+        tail[o + 1] = liveRawTip.y;
+        tail[o + 2] = liveRawTip.pressure ?? 0.5;
+      }
+    } else if (withPrediction &&
+        _usesLiveCheapSpineMesh &&
+        liveRawTip != null) {
+      tail = Float32List(3);
+      tail[0] = liveRawTip.x;
+      tail[1] = liveRawTip.y;
+      tail[2] = liveRawTip.pressure ?? 0.5;
+    }
+    return Stroke.buildSpineMeshArrays(
+      packedBase: packed,
+      predictedTail: tail,
+      toolId: toolId,
+      flatEdge: flatEdge,
+      size: options.size,
+      smoothing: options.smoothing,
+      simulatePressure: options.simulatePressure,
+      isComplete: false,
+      startCap: options.start.cap,
+      startTaper: startTaper,
+      startCustomTaper: options.start.customTaper,
+      endCap: options.end.cap,
+      endTaper: endTaper,
+      endCustomTaper: options.end.customTaper,
+      openStart: openStart,
+      openEnd: openEnd,
+      pressureMapsToCoverage: paint.pressureMapsToCoverage,
+      pressureEnabled: pressureEnabled,
+      targetScale: 1.0,
+    );
+  }
+
+  /// Advanced outline over an explicit spine (live staging). Mirrors
+  /// [_getBrushPolygon] exactly for full ranges.
+  List<Offset> _buildBrushPolygonFor(
+    List<PointVector> spine, {
+    required bool startRounded,
+    required bool endRounded,
+  }) {
+    if (spine.isEmpty) return const [];
+    List<PointVector> shaped = spine;
+    if (brushOptions.builderType == AdvancedPenBuilderType.curved &&
+        shaped.length >= 4) {
+      shaped = sampleCatmullRom(shaped);
+    }
+    try {
+      return composeAdvancedOutline(
+        shaped,
+        strokeWidth: options.size,
+        curve: brushOptions.pressureCurve,
+        roundedCaps: brushOptions.lineCap == AdvancedPenLineCap.rounded,
+        startRounded: startRounded,
+        endRounded: endRounded,
+      );
+    } catch (e, st) {
+      log.warning('composeAdvancedOutline crashed in staging: $e', e, st);
+      return shaped.map((p) => Offset(p.x, p.y)).toList();
+    }
+  }
+
+  /// Highlighter outline over an explicit raw-point range (live staging).
+  /// Mirrors the [getPolygon] highlighter branch exactly for full ranges.
+  List<Offset> _buildHighlighterRangePoly(
+    List<PointVector> sub, {
+    required bool startCap,
+    required bool endCap,
+  }) {
+    final List<PointVector> source;
+    if (sub.length >= 3) {
+      final radius = (options.size / 2) * highlighterStrokeScaleFactor;
+      final decimated = decimateStrokeSpine(
+        sub,
+        minDistance: math.max(1.5, radius * 1.5),
+      );
+      source = decimated.length >= 3 ? _getSmoothSpine(decimated) : decimated;
+    } else {
+      source = sub;
+    }
+    var strokePoints = source;
+    if (strokePoints.length == 1) {
+      strokePoints = [strokePoints.first, strokePoints.first];
+    }
+    return _buildHighlighterOutline(
+      strokePoints,
+      radius: (options.size / 2) * highlighterStrokeScaleFactor,
+      roundCaps: !flatEdge,
+      startCap: startCap,
+      endCap: endCap,
+    );
+  }
+
+  /// Ballpoint-style outline over an explicit raw-point range (pencil grain
+  /// outline + neon glow, live staging). Mirrors the [getPolygon] ballpoint
+  /// branch exactly for full ranges.
+  List<Offset> _buildBallpointRangePoly(
+    List<PointVector> sub, {
+    required bool startCap,
+    required bool endCap,
+  }) {
+    if (sub.length < 3) {
+      return buildBallpointStyleOutline(
+        sub,
+        size: options.size,
+        startCap: startCap,
+        endCap: endCap,
+      );
+    }
+    final packed = Float32List(sub.length * 3);
+    for (var i = 0; i < sub.length; i++) {
+      packed[i * 3] = sub[i].x;
+      packed[i * 3 + 1] = sub[i].y;
+      packed[i * 3 + 2] = sub[i].pressure ?? 0.5;
+    }
+    const toleranceSq = (0.12 * 1.0) * (0.12 * 1.0);
+    final smooth = _getAdaptiveSpineFast(
+      packed,
+      toleranceSq,
+      segStepPx: 1.25,
+      smoothing: options.smoothing,
+    );
+    final n = smooth.length ~/ 3;
+    final sourcePoints = List.generate(
+      n,
+      (i) => PointVector(smooth[i * 3], smooth[i * 3 + 1], smooth[i * 3 + 2]),
+    );
+    return buildBallpointStyleOutline(
+      sourcePoints,
+      size: options.size,
+      startCap: startCap,
+      endCap: endCap,
+    );
+  }
+
+  /// Closed fill path from an outline polygon, mirroring [highQualityPath]
+  /// for authored outlines (dedup + nonZero, no smoothing).
+  Path _stagedPathFor(List<Offset> poly) {
+    final path = Path()..fillType = PathFillType.nonZero;
+    if (poly.isEmpty) return path;
+    const epsilon = 1e-6;
+    final List<Offset> reduced = [poly[0]];
+    for (var i = 1; i < poly.length; i++) {
+      final prev = reduced.last;
+      final p = poly[i];
+      if ((p.dx - prev.dx).abs() > epsilon ||
+          (p.dy - prev.dy).abs() > epsilon) {
+        reduced.add(p);
+      }
+    }
+    if (reduced.length >= 2) {
+      final first = reduced.first;
+      final last = reduced.last;
+      if ((last.dx - first.dx).abs() <= epsilon &&
+          (last.dy - first.dy).abs() <= epsilon) {
+        reduced.removeLast();
+      }
+    }
+    if (reduced.isEmpty) return path;
+    path.addPolygon(reduced, true);
+    return path;
+  }
+
+  /// Rebuilds the live tail chunk when the tip moved. Frozen chunks are
+  /// never touched here.
+  void _ensureLiveTail() {
+    if (!_stagesLiveGeometry || points.length < 2) {
+      _liveTail = null;
+      return;
+    }
+    final s = math.max(0, _liveStagedEnd);
+    final n = points.length;
+    final tip = points.last;
+    final pred = _predictedTail != null && _predictedTail!.isNotEmpty
+        ? _predictedTail!.last
+        : null;
+    final brushN =
+        toolId == ToolId.advancedPen &&
+            brushOptions.builderType == AdvancedPenBuilderType.modeled
+        ? _brushPredictionTail().length
+        : 0;
+    final tail = _liveTail;
+    if (tail != null &&
+        _liveTailN == n &&
+        tail.startPoint == s &&
+        _liveTailTipX == tip.x &&
+        _liveTailTipY == tip.y &&
+        (_liveTailPredX.isNaN
+            ? pred == null
+            : pred != null &&
+                  _liveTailPredX == pred.x &&
+                  _liveTailPredY == pred.y) &&
+        _liveTailBrushN == brushN) {
+      return;
+    }
+    _liveTail = _bakeLiveChunk(_liveStagedEnd, n - 1, isTip: true);
+    _liveTailN = n;
+    _liveTailTipX = tip.x;
+    _liveTailTipY = tip.y;
+    if (pred == null) {
+      _liveTailPredX = double.nan;
+      _liveTailPredY = double.nan;
+    } else {
+      _liveTailPredX = pred.x;
+      _liveTailPredY = pred.y;
+    }
+    _liveTailBrushN = brushN;
+  }
+
+  /// Frozen staged meshes (mesh families, pencil grain mask, neon core).
+  List<ui.Vertices> get liveFrozenMeshes => [
+    for (final c in _liveFrozen)
+      if (c.mesh != null) c.mesh!,
+  ];
+
+  /// Live tail mesh, built on demand (bounded window).
+  ui.Vertices? get liveTailMesh {
+    _ensureLiveTail();
+    return _liveTail?.mesh;
+  }
+
+  /// Frozen staged outline paths (advanced, highlighter, pencil, neon glow).
+  List<Path> get liveFrozenPaths => [
+    for (final c in _liveFrozen)
+      if (c.path != null) c.path!,
+  ];
+
+  /// Live tail outline path, built on demand (bounded window).
+  Path? get liveTailPath {
+    _ensureLiveTail();
+    return _liveTail?.path;
+  }
+
+  /// Frozen neon inner cores.
+  List<Path> get liveFrozenAuxPaths => [
+    for (final c in _liveFrozen)
+      if (c.auxPath != null) c.auxPath!,
+  ];
+
+  /// Live tail neon inner core.
+  Path? get liveTailAuxPath {
+    _ensureLiveTail();
+    return _liveTail?.auxPath;
+  }
+
+  /// Frozen chunk bounds (painter culls off-screen chunks when zoomed in).
+  List<Rect> get liveFrozenBounds => [
+    for (final c in _liveFrozen)
+      if (c.bounds != null) c.bounds!,
+  ];
+
+  /// Painter-facing staged chunks: frozen prefix + live tail (when built).
+  /// Empty unless a prefix has been frozen.
+  List<LiveStagedChunkView> get liveStagedChunks {
+    if (_liveFrozen.isEmpty) return const [];
+    _ensureLiveTail();
+    final out = <LiveStagedChunkView>[
+      for (final c in _liveFrozen)
+        LiveStagedChunkView(
+          mesh: c.mesh,
+          path: c.path,
+          auxPath: c.auxPath,
+          bounds: c.bounds,
+        ),
+    ];
+    final tail = _liveTail;
+    if (tail != null &&
+        (tail.mesh != null ||
+            tail.path != null ||
+            tail.auxPath != null)) {
+      out.add(
+        LiveStagedChunkView(
+          mesh: tail.mesh,
+          path: tail.path,
+          auxPath: tail.auxPath,
+          bounds: tail.bounds,
+        ),
+      );
+    }
+    return out;
+  }
+
+  @visibleForTesting
+  int get debugLiveFrozenEnd => _liveStagedEnd;
+
+  @visibleForTesting
+  int get debugLiveChunkCount => _liveFrozen.length;
+
+  @visibleForTesting
+  int get debugLiveTailStart => math.max(0, _liveStagedEnd);
+
   void _commitStabilizedSampleWithGapFill(
     Offset stabilizedPoint,
     double? pressure,
@@ -1632,6 +3066,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   ) {
     if (points.isEmpty) {
       _commitStabilizedSample(stabilizedPoint, pressure, timeSec);
+      return;
+    }
+
+    // Live input decimation: absorb sub-pixel jitter samples. They add
+    // vertices (and a full rebuild) but no visible ink; without this a long
+    // cursive/diagram stroke accumulates thousands of samples and every new
+    // sample re-tessellates all of them — the progressive jank behind this
+    // issue. Time bookkeeping still advances so later timestamps stay sane.
+    if (!options.isComplete &&
+        _shouldAbsorbLiveSample(stabilizedPoint, pressure)) {
+      _prevDrawSampleTimeSec = _drawSampleTimeSec;
+      _drawSampleTimeSec = timeSec;
       return;
     }
 
@@ -1690,7 +3136,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    markPolygonNeedsUpdating(preserveBounds: true);
+    _markLiveTailAppended();
+    _enforceSampleBudget();
+    _extendLiveStaging();
   }
 
   Offset? _filteredPoint;
@@ -1771,6 +3219,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _drawSampleTimeSec = null;
     _prevDrawSampleTimeSec = null;
     _predictedTail = null;
+    _clearRawLiveTip();
+    _dropBrushPredictionCache();
     _motionPredictor.reset();
     predictionAccurateTool = true;
     _brushModeler = null;
@@ -1784,6 +3234,119 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _predictedTail = null;
   }
 
+  /// Test-only: injects a live prediction tip, mirroring the Kalman tail that
+  /// [recordPredictionSample] + [_recomputePredictionTail] produce on device.
+  @visibleForTesting
+  void debugSetLivePrediction(Offset tip) {
+    _predictedTail = [
+      PointVector(
+        tip.dx,
+        tip.dy,
+        points.isEmpty ? 0.5 : (points.last.pressure ?? 0.5),
+      ),
+    ];
+  }
+
+  /// Notes the latest raw input position for the live tip connector.
+  ///
+  /// Call with EVERY pointer event (even sub-threshold ones that add no ink):
+  /// slow end-of-stroke creep must still move the displayed tip. Only
+  /// bookkeeping here (a few field writes + tail/path dirty flags when the
+  /// tip actually moved); tessellation stays lazy in paint, so this is safe
+  /// at 240 Hz. Stale (older-clock) events never regress the tip: the raw
+  /// Listener path runs ahead of the gesture-arena focal path for the same
+  /// motion.
+  void noteRawLiveTip(Offset raw, double? pressure, [Duration? timestamp]) {
+    if (options.isComplete) return;
+    if (timestamp != null) {
+      final prevTime = _rawLiveTipTime;
+      if (prevTime != null && timestamp < prevTime) return;
+      _rawLiveTipTime = timestamp;
+    }
+    final rx = raw.dx, ry = raw.dy;
+    if (_hasRawLiveTip && _rawLiveTipX == rx && _rawLiveTipY == ry) return;
+    _rawLiveTipX = rx;
+    _rawLiveTipY = ry;
+    _rawLiveTipPressure = pressure;
+    // The connector below rides in the live tail / live path / live mesh:
+    // drop those caches so the next paint rebuilds them (bounded tail work
+    // only). The full mesh cache must go too — otherwise sub-threshold creep
+    // (absorbed samples add no points) would keep painting a stale tip.
+    _dropLiveTailCache();
+    _cachedPathValid = false;
+    _cachedVertices = null;
+    _cachedVerticesHash = null;
+  }
+
+  /// Shared turn gate for every live-tip extension (Kalman lookahead and raw
+  /// connector alike): while committed travel already turned away from filter
+  /// velocity, extending spikes a kink across the bend. Threshold stays at
+  /// 60deg (cos<0.5), covered by `turning tip drops the lead`.
+  bool _leadGatePasses() {
+    if (points.length < 3) return true;
+    final vel = _motionPredictor.velocity;
+    final vl = vel.distance;
+    if (vl <= 1e-6) return true;
+    final a = points[points.length - 3];
+    final b = points.last;
+    final dx = b.x - a.x;
+    final dy = b.y - a.y;
+    final l = math.sqrt(dx * dx + dy * dy);
+    if (l <= 1e-6) return true;
+    return (dx * vel.dx + dy * vel.dy) / (l * vl) >= 0.5;
+  }
+
+  /// Raw-tip connector point for live renders, or null when nothing beyond
+  /// committed ink should be drawn. Supplements (never duplicates) the
+  /// Kalman tail: it is appended only when the raw truth sits beyond the
+  /// current live end (committed tip when the tail is empty, tail end
+  /// otherwise) — appending behind an overshooting lookahead would hook.
+  /// Gated exactly like prediction (straight-line snap, modeled brush and
+  /// turns keep pristine geometry), so existing lead tests are unaffected.
+  PointVector? _liveRawTipPoint(List<PointVector> source) {
+    if (options.isComplete || source.isEmpty) return null;
+    if (!_allowsMotionPrediction) return null;
+    if (toolId == ToolId.highlighter && Highlighter.straightLine.value) {
+      return null;
+    }
+    if (toolId == ToolId.advancedPen &&
+        brushOptions.builderType == AdvancedPenBuilderType.modeled) {
+      return null;
+    }
+    if (!_hasRawLiveTip) return null;
+    final last = source.last;
+    final dx = _rawLiveTipX - last.x;
+    final dy = _rawLiveTipY - last.y;
+    // Sub-pixel truth adds no visible ink; skip to keep caches valid.
+    if (dx * dx + dy * dy <= 0.75 * 0.75) return null;
+    // Wild filter state (sharp turn) abstains exactly like prediction: the
+    // direction gate alone cannot tell a stop from a turn (both align with
+    // travel), but jank can. Calm flight and rests extend to the pen.
+    if (!_motionPredictor.allowsShortLead(
+      accurateTool: predictionAccurateTool,
+    )) {
+      return null;
+    }
+    if (!_leadGatePasses()) return null;
+    if (stows.strokePrediction.value &&
+        _predictedTail != null &&
+        _predictedTail!.isNotEmpty) {
+      final t = _predictedTail!.last;
+      final tdx = t.x - last.x;
+      final tdy = t.y - last.y;
+      // Kalman already reaches past the raw truth: appending would hook back.
+      if (dx * dx + dy * dy <=
+          tdx * tdx + tdy * tdy + 0.25 * 0.25) {
+        return null;
+      }
+    }
+    return PointVector(
+      _rawLiveTipX,
+      _rawLiveTipY,
+      _rawLiveTipPressure ?? last.pressure,
+    );
+  }
+
   void _recomputePredictionTail() {
     _predictedTail = null;
     if (!_allowsMotionPrediction) return;
@@ -1794,38 +3357,25 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (toolId == ToolId.highlighter && Highlighter.straightLine.value) {
       return;
     }
-    // Turning tip: the filter velocity still points along the old travel
-    // while committed samples already turned. Projecting now spikes a kink
-    // across the bend — a bow-tie whose winding cancels into a white hole,
-    // and end caps leaning off-axis. Like a real pen, show ink exactly
-    // under the tip through turns; lead resumes on straight runs.
-    if (points.length >= 3) {
-      final vel = _motionPredictor.velocity;
-      final vl = vel.distance;
-      if (vl > 1e-6) {
-        final a = points[points.length - 3];
-        final b = points.last;
-        final dx = b.x - a.x;
-        final dy = b.y - a.y;
-        final l = math.sqrt(dx * dx + dy * dy);
-        if (l > 1e-6) {
-          final cos = (dx * vel.dx + dy * vel.dy) / (l * vl);
-          if (cos < 0.5) return;
-        }
-      }
-    }
+    if (!_leadGatePasses()) return;
 
     // Horizon mirrors upstream's PredictionEstimator: the predicted samples
     // land when the next frame renders — one display frame, scaled by the
     // user amount. Short by design: the tip cancels pipeline latency under
     // the stylus instead of overshooting past it as a tangent ruler.
+    // (Deliberately NOT lengthened: the raw truth connector above already
+    // covers stabilization lag exactly; a longer estimate would only
+    // overshoot further into turns. Bounded by the `lead stays short` /
+    // `committed tip stays bounded` tests.)
     final amount = stows.strokePredictionAmount.value.clamp(0.0, 1.0);
+    if (amount <= 0.01) return;
     final refreshHz = DisplayInkFeel.instance.refreshHz;
     final frameMs = refreshHz > 1 ? 1000.0 / refreshHz : 16.7;
     final targetMs = (frameMs * amount).clamp(
       0.0,
       MotionEventPredictor.maxPredictionMs,
     );
+    if (targetMs <= 0.5) return;
 
     final tips = _motionPredictor.predictPolyline(
       predictionTargetMs: targetMs,
@@ -1868,22 +3418,31 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     List<PointVector> source, {
     bool reuseBuffer = false,
   }) {
-    if (!_allowsMotionPrediction ||
-        options.isComplete ||
-        !stows.strokePrediction.value ||
-        _predictedTail == null || _predictedTail!.isEmpty) {
-      return source;
-    }
-    if (source.isEmpty) return source;
+    if (options.isComplete || source.isEmpty) return source;
+    final bool useKalman =
+        _allowsMotionPrediction &&
+        !options.isComplete &&
+        stows.strokePrediction.value &&
+        _predictedTail != null &&
+        _predictedTail!.isNotEmpty;
+    // Raw truth connector (end-of-stroke anti-lag): appended only when it
+    // extends past the current live end (see [_liveRawTipPoint]).
+    final rawTip = _liveRawTipPoint(source);
+    if (!useKalman && rawTip == null) return source;
 
     if (!reuseBuffer) {
-      return [...source, ..._predictedTail!];
+      return [
+        ...source,
+        if (useKalman) ..._predictedTail!,
+        if (rawTip != null) rawTip,
+      ];
     }
     final scratch = _liveRenderScratch ??= <PointVector>[];
     scratch
       ..clear()
-      ..addAll(source)
-      ..addAll(_predictedTail!);
+      ..addAll(source);
+    if (useKalman) scratch.addAll(_predictedTail!);
+    if (rawTip != null) scratch.add(rawTip);
     return scratch;
   }
 
@@ -1931,8 +3490,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       return _getBrushPolygon();
     }
 
-    // 1. Get points WITH the prediction tip appended FIRST
-    final List<PointVector> basePoints = _pointsForLiveRender(points);
+    // 1. Get points WITH the prediction tip appended FIRST.
+    // Live and committed tessellation use the same inputs and settings, so
+    // already-drawn regions never reshape ("ink in stone"). Per-frame cost
+    // is bounded separately by live render staging (frozen chunks + tail).
+    // Live reuses a scratch buffer (no `[...a, ...b]` alloc per frame);
+    // committed keeps the exact legacy copy path.
+    final List<PointVector> basePoints = _pointsForLiveRender(
+      points,
+      reuseBuffer: !options.isComplete,
+    );
 
     // 2. Create a temporary packed array including the prediction tip
     Float32List? packedBase;
@@ -2137,7 +3704,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// centerline points, with the live prediction tail appended while
   /// drawing. Mirrors Rnote's `PenPath::draw_composed` for `SmoothOptions`.
   List<Offset> _getBrushPolygon() {
-    final List<PointVector> spine = [...points, ..._brushPredictionTail()];
+    // Raw tip truth (end-of-stroke anti-lag), mirroring [_pointsForLiveRender]
+    // for the brush path: appended only when it strictly extends the live end
+    // (null for modeled brushes, snapped highlighter work never reaches here,
+    // turns and Kalman-covered runs) and only when the brush model emitted
+    // nothing past it (never hook back behind a predicted tip). Keeps live ==
+    // committed on pen-up.
+    final brushTail = _brushPredictionTail();
+    final rawTip = options.isComplete ? null : _liveRawTipPoint(points);
+    final List<PointVector> spine = [
+      ...points,
+      ...brushTail,
+      if (rawTip != null && brushTail.isEmpty) rawTip,
+    ];
     if (spine.isEmpty) return const [];
     List<PointVector> shaped = spine;
     if (brushOptions.builderType == AdvancedPenBuilderType.curved &&
@@ -2481,6 +4060,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   static List<Offset> buildBallpointStyleOutline(
     List<PointVector> strokePoints, {
     required double size,
+    // Open ribbon ends for staged chunks (default closed = current look).
+    bool? startCap,
+    bool? endCap,
   }) {
     var pts = strokePoints;
     if (pts.isEmpty) return const <Offset>[];
@@ -2511,6 +4093,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         // Round both sides of hairpin returns into tip bulbs; the legacy
         // single-sided bevel reads square-ish at sharp U-turns.
         dualSidedReturnJoins: true,
+        startCap: startCap,
+        endCap: endCap,
       );
     } catch (e, st) {
       log.warning('getStroke crashed in buildBallpointStyleOutline: $e', e, st);
@@ -2523,6 +4107,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     List<PointVector> points, {
     required double size,
     double targetScale = 1.0,
+    // Open ribbon ends for staged chunks (default closed = current look).
+    bool? startCap,
+    bool? endCap,
   }) {
     if (points.isEmpty) return const <Offset>[];
     var strokePoints = List<PointVector>.from(points);
@@ -2549,14 +4136,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         (i) => PointVector(smooth[i * 3], smooth[i * 3 + 1], smooth[i * 3 + 2]),
       );
     }
-    return buildBallpointStyleOutline(strokePoints, size: size);
+    return buildBallpointStyleOutline(
+      strokePoints,
+      size: size,
+      startCap: startCap,
+      endCap: endCap,
+    );
   }
 
   double get maxY {
     return points.isEmpty ? 0 : points.map((point) => point.y).reduce(math.max);
   }
 
-  List<Offset> _shapeRecognitionCenterline({int maxInputPoints = 192}) {
+  List<Offset> _shapeRecognitionCenterline({int maxInputPoints = 96}) {
+    // The $1 recognizer resamples to 64 points internally regardless, so 96
+    // input points keep full accuracy at a fraction of the resample/insert
+    // cost (was 192 — pure oversampling, same scores).
     if (points.length <= maxInputPoints) {
       return points.map((p) => Offset(p.x, p.y)).toList(growable: false);
     }
@@ -2571,18 +4166,28 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return sampled;
   }
 
-  RecognizedUnistroke? detectShape() {
-    if (points.length < 2) return null;
-    final centerline = _shapeRecognitionCenterline();
-
-    if (centerline.length < 25 && isAngleBracketPreferred(centerline)) {
-      final angleOnly = default$1Unistrokes
+  /// Angle-bracket reference templates, filtered once (not per recognition).
+  static final List<Unistroke<DefaultUnistrokeNames>> _angleBracketTemplates =
+      default$1Unistrokes
           .where(
             (u) =>
                 u.name == DefaultUnistrokeNames.leftAngleBracket ||
                 u.name == DefaultUnistrokeNames.rightAngleBracket,
           )
-          .toList();
+          .toList(growable: false);
+
+  /// Line reference templates, filtered once (not per recognition).
+  static final List<Unistroke<DefaultUnistrokeNames>> _lineTemplates =
+      default$1Unistrokes
+          .where((unistroke) => unistroke.name == DefaultUnistrokeNames.line)
+          .toList(growable: false);
+
+  RecognizedUnistroke? detectShape() {
+    if (points.length < 2) return null;
+    final centerline = _shapeRecognitionCenterline();
+
+    if (centerline.length < 25 && isAngleBracketPreferred(centerline)) {
+      final angleOnly = _angleBracketTemplates;
       if (angleOnly.isNotEmpty) {
         final angleResult = recognizeUnistroke(
           centerline,
@@ -2605,9 +4210,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     final recognized = recognizeUnistroke(
       points,
-      overrideReferenceUnistrokes: default$1Unistrokes
-          .where((unistroke) => unistroke.name == DefaultUnistrokeNames.line)
-          .toList(),
+      overrideReferenceUnistrokes: _lineTemplates,
     );
     if (recognized == null) return false;
     assert(recognized.name == DefaultUnistrokeNames.line);
@@ -2719,7 +4322,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint;
+        ..paint = paint
+        ..carveMask = carveMask?.clone();
 
   /// Freehand ink that can be rewritten as another pen (not shapes).
   bool get canConvertStrokeType =>
@@ -2758,7 +4362,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ..rotationDeg = rotationDeg
           ..flatEdge = flatEdge
           ..neon = neon
-          ..paint = paint;
+          ..paint = paint
+          ..carveMask = carveMask?.clone();
     rebuilt.markPolygonNeedsUpdating();
     return rebuilt;
   }
@@ -2776,7 +4381,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ..rotationDeg = rotationDeg
         ..flatEdge = flatEdge
         ..neon = neon
-        ..paint = paint;
+        ..paint = paint
+        // Fragments keep the page-space carve bites, so trimming a carved
+        // stroke with the area eraser does not resurrect the erased ink.
+        ..carveMask = carveMask?.clone();
 
   static List<PointVector> _ramerDouglasPeucker(
     List<PointVector> points, {
@@ -2912,6 +4520,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       neon,
       inkUsesPredictionInPath ? _predictionLiveFingerprint : 0,
       paint.pressureMapsToCoverage,
+      carveMask?.fingerprint ?? 0,
     );
   }
 
@@ -2957,6 +4566,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// The Advanced pen is path-fill only (variable-width ribbon outline),
   /// like the highlighter.
   bool get canBatchSolidMesh {
+    if (hasCarve) return false;
     if (toolId == ToolId.highlighter) return false;
     if (toolId == ToolId.advancedPen) return false;
     if (hasNonSolidPaint) return false;
@@ -3034,18 +4644,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }) {
     if (!usesVectorFillPicture) return null;
     final qualityBucket = currentScale < 0.7 ? 0 : 1;
+    final anchor = paintAnchorBounds;
     final hash = Object.hash(
       visualFingerprint,
       invert,
       fallbackColor.toARGB32(),
       paint.cacheKey,
       qualityBucket,
+      anchor,
     );
     if (_vectorFillPicture != null && _vectorFillPictureHash == hash) {
       return _vectorFillPicture;
     }
     final path = highQualityPath;
-    final bounds = path.getBounds();
+    // Bounds-anchored paints (gradients/textures) keep the pre-cut phase via
+    // the carve anchor so shading does not jump when a stroke is split.
+    final bounds = anchor ?? path.getBounds();
     if (bounds.isEmpty) return null;
     ui.Image? texture;
     if (paint.usesTexture) {
@@ -3091,17 +4705,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
 
-  /// Live getStroke / perfect-freehand should track the stylus, not settle
-  /// into the committed outline. Committed geometry keeps full smoothing.
+  /// Live and committed outlines use identical settings: what the user sees
+  /// while drawing is exactly what stays after pen-up ("ink in stone").
+  /// (Live smoothing used to be reduced here, which morphed every stroke on
+  /// commit.)
   StrokeOptions _outlineOptionsForCurrentPhase(StrokeOptions base) {
     var opts = base;
-    if (!options.isComplete) {
-      opts = opts.copyWith(
-        smoothing: base.smoothing * 0.42,
-        streamline: base.streamline * 0.28,
-      );
-    }
-    
     // Safeguard: Impede crashes do double.clamp no buildVariableWidthOutline
     if (opts.minSizeRatio > opts.maxSizeRatio) {
       opts = opts.copyWith(
@@ -3126,13 +4735,63 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   Path? get liveTipPathFallback => null;
 
-  /// Commit live geometry on pen-up. Cheap pens keep the last live mesh
-  /// until [visualFingerprint] changes (prediction is cleared here so the
-  /// committed rebuild drops the lookahead tail).
+  /// Commit live geometry on pen-up. The live tip included the motion
+  /// prediction lookahead, so it is committed as real points first: what the
+  /// user saw is what stays ("ink in stone", no tip snap-back).
   void finishLiveGeometry() {
     _finishBrushModeledStroke();
+    final bool isModeledBrush =
+        toolId == ToolId.advancedPen &&
+        brushOptions.builderType == AdvancedPenBuilderType.modeled;
+    final bool isStraightLineAssist =
+        toolId == ToolId.highlighter && Highlighter.straightLine.value;
+    // Commit the raw lift truth when nothing else covers it: at rest the
+    // Kalman tail is empty and committed samples trail the 1€ filter, so the
+    // live connector (see [_liveRawTipPoint]) showed ink the point list lacks
+    // — without this the stroke end would snap back by the filter lag.
+    // Skipped exactly where the connector is skipped (snap assist, modeled
+    // brush); those paths already end truthfully by construction.
+    if (!isModeledBrush &&
+        !isStraightLineAssist &&
+        (_predictedTail == null || _predictedTail!.isEmpty) &&
+        points.isNotEmpty &&
+        _hasRawLiveTip) {
+      final last = points.last;
+      final dx = _rawLiveTipX - last.x;
+      final dy = _rawLiveTipY - last.y;
+      if (dx * dx + dy * dy > 0.5 * 0.5) {
+        points.add(
+          PointVector(
+            _rawLiveTipX,
+            _rawLiveTipY,
+            _rawLiveTipPressure ?? last.pressure,
+          ),
+        );
+        _packedPoints = null;
+        _cachedAveragePressure = null;
+      }
+    }
+    if (_predictedTail != null &&
+        _predictedTail!.isNotEmpty &&
+        points.isNotEmpty) {
+      points.addAll(_predictedTail!);
+      _predictedTail = null;
+      _packedPoints = null;
+      _cachedAveragePressure = null;
+    }
+    _clearRawLiveTip();
     options.isComplete = true;
+    _clearLiveStaging();
     markPolygonNeedsUpdating();
+    _enforceSampleBudget();
+  }
+
+  /// Drops the transient raw-tip anchor (stroke ended or transformed).
+  void _clearRawLiveTip() {
+    _rawLiveTipX = double.nan;
+    _rawLiveTipY = double.nan;
+    _rawLiveTipPressure = null;
+    _rawLiveTipTime = null;
   }
 
   /// Solid mesh chunks for tile batching (spine-mesh pens only).
@@ -3271,6 +4930,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     List<PointVector> points, {
     required double radius,
     required bool roundCaps,
+    // Open ribbon ends for staged chunks: butt-cut instead of caps so
+    // consecutive chunks join invisibly under any blend mode.
+    bool startCap = true,
+    bool endCap = true,
   }) {
     if (points.length < 2) return [];
 
@@ -3354,7 +5017,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final result = <Offset>[];
     
     final p0 = points.first;
-    if (roundCaps) {
+    if (!startCap) {
+      // Butt joint: plain cross-section, no cap arc or flat-tip extension.
+      result.add(leftSide.first);
+    } else if (roundCaps) {
       const segments = 12;
       for (int i = 0; i <= segments; i++) {
         final angle = math.pi * (i / segments);
@@ -3389,7 +5055,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     result.addAll(rightSide);
 
     final pLast = points.last;
-    if (roundCaps) {
+    // Butt joint: rightSide.last is already the edge; leftSide.reversed
+    // below closes it. No cap arc or flat-tip extension.
+    if (endCap && roundCaps) {
       const segments = 12;
       for (int i = 0; i <= segments; i++) {
         final angle = math.pi * (i / segments);
@@ -3397,7 +5065,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         final vy = math.cos(angle) * (-nyLast) + math.sin(angle) * tyLast;
         result.add(Offset(pLast.x + radius * vx, pLast.y + radius * vy));
       }
-    } else {
+    } else if (endCap) {
       final extendDist = radius * 0.3;
       final cornerRadius = radius * 0.2;
       
@@ -3533,8 +5201,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   static void _stabilizeMeshEndpointPressures(
     Float32List p,
     int count,
-    ToolId toolId,
-  ) {
+    ToolId toolId, {
+    bool stabilizeStart = true,
+    bool stabilizeEnd = true,
+  }) {
     if (count < 3) return;
     const w = 4;
     final startRawW = toolId == ToolId.fountainPen ? 0.28 : 0.4;
@@ -3551,11 +5221,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       s1 += p[i];
       n1++;
     }
-    if (n0 > 0) {
+    if (n0 > 0 && stabilizeStart) {
       final ref = s0 / n0;
       p[0] = (p[0] * startRawW + ref * (1 - startRawW)).clamp(0.05, 1.0);
     }
-    if (n1 > 0) {
+    if (n1 > 0 && stabilizeEnd) {
       final ref = s1 / n1;
       p[count - 1] = (p[count - 1] * endRawW + ref * (1 - endRawW)).clamp(
         0.05,
@@ -3588,6 +5258,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     required bool pressureMapsToCoverage,
     required bool pressureEnabled,
     required double targetScale,
+    // Open ribbon ends for staged chunks: no cap hemispheres, no endpoint
+    // pressure stabilization at open ends. Interior chunk ends stay butt-cut
+    // so consecutive chunks join invisibly; tapers are controlled separately
+    // via [startTaper]/[endTaper] (pass false for interior).
+    bool openStart = false,
+    bool openEnd = false,
   }) {
     final double scale = targetScale;
     // Mild overview LOD for hemisphere tessellation only — writing zoom unchanged.
@@ -3678,6 +5354,23 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     Float32List smoothPoints = dedupe.finish();
     int count = smoothPoints.length ~/ 3;
 
+    // Bound tessellation input: files may hold pre-existing huge strokes and
+    // the spline upsampler multiplies samples. Stride-sample (endpoints kept
+    // so caps stay put) so vertex/index buffers — and the Uint16 index range
+    // below — stay bounded no matter the input.
+    if (count > kMaxMeshSpinePoints) {
+      final int stride = (count / kMaxMeshSpinePoints).ceil();
+      final kept = _Float32Builder(estimatedSize: kMaxMeshSpinePoints * 3 + 3);
+      for (int i = 0; i < count - 1; i += stride) {
+        final int o = i * 3;
+        kept.add(smoothPoints[o], smoothPoints[o + 1], smoothPoints[o + 2]);
+      }
+      final int o = (count - 1) * 3;
+      kept.add(smoothPoints[o], smoothPoints[o + 1], smoothPoints[o + 2]);
+      smoothPoints = kept.finish();
+      count = smoothPoints.length ~/ 3;
+    }
+
     if (count == 1) {
       final _Float32Builder two = _Float32Builder(estimatedSize: 6);
       two.add(smoothPoints[0], smoothPoints[1], smoothPoints[2]);
@@ -3696,6 +5389,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final bool roundCapOverridesTaper = isFountain || isBallpoint;
 
     var generateStartCap =
+        !openStart &&
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
@@ -3703,6 +5397,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         (!startTaper || !canTaper || roundCapOverridesTaper);
 
     final bool generateEndCap =
+        !openEnd &&
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
@@ -3711,11 +5406,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     final bool useCoverage = toolId == ToolId.pencil && pressureMapsToCoverage;
 
-    // Spine points can emit >1 quad pair when miter subdivisions activate.
-    final int maxPairs =
-        count * (targetCapSegments + _capSegments + 8) +
-        targetCapSegments * 8 +
-        48;
+    // Spine points emit ~1 pair each; cap hemispheres and miter
+    // subdivisions draw from this same budget (joints are clamped below), so
+    // pathological input degrades a joint instead of overrunning the buffers.
+    // Sized so emitted vertices always fit Uint16 indices (< 65535).
+    final int maxPairs = count * 2 + targetCapSegments * 8 + 64;
     final Float32List positions = Float32List(maxPairs * 4);
     final Uint16List indices = Uint16List(maxPairs * 6);
     final Int32List? colorsArray = useCoverage ? Int32List(maxPairs * 2) : null;
@@ -3741,6 +5436,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
 
     void addVertexPair(double px, double py, double nx, double ny, double w, double pressure) {
+      // Backstop: never overrun the preallocated strip (miter clamping below
+      // keeps this unreachable; truncating beats corrupting indices).
+      if (pairCount >= maxPairs) return;
       double vx = nx, vy = ny;
       if (isCalligraphy) {
         final t = transformCalli(nx, ny);
@@ -3784,7 +5482,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         smoothedPressures[i] = p;
       }
       if (usePressure) {
-        _stabilizeMeshEndpointPressures(smoothedPressures, count, toolId);
+        _stabilizeMeshEndpointPressures(
+          smoothedPressures,
+          count,
+          toolId,
+          stabilizeStart: !openStart,
+          stabilizeEnd: !openEnd,
+        );
       }
     }
 
@@ -3984,6 +5688,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           ? (bdx * fdx + bdy * fdy) / (lenB * lenF)
           : 1.0;
 
+      double miterLength =
+          1.0 / math.sqrt(math.max(0.01, (1.0 + dotMiter) / 2.0));
+      miterLength = miterLength.clamp(1.0, 2.5);
+
       if (dotMiter < 0.85 &&
           targetCapSegments > 0 &&
           lenB > 0.01 &&
@@ -3993,21 +5701,29 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           2,
           _capSegments,
         );
-        double angleB = math.atan2(nBy, nBx);
-        double angleF = math.atan2(nFy, nFx);
-        double diff = angleF - angleB;
-        while (diff > math.pi) diff -= 2 * math.pi;
-        while (diff < -math.pi) diff += 2 * math.pi;
+        // Spend remaining strip budget on this joint (end cap reserved): a
+        // starved joint falls back to one mitered pair instead of OOMing.
+        final int endReserve = generateEndCap
+            ? (isBallpoint ? targetCapSegments * 2 : targetCapSegments) + 1
+            : 1;
+        final int remaining = maxPairs - pairCount - endReserve;
+        if (remaining <= 1) {
+          addVertexPair(px, py, nx * miterLength, ny * miterLength, width, pressure);
+        } else {
+          if (segments > remaining - 1) segments = remaining - 1;
+          double angleB = math.atan2(nBy, nBx);
+          double angleF = math.atan2(nFy, nFx);
+          double diff = angleF - angleB;
+          while (diff > math.pi) diff -= 2 * math.pi;
+          while (diff < -math.pi) diff += 2 * math.pi;
 
-        for (int step = 0; step <= segments; step++) {
-          double t = step / segments;
-          double a = angleB + diff * t;
-          addVertexPair(px, py, math.cos(a), math.sin(a), width, pressure);
+          for (int step = 0; step <= segments; step++) {
+            double t = step / segments;
+            double a = angleB + diff * t;
+            addVertexPair(px, py, math.cos(a), math.sin(a), width, pressure);
+          }
         }
       } else {
-        double miterLength =
-            1.0 / math.sqrt(math.max(0.01, (1.0 + dotMiter) / 2.0));
-        miterLength = miterLength.clamp(1.0, 2.5);
         addVertexPair(px, py, nx * miterLength, ny * miterLength, width, pressure);
       }
     }
@@ -4084,6 +5800,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       vIndex,
     );
     final Uint16List finalIndices = Uint16List.sublistView(indices, 0, iIndex);
+    // Uint16 index range, guaranteed by the input stride cap + strip budget.
+    assert(
+      pairCount * 2 <= kMaxMeshVertices,
+      'mesh vertex overflow: ${pairCount * 2} > $kMaxMeshVertices',
+    );
     final Int32List? finalColors = useCoverage ? Int32List.sublistView(colorsArray!, 0, pairCount * 2) : null;
     return (
       positions: finalPositions,
@@ -4097,14 +5818,35 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _ensurePackedPoints();
     if (_packedPoints == null || _packedPoints!.length < 6) return null;
     Float32List? tail;
+    // Live tip truth (end-of-stroke anti-lag): rides at the END of the Kalman
+    // tail — same [..., kalman..., raw] order as the polygon live path, so
+    // mesh and path renders agree exactly. [_liveRawTipPoint] returns null
+    // unless the raw truth strictly extends the live end (no hooks), and for
+    // committed strokes (or when Kalman already covers) nothing changes.
+    PointVector? liveRawTip;
+    if (_usesLiveCheapSpineMesh) {
+      liveRawTip = _liveRawTipPoint(points);
+    }
     if (_usesLiveCheapSpineMesh && _predictedTail != null) {
       final src = _predictedTail!;
-      tail = Float32List(src.length * 3);
+      final extra = liveRawTip == null ? 0 : 1;
+      tail = Float32List((src.length + extra) * 3);
       for (int i = 0; i < src.length; i++) {
         tail[i * 3] = src[i].x;
         tail[i * 3 + 1] = src[i].y;
         tail[i * 3 + 2] = src[i].pressure ?? 0.5;
       }
+      if (liveRawTip != null) {
+        final o = src.length * 3;
+        tail[o] = liveRawTip.x;
+        tail[o + 1] = liveRawTip.y;
+        tail[o + 2] = liveRawTip.pressure ?? 0.5;
+      }
+    } else if (_usesLiveCheapSpineMesh && liveRawTip != null) {
+      tail = Float32List(3);
+      tail[0] = liveRawTip.x;
+      tail[1] = liveRawTip.y;
+      tail[2] = liveRawTip.pressure ?? 0.5;
     }
     final arrays = Stroke.buildSpineMeshArrays(
       packedBase: _packedPoints!,
@@ -4148,6 +5890,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     int flattenEndSegments = 2,
     double segStepPx = 2.5,
     double smoothing = 0.0,
+    int maxOutputPoints = kMaxSplineOutputPoints,
   }) {
     final int rawN = input.length ~/ 3;
     if (rawN < 3) return input;
@@ -4206,6 +5949,15 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
       final bool flattenThis =
           flattenTipSegments && (i == 0 || i >= n - 1 - endFlatten);
+
+      // Output budget: a teleport gap (dropped frames during lag) must not
+      // explode into hundreds of interpolated samples — link raw samples
+      // directly once exhausted. The adaptive spline still reconstructs the
+      // curve across the gap from the true samples.
+      if (out._count ~/ 3 >= maxOutputPoints) {
+        out.add(p2x, p2y, p2p);
+        continue;
+      }
 
       final int steps = flattenThis
           ? 1
@@ -4340,6 +6092,48 @@ class _StrokeMeshData {
   final Uint16List indices;
   final Int32List? colors;
   _StrokeMeshData(this.vertices, this.positions, this.indices, [this.colors]);
+}
+
+/// One baked live-staging chunk: geometry over raw points
+/// [startPoint]..[endPoint] (inclusive, joints shared with neighbors),
+/// built once with committed pipeline settings and never rebuilt.
+/// [mesh] serves mesh families, pencil grain mask and neon core;
+/// [path] serves advanced/highlighter/pencil/neon-glow outlines;
+/// [auxPath] serves the neon white core.
+class _LiveStageChunk {
+  _LiveStageChunk({
+    required this.startPoint,
+    required this.endPoint,
+    required this.firstX,
+    required this.firstY,
+    required this.lastX,
+    required this.lastY,
+    this.mesh,
+    this.path,
+    this.auxPath,
+    this.bounds,
+  });
+
+  final int startPoint;
+  final int endPoint;
+  final double firstX;
+  final double firstY;
+  final double lastX;
+  final double lastY;
+  ui.Vertices? mesh;
+  Path? path;
+  Path? auxPath;
+  Rect? bounds;
+}
+
+/// Painter-facing view of one staged chunk (frozen or live tail).
+class LiveStagedChunkView {
+  const LiveStagedChunkView({this.mesh, this.path, this.auxPath, this.bounds});
+
+  final ui.Vertices? mesh;
+  final Path? path;
+  final Path? auxPath;
+  final Rect? bounds;
 }
 
 enum StrokeQuality {

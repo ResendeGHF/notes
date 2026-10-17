@@ -316,7 +316,8 @@ class CircleStroke extends Stroke {
     toolId: toolId,
     center: center,
     radius: radius,
-  )..rotationDeg = rotationDeg;
+  )..rotationDeg = rotationDeg
+   ..carveMask = carveMask?.clone();
 
   @override
   void scale(double factor, Offset center) {
@@ -327,6 +328,8 @@ class CircleStroke extends Stroke {
     );
     radius *= factor;
     options.size *= factor;
+    // Carve bites scale with the shape around the same pivot.
+    carveMask?.scale(factor, center);
     markPolygonNeedsUpdating();
   }
 }

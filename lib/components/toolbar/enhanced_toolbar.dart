@@ -2026,6 +2026,7 @@ class _EraserSelectionCardState extends State<_EraserSelectionCard> {
           segments: const [
             ButtonSegment(value: EraserMode.stroke, label: Text('Erase Stroke')),
             ButtonSegment(value: EraserMode.area, label: Text('Erase Area')),
+            ButtonSegment(value: EraserMode.carve, label: Text('Carve')),
           ],
           selected: {_mode},
           onSelectionChanged: (s) {

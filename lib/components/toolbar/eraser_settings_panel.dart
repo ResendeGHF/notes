@@ -128,6 +128,20 @@ class _EraserSettingsPanelState extends State<EraserSettingsPanel> {
                 },
               ),
             ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _InkChipOption(
+                label: 'Carve',
+                selected: _mode == EraserMode.carve,
+                onTap: () {
+                  setState(() {
+                    _mode = EraserMode.carve;
+                    Eraser.currentEraser.updateMode = _mode;
+                    _notifyTool();
+                  });
+                },
+              ),
+            ),
           ],
         ),
       ],

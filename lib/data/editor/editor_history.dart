@@ -105,6 +105,8 @@ class EditorHistoryItem {
     required this.strokes,
     required this.images,
     this.strokesAdded,
+    this.strokeSpots,
+    this.addedSpots,
     this.offset,
     this.rotation,
     this.scale,
@@ -160,6 +162,14 @@ class EditorHistoryItem {
   final List<EditorImage> images;
 
   final List<Stroke>? strokesAdded;
+
+  /// Draw-order spots (layer index, index within layer) parallel to [strokes],
+  /// captured before removals. Undo/redo restore exact temporal positions
+  /// instead of appending (which would restack erased ink on top).
+  final List<(int, int)>? strokeSpots;
+
+  /// Spots parallel to [strokesAdded] (recorded post-op coordinates).
+  final List<(int, int)>? addedSpots;
   final Rect? offset;
   final double? rotation;
   final double? scale;
@@ -176,6 +186,8 @@ class EditorHistoryItem {
     List<Stroke>? strokes,
     List<EditorImage>? images,
     List<Stroke>? strokesAdded,
+    List<(int, int)>? strokeSpots,
+    List<(int, int)>? addedSpots,
     Rect? offset,
     double? rotation,
     double? scale,
@@ -192,6 +204,8 @@ class EditorHistoryItem {
       strokes: strokes ?? this.strokes,
       images: images ?? this.images,
       strokesAdded: strokesAdded ?? this.strokesAdded,
+      strokeSpots: strokeSpots ?? this.strokeSpots,
+      addedSpots: addedSpots ?? this.addedSpots,
       offset: offset ?? this.offset,
       rotation: rotation ?? this.rotation,
       scale: scale ?? this.scale,

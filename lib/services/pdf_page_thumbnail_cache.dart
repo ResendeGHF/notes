@@ -57,8 +57,11 @@ abstract final class PdfPageThumbnailCache {
   static const int maxDiskFiles = 800;
   static const int maxDiskBytes = 200 * 1024 * 1024;
 
-  /// Memory budget for vault mode (plaintext stays in RAM only).
-  static const int maxMemoryBytes = 24 * 1024 * 1024;
+  /// Memory budget for vault mode (plaintext stays in RAM only). Sized to
+  /// hold several hundred small JPEG tiles so scrolling back never
+  /// re-renders: tiles are ~50-150 KB each, and re-rendering on every
+  /// scroll-back is exactly the "PDF takes forever to appear" loop.
+  static const int maxMemoryBytes = 64 * 1024 * 1024;
 
   static Directory? _dir;
   static final LinkedHashMap<String, Uint8List> _memory = LinkedHashMap();
@@ -219,6 +222,24 @@ abstract final class PdfPageThumbnailCache {
     return hit;
   }
 
+  /// Stores externally rendered bytes (e.g. the native PdfRenderer thumbnail
+  /// fast path) under [cacheKey]: memory LRU always, disk when allowed.
+  /// Shared by the sidebar and the main canvas so one render serves both.
+  static Future<File?> putBytes(String cacheKey, Uint8List bytes) async {
+    if (bytes.isEmpty) return null;
+    _putMemory(cacheKey, bytes);
+    if (!diskCacheAllowed) return null;
+    try {
+      final dir = await _cacheDir();
+      final out = File('${dir.path}/$cacheKey');
+      await out.writeAsBytes(bytes, flush: false);
+      unawaited(_evictIfNeeded());
+      return out;
+    } catch (_) {
+      return tryGetDiskFileSync(cacheKey);
+    }
+  }
+
   static void _putMemory(String cacheKey, Uint8List bytes) {
     if (bytes.isEmpty) return;
     final prev = _memory.remove(cacheKey);
@@ -285,16 +306,48 @@ abstract final class PdfPageThumbnailCache {
     _activeRenders++;
     try {
       if (pageIndex < 0 || pageIndex >= doc.pages.length) return null;
-      final page = doc.pages[pageIndex];
-      // Never cache a blank tile: with progressive loading an unloaded page
-      // renders empty. ensureLoaded parses just this page on the worker.
-      if (!page.isLoaded) {
+      // ACTIVE parse starting at our page: PdfPage.ensureLoaded() is purely
+      // passive (it only waits for someone else to parse), so without this a
+      // far page stalls here until the paced background streamer reaches it
+      // (~seconds on big docs). Parsing starts AT the requested page and
+      // stops as soon as it is loaded; the post-paint kick streams the rest.
+      if (!doc.pages[pageIndex].isLoaded) {
         try {
-          await page.ensureLoaded();
+          await doc.loadPagesProgressively(
+            startPageNumber: pageIndex + 1,
+            onPageLoadProgress: (loaded, total, data) {
+              if (stillNeeded != null && !stillNeeded()) return false;
+              try {
+                if (pageIndex < 0 || pageIndex >= doc.pages.length) {
+                  return false;
+                }
+                if (doc.pages[pageIndex].isLoaded) return false;
+              } catch (_) {
+                return false;
+              }
+              return true;
+            },
+          );
+        } catch (_) {
+          // Fall through to the passive wait below (best effort).
+        }
+        // Superseded while parsing: skip the render entirely.
+        if (stillNeeded != null && !stillNeeded()) {
+          return diskCacheAllowed ? tryGetDiskFileSync(cacheKey) : null;
+        }
+        try {
+          // Resolves immediately now that our page parsed (timeout guards a
+          // missed status race so a tile never hangs forever).
+          await doc.pages[pageIndex].ensureLoaded().timeout(
+            const Duration(seconds: 10),
+          );
         } catch (_) {
           return null;
         }
       }
+      // Re-fetch: progressive loading may replace the page instance when it
+      // becomes loaded; rendering a stale instance can produce a blank tile.
+      final page = doc.pages[pageIndex];
       final aspect = page.height <= 0 ? 1.0 : page.width / page.height;
       final w = targetWidth.clamp(96, 1440);
       final h = (w / (aspect <= 0 ? 1.0 : aspect)).round().clamp(96, 1440);

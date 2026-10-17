@@ -12,8 +12,9 @@ import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/highlighter.dart';
 
 /// Live-tip behavior of the EventMotionPredictor port wired into [Stroke]:
-/// the transient tip extends live geometry along motion and vanishes on
-/// commit (never persisted, never erased against).
+/// the transient tip extends live geometry along motion and is committed
+/// as real points on pen-up, so what the user saw is what stays
+/// ("ink in stone", no tip snap-back).
 void main() {
   group('Stroke EventMotionPredictor live tip', () {
     Stroke liveStroke(ToolId id, {double size = 4}) => Stroke(
@@ -51,7 +52,7 @@ void main() {
       ToolId.calligraphyPen,
       ToolId.pencil,
     ]) {
-      test('$id live tip leads cruise, commit snaps back', () {
+      test('$id live tip leads cruise, commit keeps the shown tip', () {
         final stroke = liveStroke(id);
         cruise(stroke);
         final last = stroke.points.last;
@@ -68,10 +69,17 @@ void main() {
         );
         stroke.finishLiveGeometry();
         final committed = stroke.highQualityPath.getBounds();
+        // The shown tip is committed as real points: no snap-back to the
+        // last raw sample, and still bounded (no tangent ruler).
         expect(
           committed.right,
-          lessThanOrEqualTo(last.x + stroke.options.size / 2 + 2.0),
-          reason: '$id commit drops the transient tip',
+          greaterThanOrEqualTo(live.right - 4.0),
+          reason: '$id commit keeps the shown tip',
+        );
+        expect(
+          committed.right,
+          lessThan(last.x + 60.0),
+          reason: '$id committed tip stays bounded',
         );
       });
     }

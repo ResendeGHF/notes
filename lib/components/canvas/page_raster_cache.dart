@@ -19,7 +19,7 @@ import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/services/display_ink_feel.dart';
-import 'package:saber/components/canvas/inner_canvas.dart' show mergeSolidStrokeMeshesByColor;
+import 'package:saber/components/canvas/inner_canvas.dart' show buildOrderedMeshBatches;
 
 /// One baked bitmap layer for a page (ink or background).
 final class PageCacheEntry {
@@ -479,6 +479,10 @@ final class PageRasterCacheManager {
   // --- Cache access ---
 
   int _inkGen(int pageIndex) => _pageInkGeneration[pageIndex] ?? 0;
+
+  /// Generation of the ink bitmap for [pageIndex]. A retained image from an
+  /// older generation still contains deleted strokes and must not be blitted.
+  int inkGenerationOf(int pageIndex) => _inkGen(pageIndex);
   int _bgGen(int pageIndex) => _pageBgGeneration[pageIndex] ?? 0;
 
   /// True while stylus/finger ink or eraser must own the UI isolate.
@@ -682,10 +686,32 @@ final class PageRasterCacheManager {
   /// vector-painting the whole page — that path caused stylus lag / square ink.
   /// Pass [discardStale] when content was removed (eraser/undo) so ghosts do not
   /// linger.
+  /// Wall-clock of the last ink content edit (commit/erase/undo). Full-page
+  /// raster bakes stay out of the way while the user is actively writing: a
+  /// bake repaints the whole page vectorially on the UI thread (~20ms dense),
+  /// and with letter cadence the next pen-down would otherwise land mid-bake
+  /// every time (dropped samples / square ink at stroke starts). Tiles +
+  /// pending vectors already show fresh ink exactly, so the raster — purely a
+  /// pan/zoom blit optimization — waits for real quiet instead of chasing
+  /// every commit. journal + binary save still run on their own schedule.
+  DateTime? _lastInkEditAt;
+
+  /// Quiet period after an ink edit before an ink raster bake may start.
+  /// Matches the autosave idle philosophy (2s of no edits = a real pause).
+  static const int _inkBakeQuietMs = 2000;
+
+  bool _inkBakeQuietActive() {
+    if (debugForceSyncRaster) return false;
+    final last = _lastInkEditAt;
+    if (last == null) return false;
+    return DateTime.now().difference(last).inMilliseconds < _inkBakeQuietMs;
+  }
+
   void invalidateInk(int pageIndex, {bool discardStale = false}) {
     _pageInkGeneration[pageIndex] = _inkGen(pageIndex) + 1;
     _cacheGen++;
     _contentEpoch++;
+    _lastInkEditAt = DateTime.now();
     if (discardStale) {
       _inkCaches.remove(pageIndex)?.image.dispose();
     }
@@ -961,6 +987,15 @@ final class PageRasterCacheManager {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
       }
+      // Commit-quiet: never start a full-page ink bake while the user is in a
+      // writing burst (see [_lastInkEditAt]). BG jobs proceed — only ink
+      // repaints whole vector pages.
+      if (_jobQueue.isNotEmpty &&
+          _jobQueue.first.isInk &&
+          _inkBakeQuietActive()) {
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+        continue;
+      }
       final job = _jobQueue.removeFirst();
 
       // Drop work that is already obsolete BEFORE building it: a superseded
@@ -1095,7 +1130,7 @@ final class PageRasterCacheManager {
     
     if (job.isInk) {
       final params = job.inkParams!;
-      final mergedMeshes = mergeSolidStrokeMeshesByColor(params.strokes, params.currentScale);
+      final ordered = buildOrderedMeshBatches(params.strokes, params.currentScale);
       
       CanvasPainter(
         invert: params.invert,
@@ -1114,7 +1149,7 @@ final class PageRasterCacheManager {
         lineThickness: params.lineThickness,
         lineColor: params.lineColor,
         doneSelecting: true,
-        batchedStrokes: mergedMeshes.isEmpty ? null : mergedMeshes,
+        orderedBatches: ordered,
         preferPathFill: false,
       ).paint(canvas, job.pageSize);
     } else {

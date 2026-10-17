@@ -74,6 +74,11 @@ class MainActivity: FlutterActivity() {
         } catch (e: Throwable) {
             android.util.Log.w("MainActivity", "PdfTexturePlugin install failed", e)
         }
+        try {
+            NoteOpenStore.register(flutterEngine)
+        } catch (e: Throwable) {
+            android.util.Log.w("MainActivity", "NoteOpenStore install failed", e)
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.resendeghf.notes/vault_crypto",

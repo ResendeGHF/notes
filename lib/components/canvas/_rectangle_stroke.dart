@@ -325,7 +325,8 @@ class RectangleStroke extends Stroke {
     page: page,
     toolId: toolId,
     rect: rect,
-  )..rotationDeg = rotationDeg;
+  )..rotationDeg = rotationDeg
+   ..carveMask = carveMask?.clone();
 
   @override
   void scale(double factor, Offset center) {
@@ -337,6 +338,8 @@ class RectangleStroke extends Stroke {
       center.dy + (rect.bottom - center.dy) * factor,
     );
     options.size *= factor;
+    // Carve bites scale with the shape around the same pivot.
+    carveMask?.scale(factor, center);
     markPolygonNeedsUpdating();
   }
 }

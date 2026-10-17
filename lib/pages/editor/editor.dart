@@ -655,14 +655,18 @@ class EditorState extends State<Editor>
     final defaultTextStyle =
         theme.textTheme.bodyMedium ?? const TextStyle();
     // Whole-frame budget; slices are shared across the pages we touch.
-    // A generous slice warms neighbors well ahead of scrolling. While slow
-    // panning the slice shrinks so gesture frames stay smooth while still
-    // converging (fast flings return early above and rely on paint fallback).
+    // Settled slices stay modest on purpose: the warmer runs on the UI
+    // thread, and a 24ms slice right after open delays pen/pan input landing
+    // mid-slice by a full frame (reads as tip lag + pan stutter exactly when
+    // the user first touches a cold note). 12ms still converges over a few
+    // idle frames via chaining. While slow panning the slice shrinks further
+    // so gesture frames stay smooth while still converging (fast flings
+    // return early above and rely on paint fallback).
     final frameStopwatch = Stopwatch()..start();
-    final pagesPerFrame = slowMoving ? 1 : 3;
-    final frameBudgetMs = slowMoving ? 6 : 24;
-    final prewarmMaxTiles = slowMoving ? 2 : 8;
-    final prewarmBudgetMs = slowMoving ? 4 : 16;
+    final pagesPerFrame = slowMoving ? 1 : 2;
+    final frameBudgetMs = slowMoving ? 6 : 12;
+    final prewarmMaxTiles = slowMoving ? 2 : 4;
+    final prewarmBudgetMs = slowMoving ? 4 : 8;
     var pagesTouched = 0;
     var recordedTotal = 0;
     // Outward from the visible center, bounded by the passed band.
@@ -677,6 +681,17 @@ class EditorState extends State<Editor>
       }) {
         if (i < bandStart || i > bandEnd) continue;
         if (i < 0 || i >= pageCount) continue;
+        // Input preemption inside the slice: a pen-down or fling landing
+        // mid-warmer must not wait behind neighbor prewarming. The paint
+        // path draws synchronous fallback vectors, so pages are never blank;
+        // the warmer simply resumes on the next idle frame.
+        if (Pen.currentStroke != null || Eraser.isDragging) {
+          return recordedTotal;
+        }
+        if (TiledStrokePictureCache.viewportMoving &&
+            !PageRasterCacheManager.viewportSlowMotion) {
+          return recordedTotal;
+        }
         if (pagesTouched >= pagesPerFrame) return recordedTotal;
         if (frameStopwatch.elapsedMilliseconds >= frameBudgetMs) {
           return recordedTotal;
@@ -804,6 +819,7 @@ class EditorState extends State<Editor>
       Eraser.isDragging = false;
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
+      _lastInteractionBumpedStroke = null;
     }
     _bumpInteractionRepaint();
   }
@@ -831,6 +847,27 @@ class EditorState extends State<Editor>
   DateTime _lastSaveTime = DateTime.now();
   DateTime _lastTimeSpentUpdate = DateTime.now();
   EditorRecoveryJournal? _recoveryJournal;
+
+  /// Memoized first-page hash: every content mutation bumps page-0
+  /// saveBinaryRevision (strokes, quill, images, background), so a revision
+  /// match guarantees freshness. Saves recompute at most once per edit burst
+  /// instead of twice per save (thumbnail decision + metadata write).
+  String? _lastFirstPageHash;
+  int _lastFirstPageHashRevision = -1;
+
+  String _firstPageHashMemoized() {
+    final revision = coreInfo.pages.isNotEmpty
+        ? coreInfo.pages.first.saveBinaryRevision
+        : -2;
+    final cached = _lastFirstPageHash;
+    if (cached != null && revision == _lastFirstPageHashRevision) {
+      return cached;
+    }
+    final hash = coreInfo.calculateFirstPageHash();
+    _lastFirstPageHash = hash;
+    _lastFirstPageHashRevision = revision;
+    return hash;
+  }
 
   bool _isDisposed = false;
   String _lastWrittenThumbnailHash = '';
@@ -901,8 +938,12 @@ class EditorState extends State<Editor>
           order.add(i);
           seen.add(i);
         }
-        for (var i = 0; i < coreInfo.pages.length; i++) {
-          if (seen.add(i)) order.add(i);
+        // The open path only inspects the visible window. Hydrating every
+        // shell here re-parses the whole note a second after it appears.
+        if (!currentPageOnly) {
+          for (var i = 0; i < coreInfo.pages.length; i++) {
+            if (seen.add(i)) order.add(i);
+          }
         }
         for (final i in order) {
           if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
@@ -1022,7 +1063,11 @@ class EditorState extends State<Editor>
       coreInfo.filePath,
       noteId: coreInfo.noteId,
     );
-    unawaited(journal.appendDrawStroke(stroke.copy()));
+    // No defensive copy: appendDrawStroke serializes to bytes synchronously
+    // on this thread before returning, so later mutations (select-move etc.)
+    // cannot alias the buffered record. Saves a full point-list clone per
+    // pen-up on dense pages.
+    unawaited(journal.appendDrawStroke(stroke));
   }
 
   Future<void> _flushRecoveryWrites() async {
@@ -1943,6 +1988,10 @@ class EditorState extends State<Editor>
         pageIndex: pageIndex,
         strokes: List<Stroke>.from(select.selectResult.strokes),
         images: List<EditorImage>.from(select.selectResult.images),
+        strokeSpots: [
+          for (final s in select.selectResult.strokes)
+            page.drawOrderSpotOf(s) ?? (-1, -1),
+        ],
       ),
     );
 
@@ -2190,7 +2239,7 @@ class EditorState extends State<Editor>
       // Full-page raster bakes wait out the open grace window so tiled
       // recording and first frames own the UI isolate.
       PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
-        const Duration(milliseconds: 700),
+        const Duration(milliseconds: 1600),
       );
       if (mounted) setState(() {});
       await Future<void>.delayed(Duration.zero);
@@ -2267,7 +2316,35 @@ class EditorState extends State<Editor>
       setState(() {});
     }
 
-    // Removed smooth scroll to open directly on the correct page
+    final landing = coreInfo.pages.isEmpty
+        ? 0
+        : (coreInfo.initialPageIndex ?? 0).clamp(0, coreInfo.pages.length - 1);
+    // Let the first frames paint the landing page (and its PDF texture)
+    // before neighbor stroke parses start.
+    Future<void>.delayed(const Duration(milliseconds: 2200), () {
+      if (!mounted) return;
+      unawaited(_hydrateLandingNeighbors(landing));
+    });
+  }
+
+  /// Parses the pages next to the one just opened, after the first frame.
+  /// Keeps a fling onto the neighbor from hitting an empty shell without
+  /// blocking the open transition on those strokes.
+  Future<void> _hydrateLandingNeighbors(int center) async {
+    if (coreInfo.pages.length <= 1) return;
+    final from = (center - 1).clamp(0, coreInfo.pages.length - 1);
+    final to = (center + 1).clamp(0, coreInfo.pages.length - 1);
+    var changed = false;
+    for (var i = from; i <= to; i++) {
+      if (!mounted) return;
+      if (!coreInfo.isLazyShellPage(i)) continue;
+      final page = await coreInfo.hydratePageChunked(i);
+      if (page == null) continue;
+      _wirePageImageCallbacks(i);
+      changed = true;
+      await Future<void>.delayed(Duration.zero);
+    }
+    if (changed && mounted) setState(() {});
   }
 
   AnimationController? _smoothScrollController;
@@ -3113,14 +3190,29 @@ class EditorState extends State<Editor>
 
         case .erase:
           final affectedPageIndices = <int>{};
-          for (final stroke in item.strokes) {
+          // Positional restore: reinsert at recorded temporal slots so undo
+          // never restacks erased ink on top. Spots absent (legacy items)
+          // fall back to append.
+          final byPageErase = <int, List<Stroke>>{};
+          final byPageEraseSpots = <int, List<(int, int)>>{};
+          for (var si = 0; si < item.strokes.length; si++) {
+            final stroke = item.strokes[si];
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            final page = coreInfo.pages[idx];
             if (coreInfo.isInfinite) stroke.pageIndex = 0;
-            page.insertStroke(stroke);
-            page.strokeSpatialIndex?.insert(stroke);
-            affectedPageIndices.add(idx);
+            (byPageErase[idx] ??= []).add(stroke);
+            final spot = si < (item.strokeSpots?.length ?? 0)
+                ? item.strokeSpots![si]
+                : null;
+            (byPageEraseSpots[idx] ??= []).add(spot ?? (-1, -1));
+          }
+          for (final entry in byPageErase.entries) {
+            final page = coreInfo.pages[entry.key];
+            page.restoreStrokesAt(entry.value, byPageEraseSpots[entry.key]);
+            for (final stroke in entry.value) {
+              page.strokeSpatialIndex?.insert(stroke);
+            }
+            affectedPageIndices.add(entry.key);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
@@ -3136,7 +3228,6 @@ class EditorState extends State<Editor>
           break;
 
         case .areaErase:
-        case .changeStrokeType:
           final affectedPageIndices = <int>{};
           final added = item.strokesAdded!;
           for (final stroke in added) {
@@ -3146,24 +3237,64 @@ class EditorState extends State<Editor>
             page.strokeSpatialIndex?.remove(stroke);
             affectedPageIndices.add(idx);
           }
-          for (final stroke in item.strokes) {
+          // Positional restore of the originals (see .erase).
+          final byPageArea = <int, List<Stroke>>{};
+          final byPageAreaSpots = <int, List<(int, int)>>{};
+          for (var si = 0; si < item.strokes.length; si++) {
+            final stroke = item.strokes[si];
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            final page = coreInfo.pages[idx];
             if (coreInfo.isInfinite) stroke.pageIndex = 0;
-            page.insertStroke(stroke);
-            page.strokeSpatialIndex?.insert(stroke);
-            affectedPageIndices.add(idx);
+            (byPageArea[idx] ??= []).add(stroke);
+            final spot = si < (item.strokeSpots?.length ?? 0)
+                ? item.strokeSpots![si]
+                : null;
+            (byPageAreaSpots[idx] ??= []).add(spot ?? (-1, -1));
+          }
+          for (final entry in byPageArea.entries) {
+            final page = coreInfo.pages[entry.key];
+            page.restoreStrokesAt(entry.value, byPageAreaSpots[entry.key]);
+            for (final stroke in entry.value) {
+              page.strokeSpatialIndex?.insert(stroke);
+            }
+            affectedPageIndices.add(entry.key);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
-            final idx = image.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            coreInfo.pages[idx].images.add(image);
+            coreInfo.pages[image.pageIndex].images.add(image);
             if (coreInfo.isInfinite) image.pageIndex = 0;
             image.newImage = true;
-            affectedPageIndices.add(idx);
+            affectedPageIndices.add(image.pageIndex);
           }
           for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
+
+        case .changeStrokeType:
+          final affectedChangePages = <int>{};
+          for (var si = 0; si < item.strokes.length; si++) {
+            final added = item.strokesAdded!;
+            final oldStroke = item.strokes[si];
+            final newStroke = added[si];
+            // In-place swap back: order never moved (1:1 replace both ways).
+            final idx =
+                oldStroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            createPage(newStroke.pageIndex);
+            final page = coreInfo.pages[idx];
+            page.strokeSpatialIndex?.remove(newStroke);
+            page.replaceStroke(newStroke, oldStroke);
+            page.strokeSpatialIndex?.insert(oldStroke);
+            affectedChangePages.add(idx);
+          }
+          for (final image in item.images) {
+            createPage(image.pageIndex);
+            coreInfo.pages[image.pageIndex].images.add(image);
+            if (coreInfo.isInfinite) image.pageIndex = 0;
+            image.newImage = true;
+            affectedChangePages.add(image.pageIndex);
+          }
+          for (final i in affectedChangePages) {
             coreInfo.pages[i].redrawStrokes();
           }
           break;
@@ -3429,7 +3560,6 @@ class EditorState extends State<Editor>
           break;
 
         case .areaErase:
-        case .changeStrokeType:
           final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -3437,15 +3567,48 @@ class EditorState extends State<Editor>
             coreInfo.pages[idx].strokeSpatialIndex?.remove(stroke);
             affectedPageIndices.add(idx);
           }
-          for (final stroke in item.strokesAdded!) {
+          // Positional restore of the fragments at their recorded slots.
+          final byPageRedo = <int, List<Stroke>>{};
+          final byPageRedoSpots = <int, List<(int, int)>>{};
+          final addedRedo = item.strokesAdded!;
+          for (var si = 0; si < addedRedo.length; si++) {
+            final stroke = addedRedo[si];
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            final page = coreInfo.pages[idx];
-            page.insertStroke(stroke);
-            page.strokeSpatialIndex?.insert(stroke);
-            affectedPageIndices.add(idx);
+            (byPageRedo[idx] ??= []).add(stroke);
+            final spot = si < (item.addedSpots?.length ?? 0)
+                ? item.addedSpots![si]
+                : null;
+            (byPageRedoSpots[idx] ??= []).add(spot ?? (-1, -1));
+          }
+          for (final entry in byPageRedo.entries) {
+            final page = coreInfo.pages[entry.key];
+            page.restoreStrokesAt(entry.value, byPageRedoSpots[entry.key]);
+            for (final stroke in entry.value) {
+              page.strokeSpatialIndex?.insert(stroke);
+            }
+            affectedPageIndices.add(entry.key);
           }
           for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
+          break;
+
+        case .changeStrokeType:
+          final affectedRedoChangePages = <int>{};
+          for (var si = 0; si < item.strokes.length; si++) {
+            final addedRedo = item.strokesAdded!;
+            final oldStroke = item.strokes[si];
+            final newStroke = addedRedo[si];
+            final idx = newStroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            createPage(newStroke.pageIndex);
+            final page = coreInfo.pages[idx];
+            page.strokeSpatialIndex?.remove(oldStroke);
+            page.replaceStroke(oldStroke, newStroke);
+            page.strokeSpatialIndex?.insert(newStroke);
+            affectedRedoChangePages.add(idx);
+          }
+          for (final i in affectedRedoChangePages) {
             coreInfo.pages[i].redrawStrokes();
           }
           break;
@@ -3821,6 +3984,10 @@ class EditorState extends State<Editor>
   List<Stroke>? _eraserDeltaRemoved;
   List<Stroke>? _eraserDeltaAdded;
 
+  /// Pre-removal draw-order spots (layer, index) for strokes erased this
+  /// drag, feeding positional undo. First win keeps the original slot.
+  final Map<Stroke, (int, int)?> _erasedStrokeSpots = {};
+
   /// Soft per-apply yield for live area erase. Not a stroke-count cap —
   /// unfinished circle geometry continues on the next pointer sample / frame.
   static const int _kAreaEraserTimeBudgetMs = 7;
@@ -3863,6 +4030,14 @@ class EditorState extends State<Editor>
   static const double _rawDrawSampleMinDistSqLowRefresh = 0.09;
   bool _rawPenSampleSeenThisStroke = false;
   Duration? _lastRawPenSampleTimestamp;
+  // Tracks which live stroke already mounted its overlay via
+  // [_bumpInteractionRepaint]. The live overlay holds the same [Stroke]
+  // object and repaints through `page.redrawStrokes()` (a repaint-listenable,
+  // no widget rebuild); bumping per sample would rebuild every visible
+  // `Canvas` (`_buildContent` splits O(S) ink/highlighter lists) and is the
+  // dominant cost on dense pages. Only the first sample of each stroke
+  // needs the rebuild to mount `currentStroke`.
+  Stroke? _lastInteractionBumpedStroke;
   Timer? _penHoldRecognitionTimer;
   bool _penHoldSatisfied = false;
   RecognizedUnistroke? _penHoldDetectedShape;
@@ -3916,10 +4091,22 @@ class EditorState extends State<Editor>
   }
 
   void _scheduleLiveInkRepaint(EditorPage page) {
-    // Paint this pointer event — waiting for the next frame left the mesh
-    // one sample behind the stylus.
+    // The live overlay repaints through the page listenable (no widget
+    // rebuild). Only the first sample of each stroke needs an interaction
+    // bump to mount `currentStroke` in the tree; subsequent samples mutate
+    // the same object in place, so repaint-listenable is enough. This keeps
+    // per-sample work O(1) instead of O(visible strokes) on dense pages and
+    // avoids a full `Canvas` rebuild behind the pen.
     page.redrawStrokes();
-    _bumpInteractionRepaint();
+    final live = Pen.currentStroke;
+    if (live == null) {
+      _bumpInteractionRepaint();
+      return;
+    }
+    if (!identical(_lastInteractionBumpedStroke, live)) {
+      _lastInteractionBumpedStroke = live;
+      _bumpInteractionRepaint();
+    }
   }
 
   void _recordLivePenSample(
@@ -4160,26 +4347,36 @@ class EditorState extends State<Editor>
   }
 
   void _applyEraserResultToPage(EditorPage page, EraserResult result) {
-    var insertAt = page.strokes.length;
+    // Replace each removed stroke at its own draw-order index. Inserting
+    // every fragment at the first hole stacked unrelated strokes and made
+    // erased pieces reappear in the wrong tiles.
+    final backing = page.layerAt(page.activeLayerIndex).backingStrokes;
     if (result.removed.isNotEmpty) {
-      final removedSet = result.removed.toSet();
       for (final stroke in result.removed) {
-        final index = page.strokes.indexOf(stroke);
-        if (index >= 0 && index < insertAt) insertAt = index;
+        _erasedStrokeSpots[stroke] ??= page.drawOrderSpotOf(stroke);
       }
-      page.strokes.removeWhere(removedSet.contains);
-      for (final stroke in removedSet) {
+      final indexed = <(int, int)>[];
+      for (var i = 0; i < result.removed.length; i++) {
+        final idx = backing.indexOf(result.removed[i]);
+        if (idx >= 0) indexed.add((idx, i));
+      }
+      indexed.sort((a, b) => b.$1.compareTo(a.$1));
+      for (final (idx, i) in indexed) {
+        final stroke = backing.removeAt(idx);
         page.strokeSpatialIndex?.remove(stroke);
+        final group = i < result.replacementGroups.length
+            ? result.replacementGroups[i]
+            : const <Stroke>[];
+        if (group.isNotEmpty) {
+          backing.insertAll(idx, group);
+          for (final frag in group) {
+            page.strokeSpatialIndex?.insert(frag);
+          }
+        }
       }
-    }
-    if (result.added.isNotEmpty) {
-      page.strokes.insertAll(
-        insertAt.clamp(0, page.strokes.length),
-        result.added,
-      );
-      for (final stroke in result.added) {
-        page.strokeSpatialIndex?.insert(stroke);
-      }
+      page.markSaveBinaryDirty();
+    } else if (result.contentMutated) {
+      page.markSaveBinaryDirty();
     }
   }
 
@@ -4198,12 +4395,12 @@ class EditorState extends State<Editor>
     Eraser eraser,
     Offset position,
   ) {
-    if (eraser.mode != EraserMode.area) return;
+    if (!eraser.mode.isAreaLike) return;
     _ensureActiveLayerEraserSpatialIndex(page);
     // Unbounded apply: finish any deferred circle cuts before recording undo.
     final result = eraser.apply(
       position,
-      page.strokes,
+      page.layerAt(page.activeLayerIndex).backingStrokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
       areaTimeBudgetMs: null,
@@ -4232,12 +4429,12 @@ class EditorState extends State<Editor>
     if (page == null || pos == null) return;
     if (currentTool is! Eraser) return;
     final eraser = currentTool as Eraser;
-    if (eraser.mode != EraserMode.area) return;
+    if (!eraser.mode.isAreaLike) return;
     _ensureActiveLayerEraserSpatialIndex(page);
 
     final result = eraser.apply(
       pos,
-      page.strokes,
+      page.layerAt(page.activeLayerIndex).backingStrokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
       areaTimeBudgetMs: _kAreaEraserTimeBudgetMs,
@@ -4267,6 +4464,7 @@ class EditorState extends State<Editor>
   void _releaseAreaEraserQueueAndSessions() {
     _abortAreaEraserBackgroundWork();
     Eraser.currentEraser.clearState();
+    _erasedStrokeSpots.clear();
   }
 
   void _doEraserApply(EditorPage page, Offset position) {
@@ -4274,27 +4472,27 @@ class EditorState extends State<Editor>
     if (!eraser.shouldApplyAt(position)) return;
 
     _ensureActiveLayerEraserSpatialIndex(page);
-    final bool isAreaMode = eraser.mode == EraserMode.area;
+    final bool isAreaLikeMode = eraser.mode.isAreaLike;
     _areaEraserWorkPage = page;
     _areaEraserWorkPos = position;
 
     final result = eraser.apply(
       position,
-      page.strokes,
+      page.layerAt(page.activeLayerIndex).backingStrokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
-      areaTimeBudgetMs: isAreaMode ? _kAreaEraserTimeBudgetMs : null,
+      areaTimeBudgetMs: isAreaLikeMode ? _kAreaEraserTimeBudgetMs : null,
     );
     _applyEraserResultToPage(page, result);
 
-    if (isAreaMode && result.areaWorkRemaining) {
+    if (isAreaLikeMode && result.areaWorkRemaining) {
       _scheduleAreaEraserBackgroundDrain();
     }
 
     // Force redraw even if removed/added is empty, because in-place point mutations might occur in area mode
-    if (isAreaMode || result.removed.isNotEmpty || result.added.isNotEmpty) {
+    if (isAreaLikeMode || result.removed.isNotEmpty || result.added.isNotEmpty) {
       page.redrawStrokes();
-      if (!isAreaMode) removeExcessPages();
+      if (!isAreaLikeMode) removeExcessPages();
     }
   }
 
@@ -4346,6 +4544,7 @@ class EditorState extends State<Editor>
     if (currentTool is Pen) {
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
+      _lastInteractionBumpedStroke = null;
       _lastPenDragUpdatePosition = position;
       _lastPenSignificantMoveAt = DateTime.now();
       _restartPenHoldRecognitionTimer();
@@ -4363,12 +4562,19 @@ class EditorState extends State<Editor>
         timestamp,
         accurateTool: _pointerIsAccurateForPrediction,
       );
+      // Mount the live overlay on pen-down so the first tip pixel is already
+      // in the tree when the first move arrives. Without this the down sample
+      // sits invisible for one move event (perceived tip lag at stroke start);
+      // the bump is once per stroke (identity-guarded), subsequent moves
+      // repaint via page-listenable only.
+      _scheduleLiveInkRepaint(page);
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragStart(position, page, dragPageIndex!);
       page.redrawStrokes();
     } else if (currentTool is Eraser) {
       final er = currentTool as Eraser;
-      _eraserAreaDragActive = er.mode == EraserMode.area;
+      _eraserAreaDragActive = er.mode.isAreaLike;
+      _erasedStrokeSpots.clear();
       Eraser.isDragging = true;
       eraserPosition = position;
       _eraserPositionRepaint.value = position;
@@ -4696,6 +4902,10 @@ class EditorState extends State<Editor>
     final timestamp = details.sourceTimeStamp ?? currentTimestamp;
 
     if (currentTool is Pen) {
+      // Focal truth anchor (gesture-arena clock): keeps finger/mouse strokes
+      // — and raw-absorbed samples — tracking the tip. Clock-guarded inside
+      // `noteRawLiveTip`, so an older focal never regresses fresher raw.
+      Pen.currentStroke?.noteRawLiveTip(position, currentPressure, timestamp);
       if (!_shouldSkipGesturePenSample(timestamp)) {
         _recordLivePenSample(
           page,
@@ -4703,7 +4913,8 @@ class EditorState extends State<Editor>
           timestamp,
           rawPointerSample: false,
         );
-        _bumpInteractionRepaint();
+        // No extra bump: [_scheduleLiveInkRepaint] already mounts the overlay
+        // on the first sample and repaints via page-listenable afterwards.
       }
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragUpdate(position, page, dragPageIndex!);
@@ -4770,6 +4981,9 @@ class EditorState extends State<Editor>
             fillColor: triangle.fillColor,
             shapeVertices: newConfig.vertices,
           );
+          // Reshaping rebuilds the object; carry the carve bites over so
+          // control-point edits do not reset carve-eraser editions.
+          newTriangle.carveMask = triangle.carveMask?.clone();
           
           // Apply changes directly to the detached preview selection
           select.selectResult.strokes[0] = newTriangle;
@@ -4948,14 +5162,12 @@ class EditorState extends State<Editor>
       );
     }
 
-    final last = stroke.points.last;
-    final dx = position.dx - last.x;
-    final dy = position.dy - last.y;
-    final minDistSq = DisplayInkFeel.instance.isLowRefresh
-        ? _rawDrawSampleMinDistSqLowRefresh
-        : _rawDrawSampleMinDistSq;
-    if (dx * dx + dy * dy < minDistSq) return;
-
+    // Feed the predictor BEFORE input decimation: sub-threshold jitter moves
+    // carry velocity information even when they add no visible ink. Dropping
+    // them starved the Kalman filter during slow/precise moves, so the first
+    // fast sample after a slow run predicted from stale velocity (tip lag on
+    // acceleration). The duplicate-position guard inside `record` keeps this
+    // cheap for truly stationary input.
     final timestamp = event.timeStamp;
     // Raw-only predictor feed (page-local, event clock): never the
     // gesture-arena focal point — mixing coalesced samples fabricates
@@ -4966,6 +5178,20 @@ class EditorState extends State<Editor>
       timestamp,
       accurateTool: event.kind != PointerDeviceKind.touch,
     );
+    // Raw truth anchor for the live tip connector (end-of-stroke anti-lag):
+    // noted even for absorbed sub-threshold moves so slow creep at stroke
+    // ends still moves the displayed tip. Clock-guarded inside: stale events
+    // never regress it.
+    Pen.currentStroke?.noteRawLiveTip(position, currentPressure, timestamp);
+
+    final last = stroke.points.last;
+    final dx = position.dx - last.x;
+    final dy = position.dy - last.y;
+    final minDistSq = DisplayInkFeel.instance.isLowRefresh
+        ? _rawDrawSampleMinDistSqLowRefresh
+        : _rawDrawSampleMinDistSq;
+    if (dx * dx + dy * dy < minDistSq) return;
+
     _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
     previousPosition = position;
   }
@@ -5104,6 +5330,7 @@ class EditorState extends State<Editor>
       eraserPosition = null;
       _eraserPositionRepaint.value = null;
       Eraser.isDragging = false;
+      _lastInteractionBumpedStroke = null;
       _endCanvasDrawSession();
     }
 
@@ -5275,7 +5502,7 @@ class EditorState extends State<Editor>
         }
       } else if (currentTool is Eraser) {
         final eraser = currentTool as Eraser;
-        if (eraser.mode == EraserMode.area) {
+        if (eraser.mode.isAreaLike) {
           final flushPos = eraserPosition ?? _areaEraserWorkPos ?? Offset.zero;
           _syncFlushAreaEraserWork(page, eraser, flushPos);
         }
@@ -5288,7 +5515,7 @@ class EditorState extends State<Editor>
         _eraserDeltaRemoved = null;
         _eraserDeltaAdded = null;
         setState(() {});
-        if (eraser.mode == EraserMode.area) {
+        if (eraser.mode.isAreaLike) {
           page.buildSpatialIndex(activeLayerOnly: true);
           page.redrawStrokes();
           removeExcessPages();
@@ -5313,6 +5540,16 @@ class EditorState extends State<Editor>
               strokes: erased,
               images: [],
               strokesAdded: added,
+              strokeSpots: [
+                for (final s in erased)
+                  _erasedStrokeSpots[s] ??
+                      page.drawOrderSpotOf(s) ??
+                      (-1, -1),
+              ],
+              addedSpots: [
+                for (final s in added)
+                  page.drawOrderSpotOf(s) ?? (-1, -1),
+              ],
             ),
           );
         } else if (erased.isNotEmpty) {
@@ -5322,6 +5559,12 @@ class EditorState extends State<Editor>
               pageIndex: dragPageIndex!,
               strokes: erased,
               images: [],
+              strokeSpots: [
+                for (final s in erased)
+                  _erasedStrokeSpots[s] ??
+                      page.drawOrderSpotOf(s) ??
+                      (-1, -1),
+              ],
             ),
           );
         } else if (added.isNotEmpty) {
@@ -5339,6 +5582,9 @@ class EditorState extends State<Editor>
           if (keepForHistory.contains(stroke)) continue;
           stroke.dispose();
         }
+        // Spots consumed into history above; drop refs so removed strokes
+        // are retained only by history from here.
+        _erasedStrokeSpots.clear();
       } else if (currentTool is Select) {
         final select = currentTool as Select;
         if (select.doneSelecting) {
@@ -5467,9 +5713,8 @@ class EditorState extends State<Editor>
       if (shouldFitInfiniteCanvas && coreInfo.pages.isNotEmpty) {
         _fitInfiniteCanvasToContent(coreInfo.pages.first);
       }
-      if (mounted) setState(() {});
     }
-
+    if (mounted) setState(() {});
     _keepAliveController.forward(from: 0);
 
     _bumpInteractionRepaint();
@@ -5509,23 +5754,35 @@ class EditorState extends State<Editor>
 
     if (lastStroke.points.isEmpty) return false;
 
-    final lastCenterY =
-        lastStroke.points.map((p) => p.y).reduce((a, b) => a + b) /
-        lastStroke.points.length;
+    // Cached bounds center instead of two map/reduce passes over raw points:
+    // O(1) warm vs O(P) with two closure allocations per stroke. Mid-range
+    // tracks the mean within a few px for ink spans — noise inside the
+    // ±100px band below.
+    final lastCenterY = lastStroke.bounds.center.dy;
     final lineHeight = 100.0;
 
     final candidateStrokes = page.strokes.where((s) {
       if (s.points.isEmpty) return false;
-      final centerY =
-          s.points.map((p) => p.y).reduce((a, b) => a + b) / s.points.length;
-      return (centerY - lastCenterY).abs() < lineHeight;
+      return (s.bounds.center.dy - lastCenterY).abs() < lineHeight;
     }).toList();
 
+    // Hoisted left edges: the old comparator recomputed minX via map/reduce
+    // on every comparison — O(C log C · P). One O(P) pass up front.
+    final leftByStroke = <Stroke, double>{};
+    for (final s in candidateStrokes) {
+      if (s.points.isEmpty) {
+        leftByStroke[s] = double.infinity;
+        continue;
+      }
+      var minX = double.infinity;
+      for (final p in s.points) {
+        if (p.x < minX) minX = p.x;
+      }
+      leftByStroke[s] = minX;
+    }
     candidateStrokes.sort((a, b) {
       if (a.points.isEmpty || b.points.isEmpty) return 0;
-      final aLeft = a.points.map((p) => p.x).reduce((x, y) => x < y ? x : y);
-      final bLeft = b.points.map((p) => p.x).reduce((x, y) => x < y ? x : y);
-      return aLeft.compareTo(bLeft);
+      return leftByStroke[a]!.compareTo(leftByStroke[b]!);
     });
 
     if (candidateStrokes.isEmpty) return false;
@@ -5556,6 +5813,11 @@ class EditorState extends State<Editor>
     EditorPage page,
     int pageIndex,
   ) {
+    // Capture pre-removal spots first: the outcome application below mutates
+    // positions, and undo must restore exact temporal slots.
+    final removedSpots = [
+      for (final s in outcome.removedStrokes) page.drawOrderSpotOf(s),
+    ];
     for (final s in outcome.removedStrokes) {
       page.removeStrokeFromAnyLayer(s);
       page.strokeSpatialIndex?.remove(s);
@@ -5575,6 +5837,9 @@ class EditorState extends State<Editor>
           pageIndex: pageIndex,
           strokes: outcome.removedStrokes,
           images: [],
+          strokeSpots: [
+            for (final spot in removedSpots) spot ?? (-1, -1),
+          ],
         ),
       );
     }
@@ -5771,16 +6036,33 @@ class EditorState extends State<Editor>
     _selectionPreview = null;
   }
 
+  /// Draw-order spots of detached selection strokes (parallel to the detached
+  /// list order at detach time; null when absent), so reattach restores exact
+  /// temporal slots instead of restacking moved content on top.
+  List<(int, int)?> _detachedStrokeSpots = const [];
+
   void _detachSelectionStrokesFromPage(SelectResult selection) {
     if (_selectionStrokesDetachedFromPage) return;
     if (selection.strokes.isEmpty) return;
     final pageIndex = selection.pageIndex;
     if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
     final page = coreInfo.pages[pageIndex];
+    _detachedStrokeSpots = [
+      for (final stroke in selection.strokes) page.drawOrderSpotOf(stroke),
+    ];
+    // Single-pass detach on backing storage (was O(N·S) wrapper removes).
+    final doomed = selection.strokes.toSet();
+    var dirty = false;
+    for (var li = 0; li < page.layerCount; li++) {
+      final backing = page.layerAt(li).backingStrokes;
+      final before = backing.length;
+      backing.removeWhere(doomed.contains);
+      if (backing.length != before) dirty = true;
+    }
     for (final stroke in selection.strokes) {
       page.strokeSpatialIndex?.remove(stroke);
-      page.strokes.remove(stroke);
     }
+    if (dirty) page.markSaveBinaryDirty();
     _selectionStrokesDetachedFromPage = true;
     _markSelectionPageDirty(pageIndex);
     page.redrawStrokes();
@@ -5791,16 +6073,60 @@ class EditorState extends State<Editor>
     final pageIndex = selection.pageIndex;
     if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) {
       _selectionStrokesDetachedFromPage = false;
+      _detachedStrokeSpots = const [];
       return;
     }
     final page = coreInfo.pages[pageIndex];
-    for (final stroke in selection.strokes) {
-      if (!page.strokes.contains(stroke)) {
-        page.strokes.add(stroke);
+    // Positional single-pass splice per layer. Spots are full-list
+    // coordinates recorded at detach; the merge walks target positions so
+    // restored strokes land exactly (unknown spots append at the end).
+    final byLayer = <int, List<((int, int)?, Stroke)>>{};
+    for (var k = 0; k < selection.strokes.length; k++) {
+      final stroke = selection.strokes[k];
+      if (page.drawOrderSpotOf(stroke) != null) continue;
+      final (int, int)? spot = k < _detachedStrokeSpots.length
+          ? _detachedStrokeSpots[k]
+          : null;
+      final li = spot?.$1 ?? page.activeLayerIndex;
+      (byLayer[li] ??= []).add((spot, stroke));
+    }
+    for (final entry in byLayer.entries) {
+      var li = entry.key;
+      if (li < 0 || li >= page.layerCount) li = page.activeLayerIndex;
+      final backing = page.layerAt(li).backingStrokes;
+      final known =
+          entry.value.where((e) => e.$1 != null).toList(growable: false)
+            ..sort((a, b) => a.$1!.$2.compareTo(b.$1!.$2));
+      final unknown = entry.value.where((e) => e.$1 == null).toList();
+      final merged = <Stroke>[];
+      var cursor = 0;
+      var si = 0;
+      final totalLen = backing.length + known.length;
+      for (var p = 0; p < totalLen; p++) {
+        if (si < known.length && known[si].$1!.$2 == p) {
+          merged.add(known[si].$2);
+          si++;
+        } else if (cursor < backing.length) {
+          merged.add(backing[cursor]);
+          cursor++;
+        } else if (si < known.length) {
+          merged.add(known[si].$2);
+          si++;
+        }
+      }
+      for (final e in unknown) {
+        merged.add(e.$2);
+      }
+      backing
+        ..clear()
+        ..addAll(merged);
+      for (final stroke in selection.strokes) {
         page.strokeSpatialIndex?.insert(stroke);
       }
     }
+    page.markSaveBinaryDirty();
     _selectionStrokesDetachedFromPage = false;
+    _detachedStrokeSpots = const [];
     _markSelectionPageDirty(pageIndex);
     page.redrawStrokes();
   }
@@ -6178,11 +6504,26 @@ class EditorState extends State<Editor>
     Uint8List? preCapturedThumbnailBytes;
     final String thumbnailPath = '${coreInfo.filePath}${Editor.extension}.p';
 
-    final currentFirstPageHash = coreInfo.calculateFirstPageHash();
+    final currentFirstPageHash = _firstPageHashMemoized();
 
+    // While actively writing, skip the full-page thumbnail raster: the hash
+    // changes every letter, so every autosave would otherwise steal raster/GPU
+    // throughput from live ink (boundary.toImage of a dense page) exactly when
+    // the pen is down again. Body durability is unaffected (recovery journal +
+    // binary save proceed normally); the thumbnail refreshes on the next quiet
+    // autosave or close. Explicit callers (updateThumbnail/force) are ungated.
+    final quietMs = DateTime.now()
+        .difference(
+          _lastUserActivityForAutosave ??
+              DateTime.fromMillisecondsSinceEpoch(0),
+        )
+        .inMilliseconds;
     final allowThumbnail =
         !coreInfo.isInfinite &&
-        (updateThumbnail || (!force && stows.thumbnailOnAutosave.value));
+        (updateThumbnail ||
+            (!force &&
+                stows.thumbnailOnAutosave.value &&
+                quietMs >= 10000));
     if (coreInfo.pages.isNotEmpty && allowThumbnail) {
       try {
         final thumbnailFile = File(thumbnailPath);
@@ -6320,7 +6661,7 @@ class EditorState extends State<Editor>
       await Future.delayed(Duration.zero);
 
       final filePath = coreInfo.filePath + Editor.extension;
-      final currentFirstPageHash = coreInfo.calculateFirstPageHash();
+    final currentFirstPageHash = _firstPageHashMemoized();
       final currentPageIndex = this.currentPageIndex;
       Uint8List? bson;
 
@@ -11862,6 +12203,9 @@ class EditorState extends State<Editor>
         autosaveAfterDelay();
       }),
       transformationController: _transformationController,
+      tryHydratePage: _tryIdleHydratePage,
+      onPageHydrated: (int pageIndex, page) =>
+          _finishAsyncHydrate(pageIndex, page),
     );
   }
 
@@ -12397,6 +12741,7 @@ class EditorState extends State<Editor>
     _skipTransformClampForExpansion.dispose();
     _suppressTransformClamp.dispose();
 
+    unawaited(coreInfo.releaseLazyRangeReader());
     _cleanUpAsync();
 
     _delayedSaveTimer?.cancel();
@@ -12882,9 +13227,10 @@ class EditorState extends State<Editor>
         final oldStroke = oldStrokes[i];
         final newStroke = newStrokes[i];
         final page = coreInfo.pages[oldStroke.pageIndex];
-        page.removeStrokeFromAnyLayer(oldStroke);
+        // In-place 1:1 swap: temporal order never moves (undo/redo swap back
+        // the same way, so no position bookkeeping is needed either way).
         page.strokeSpatialIndex?.remove(oldStroke);
-        page.insertStroke(newStroke);
+        page.replaceStroke(oldStroke, newStroke);
         page.strokeSpatialIndex?.insert(newStroke);
         pageIndices.add(oldStroke.pageIndex);
       }
@@ -13277,8 +13623,8 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   bool _readyRefreshScheduled = false;
 
   /// Expected note IDs for tabs restored from the persisted session, keyed
-  /// by slot id. Used to drop tabs whose note was moved (same display path
-  /// now holding a different note) or replaced.
+  /// by slot id. Used to confirm identity on activation (adopting the loaded
+  /// ID) and to scope the missing-file prune to restored tabs only.
   final Map<int, String> _expectedNoteIds = {};
 
   EditorState? get _activeState {
@@ -13356,9 +13702,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   }
 
   /// Drops restored tabs whose file no longer exists (deleted or moved to
-  /// another folder) and tabs whose loaded note ID differs from the expected
-  /// one (path reused by a different note). Only entries restored from the
-  /// persisted session are validated; tabs created in this visit are kept.
+  /// another folder). Only entries restored from the persisted session are
+  /// checked; tabs created in this visit are kept. Identity mismatches never
+  /// drop tabs (see _confirmActiveNoteId).
   Future<void> _validateRestoredTabs() async {
     if (!mounted || _tabs.isEmpty) return;
     // File-existence pass (cheap, synchronous IO under the hood).
@@ -13400,16 +13746,22 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       setState(() {});
       _syncSession();
     }
-    // Identity of inactive tabs is verified lazily on activation (see
-    // _validateActiveNoteId): only the mounted editor can report its note
+    // Identity of inactive tabs is confirmed lazily on activation (see
+    // _confirmActiveNoteId): only the mounted editor can report its note
     // ID, and only one editor is ever mounted.
   }
 
-  /// Drops the active tab when its loaded note ID differs from the expected
-  /// one recorded in the persisted session (same display path now holding a
-  /// different note, e.g. after a move). Inactive tabs keep their expectation
-  /// until they are activated. No-ops for tabs created in this visit.
-  Future<void> _validateActiveNoteId() async {
+  /// Confirms the active tab's identity once its note finishes loading and
+  /// adopts the loaded ID into the session.
+  ///
+  /// Never drops the tab: a mismatch only means the stored ID went stale
+  /// (legacy note migrated, failed save, read-only note), while the file at
+  /// this path is exactly what the user asked to open. Tapping a tab must
+  /// never close it — tabs disappear only via explicit close, note deletion,
+  /// or a proven-missing file at mount time. Inactive tabs keep their
+  /// expectation until they are activated. No-ops for tabs created in this
+  /// visit.
+  Future<void> _confirmActiveNoteId() async {
     for (var attempt = 0; attempt < 10; attempt++) {
       if (!mounted || _tabs.isEmpty) return;
       final slot = _tabs[_activeIndex.clamp(0, _tabs.length - 1)];
@@ -13426,19 +13778,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         continue;
       }
       _expectedNoteIds.remove(slot.id);
-      if (loadedId == expected || !mounted) return;
-      log.info(
-        'prune identity-mismatch ${_displayNameForPath(slot.path)}',
-      );
-      final index = _tabs.indexOf(slot);
-      if (index < 0) return;
-      if (_tabs.length == 1) {
-        _syncSession();
-        _replaceWithFreshTabOrHome();
-        return;
+      if (loadedId != expected) {
+        log.info(
+          'identity adopted ${_displayNameForPath(slot.path)} '
+          '(stored ID went stale)',
+        );
       }
-      _removeTabAt(index, reason: 'identity-mismatch');
-      _scheduleReadyRefresh();
+      slot.noteId = loadedId;
+      _syncSession();
       return;
     }
   }
@@ -13472,67 +13819,48 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (incoming != null && incoming.isNotEmpty) {
       final idx = _indexOfPath(incoming);
       if (idx >= 0) {
-        unawaited(_setActiveIndex(idx));
+        _setActiveIndex(idx);
       } else {
-        unawaited(
-          _addTabAndSwitch(
-            path: incoming,
-            initialPageIndex: widget.initialPageIndexOverride,
-          ),
+        _addTabAndSwitch(
+          path: incoming,
+          initialPageIndex: widget.initialPageIndexOverride,
         );
       }
       return;
     }
     if (incoming == null) {
-      unawaited(
-        _addTabAndSwitch(
-          initialPageIndex: widget.initialPageIndexOverride,
-        ),
+      _addTabAndSwitch(
+        initialPageIndex: widget.initialPageIndexOverride,
       );
     }
   }
 
-  /// Switch guard: rapid taps resolve last-wins instead of racing saves and
-  /// mounts against each other.
-  int _switchEpoch = 0;
-
-  /// Centralized switch. Only one editor is ever mounted, so this persists
-  /// the outgoing tab first (cheap no-op when clean), then mounts the new
-  /// one. Never saves tabs in parallel and never keeps background canvases.
-  Future<void> _setActiveIndex(int index) async {
+  /// Centralized switch. Synchronous on purpose: the tap mounts the new tab
+  /// immediately with a single setState, so switching never holds the user
+  /// on the old tab. Persistence of the outgoing tab is owned by its
+  /// dispose ([EditorState] saves once if dirty, the same path every tab
+  /// close already uses) and therefore never blocks the switch, runs off
+  /// the critical path, and can never run in parallel for two tabs.
+  void _setActiveIndex(int index) {
     if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
-    final epoch = ++_switchEpoch;
-    // Resolve by slot identity after the save gap: tabs may have been
-    // added/removed/closed while saving, so a raw index may be stale.
     final target = _tabs[index];
-    final outgoing = _activeState;
-    if (outgoing != null) {
-      try {
-        await outgoing.saveIfDirty(updateThumbnail: false);
-      } catch (_) {}
-    }
-    if (!mounted || epoch != _switchEpoch) return;
-    // The list may have shrunk while saving (tab closed, validation
-    // pruned); re-resolve instead of activating a stale index.
-    final freshIndex = _tabs.indexOf(target);
-    if (freshIndex < 0 || freshIndex == _activeIndex) return;
     log.info(
-      'switch ${_displayNameForPath(_tabs[_activeIndex.clamp(0, _tabs.length - 1)].path)}'
+      'switch ${_displayNameForPath(_tabs[_activeIndex].path)}'
       ' -> ${_displayNameForPath(target.path)}',
     );
-    setState(() => _activeIndex = freshIndex);
+    setState(() => _activeIndex = index);
     _syncSession();
     _scheduleReadyRefresh();
-    unawaited(_validateActiveNoteId());
+    unawaited(_confirmActiveNoteId());
   }
 
-  /// Appends a tab and switches to it through the standard save-then-switch
-  /// path, so the outgoing tab is persisted before unmounting.
-  Future<void> _addTabAndSwitch({
+  /// Appends a tab and switches to it. The switch itself is synchronous
+  /// (see [_setActiveIndex]); the outgoing tab persists via dispose.
+  void _addTabAndSwitch({
     String? path,
     String? pdfPath,
     int? initialPageIndex,
-  }) async {
+  }) {
     if (!mounted) return;
     final slot = _BrowserTabSlot(
       id: _nextId++,
@@ -13546,7 +13874,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       'add ${_displayNameForPath(slot.path)} (total ${_tabs.length})',
     );
     _syncSession();
-    await _setActiveIndex(_tabs.indexOf(slot));
+    _setActiveIndex(_tabs.indexOf(slot));
   }
 
   void _bumpChrome() {
@@ -13596,7 +13924,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         return;
       }
       _bumpChrome();
-      unawaited(_validateActiveNoteId());
+      unawaited(_confirmActiveNoteId());
     });
   }
 
@@ -13653,10 +13981,10 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (!mounted || selected == null || selected.isEmpty) return;
     final existing = _indexOfPath(selected);
     if (existing >= 0) {
-      unawaited(_setActiveIndex(existing));
+      _setActiveIndex(existing);
       return;
     }
-    await _addTabAndSwitch(path: selected);
+    _addTabAndSwitch(path: selected);
   }
 
   /// Opens the linked note in another tab (without closing the current one, no back).
@@ -13666,7 +13994,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (target.isEmpty || !mounted) return;
     final idx = _indexOfPath(target);
     if (idx >= 0) {
-      await _setActiveIndex(idx);
+      _setActiveIndex(idx);
       if (!mounted || _activeIndex != idx) return;
       if (pageIndex != null && pageIndex >= 0) {
         // Post-frame so layout is ready after the tab switch.
@@ -13678,11 +14006,11 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       }
       return;
     }
-    await _addTabAndSwitch(path: target, initialPageIndex: pageIndex);
+    _addTabAndSwitch(path: target, initialPageIndex: pageIndex);
   }
 
   void _switchTab(int index) {
-    unawaited(_setActiveIndex(index));
+    _setActiveIndex(index);
   }
 
   /// Removes the tab at [index] and reveals a neighbor. The closed editor

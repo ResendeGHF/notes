@@ -34,12 +34,14 @@ import 'package:logging/logging.dart';
 ///   `openPageTexture` (no preliminary `openDocument` roundtrip). One
 ///   `PdfRenderer` per document path is refcounted natively and kept open
 ///   while any texture uses it.
-/// - Each session holds TWO SurfaceTexture slots (ping-pong). Updates render
-///   into the inactive back-buffer and return its textureId; Dart swaps the
-///   id AND the [Positioned] box in the same setState frame, so position and
-///   pixels can never desync across VSync frames.
-/// - [closeTexture] destroys both slots and drops the doc ref immediately —
-///   native VRAM never waits on Dart garbage collection.
+/// - Each session holds TWO SurfaceProducers (ping-pong). Updates render
+///   into the inactive back-producer and return its textureId; Dart swaps
+///   the id AND the [Positioned] box in the same setState frame, so position
+///   and pixels can never desync across VSync frames — and the front frame
+///   never tears (a single producer flashes an uninitialized frame on
+///   `setSize` realloc until the new pixels post).
+/// - [closeTexture] releases both producers and drops the doc ref
+///   immediately — native VRAM never waits on Dart garbage collection.
 abstract final class PdfNativeTexture {
   static const MethodChannel _channel = MethodChannel(
     'com.resendeghf.notes/pdf_texture',
@@ -47,7 +49,8 @@ abstract final class PdfNativeTexture {
   static final _log = Logger('PdfNativeTexture');
 
   /// Native texture rendering is currently implemented on Android via
-  /// `android.graphics.pdf.PdfRenderer` (API 21+). iOS (PDFKit +
+  /// `android.graphics.pdf.PdfRenderer` (API 21+) into a
+  /// [TextureRegistry.SurfaceProducer] surface. iOS (PDFKit +
   /// FlutterTexture/CVPixelBuffer) follows the same channel contract.
   static bool get isSupported => !kIsWeb && Platform.isAndroid;
 
@@ -122,9 +125,9 @@ abstract final class PdfNativeTexture {
     }
   }
 
-  /// Re-renders into the session's inactive back-buffer slot.
+  /// Re-renders into the session's inactive back-producer slot.
   ///
-  /// Returns the newly rendered back-buffer textureId (swap to it
+  /// Returns the newly rendered back-producer textureId (swap to it
   /// atomically with its clip), null when superseded (keep showing the
   /// current texture), or -1 on error (fall back to pdfrx).
   static Future<int?> updatePageTexture({
@@ -163,6 +166,65 @@ abstract final class PdfNativeTexture {
     }
   }
 
+  /// Fast low-res JPEG bytes for one page, rendered natively (PdfRenderer)
+  /// without opening pdfrx. Used by the pages sidebar and cold-open
+  /// placeholders: the caller stores the bytes in [PdfPageThumbnailCache]
+  /// so the main canvas and the sidebar share pixels.
+  ///
+  /// Returns null when unsupported (non-Android), the file is missing, the
+  /// PDF is encrypted, or the vault forbids it (see [shouldAttemptFor]).
+  static Future<Uint8List?> renderThumbnailBytes({
+    required String filePath,
+    required int pageIndex,
+    int widthPx = 360,
+    int quality = 72,
+    bool vaultUnlocked = false,
+  }) async {
+    if (!shouldAttemptFor(filePath, vaultUnlocked: vaultUnlocked)) return null;
+    if (pageIndex < 0) return null;
+    try {
+      final bytes = await _channel
+          .invokeMethod<Uint8List>('renderThumbnail', {
+            'path': filePath,
+            'pageIndex': pageIndex,
+            'width': widthPx.clamp(96, 1080),
+            'quality': quality.clamp(40, 90),
+          })
+          .timeout(const Duration(seconds: 15));
+      if (bytes == null || bytes.isEmpty) return null;
+      return bytes;
+    } catch (e, st) {
+      _log.fine('pdf_texture.renderThumbnail failed', e, st);
+      return null;
+    }
+  }
+
+  /// Pre-opens the native shared renderer for [filePath] without rendering.
+  ///
+  /// Fire-and-forget from the home card tap (and the editor kick): the
+  /// 100-700ms PdfRenderer init happens during the route transition, so the
+  /// first `openPageTexture` reuses the hot renderer. Never throws; a
+  /// missing/encrypted file simply warms nothing. Best-effort by design —
+  /// the open path never depends on the warm having run.
+  /// Raw warm call: completes when the native side replies, with no
+  /// deadline — the reply lands whenever the platform thread pumps it.
+  /// Never throws (all failures are swallowed: warm is best-effort).
+  static void warmDocument(String? filePath) {
+    _log.info('PDFTIMING warmDocument called supported=$isSupported path=$filePath');
+    if (!isSupported) return;
+    if (filePath == null || filePath.isEmpty) return;
+    try {
+      unawaited(
+        _channel
+            .invokeMethod<bool>('warmDocument', {'path': filePath})
+            .then((_) {})
+            .catchError((Object _) {}),
+      );
+    } catch (_) {
+      // Best effort only.
+    }
+  }
+
   static Future<void> closeTexture(int textureId) async {
     try {
       await _channel.invokeMethod<void>('closeTexture', {
@@ -172,6 +234,73 @@ abstract final class PdfNativeTexture {
       // Best effort: the native side drops the whole session (both slots),
       // so a missed close only costs a transient GPU allocation.
     }
+  }
+}
+
+/// xnotes-like settled sharpen: an incoming tile fades 0 → 1 over ~150 ms
+/// on top of the geometrically-aligned base, so a quality swap reads as a
+/// smooth deblur instead of a stretch/shift jump.
+///
+/// [commitKey] must identify the committed pixels (texture + clip): the
+/// fade replays once per tile commit and never during motion (commits only
+/// happen settled, behind the stability gate), and never replays for
+/// rebuilds of the same tile. The base layer stays instant (open speed is
+/// untouched); only settled refinements fade.
+class TileSharpenFade extends StatefulWidget {
+  const TileSharpenFade({
+    super.key,
+    required this.commitKey,
+    required this.child,
+  });
+
+  final String commitKey;
+  final Widget child;
+
+  @override
+  State<TileSharpenFade> createState() => _TileSharpenFadeState();
+}
+
+class _TileSharpenFadeState extends State<TileSharpenFade>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 150),
+    );
+    _opacity = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOut,
+    );
+    _controller.forward(from: 0.0);
+  }
+
+  @override
+  void didUpdateWidget(covariant TileSharpenFade oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.commitKey != oldWidget.commitKey) {
+      // Restart the fade animation without unmounting the child texture/image.
+      // Unmounting causes a 1-frame glitch/flicker exposing uninitialized memory.
+      _controller.forward(from: 0.0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: widget.child,
+    );
   }
 }
 
@@ -379,7 +508,7 @@ class _PdfNativeTextureViewState extends State<PdfNativeTextureView> {
       return;
     }
     if (newId != null && newId >= 0) {
-      // Atomic swap: back-buffer textureId and committedClip update in the
+      // Atomic swap: back-producer textureId and committedClip update in the
       // exact same Flutter frame, preventing any displacement or flicker.
       setState(() {
         _textureId = newId;
@@ -401,7 +530,7 @@ class _PdfNativeTextureViewState extends State<PdfNativeTextureView> {
     widget.onFallback?.call();
   }
 
-  /// Releases the session (both ping-pong slots) immediately. VRAM
+  /// Releases the session (both producers + doc ref) immediately. VRAM
   /// discipline: never waits on GC.
   Future<void> _release() async {
     _resizeTimer?.cancel();
@@ -442,12 +571,14 @@ class _PdfNativeTextureViewState extends State<PdfNativeTextureView> {
     // never a soft intermediate frame. (A fade here turned every arrival of
     // a settle storm into a visible flicker.)
     return Positioned.fromRect(
-      // Device-pixel snap: fractional origins bilinear-shift text by whole
-      // physical pixels at high zoom (reads as vertical drift on settle).
-      rect: PdfTileMath.snapRectToDevicePixels(_mapClip(committed, box), dpr),
-      child: InvertWidget(
-        invert: widget.invert,
-        child: Texture(textureId: id, filterQuality: FilterQuality.medium),
+      rect: _mapClip(committed, box),
+      // Settled sharpen: the new tile deblurs over the aligned base.
+      child: TileSharpenFade(
+        commitKey: '${id}_${committed.rect}_${committed.pageSize}',
+        child: InvertWidget(
+          invert: widget.invert,
+          child: Texture(textureId: id, filterQuality: FilterQuality.medium),
+        ),
       ),
     );
   }

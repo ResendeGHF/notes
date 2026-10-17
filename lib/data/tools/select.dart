@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/data/tools/_tool.dart';
+import 'package:saber/data/tools/lasso_coverage_mask.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
 
 class Select extends Tool {
@@ -17,6 +18,22 @@ class Select extends Tool {
   static Select get currentSelect => _currentSelect;
 
   static const minPercentInside = 0.7;
+
+  /// At or above this many strokes overlapping the lasso, hit-testing switches
+  /// from outlined polygons to a temporary coverage mask. Outlining every
+  /// stroke and running [Path.contains] on a stylus-density lasso is what
+  /// freezes pen-up; the mask keeps that case interactive.
+  static const rasterStrokeThreshold = 48;
+
+  /// Centerline samples that also force the mask, so a few very long strokes
+  /// cannot stall pen-up on their own.
+  static const rasterSampleThreshold = 6000;
+
+  /// Centerline samples per stroke while probing the mask. Enough for a stable
+  /// 70% decision without walking multi-thousand-point strokes point by point.
+  static const rasterSamplesPerStroke = 96;
+
+  final List<Offset> _lassoPoints = [];
 
   var selectResult = SelectResult(
     pageIndex: -1,
@@ -32,6 +49,7 @@ class Select extends Tool {
 
   void unselect() {
     doneSelecting = false;
+    _lassoPoints.clear();
     selectResult = SelectResult(
       pageIndex: -1,
       strokes: const [],
@@ -69,37 +87,72 @@ class Select extends Tool {
       path: Path(),
       pageIndexStart: pageIndex,
     );
+    _lassoPoints
+      ..clear()
+      ..add(position);
     selectResult.path.moveTo(position.dx, position.dy);
     onDragUpdate(position);
   }
 
   void onDragUpdate(Offset position) {
     selectResult.path.lineTo(position.dx, position.dy);
+    if (_lassoPoints.isEmpty || _lassoPoints.last != position) {
+      _lassoPoints.add(position);
+    }
   }
 
   void onDragEnd(List<Stroke> strokes, List<EditorImage> images) {
     selectResult.path.close();
     doneSelecting = true;
 
-    for (int i = 0; i < strokes.length; i++) {
-      final stroke = strokes[i];
-      final percentInside = polygonPercentInside(
-        selectResult.path,
-        stroke.lowQualityPolygon,
-      );
-      if (percentInside > minPercentInside) {
-        selectResult.strokes.add(stroke);
+    final lassoBounds = selectResult.path.getBounds();
+    final candidates = <Stroke>[];
+    var candidateSamples = 0;
+    if (lassoBounds.width > 0 || lassoBounds.height > 0) {
+      for (final stroke in strokes) {
+        if (stroke.sampleCount == 0) continue;
+        // Bounds already include half the pen width. A little extra slack
+        // keeps wide outlines that poke past that box in the precise test.
+        final rejectBounds = stroke.bounds.inflate(stroke.options.size);
+        if (!rejectBounds.overlaps(lassoBounds)) continue;
+        candidates.add(stroke);
+        candidateSamples += stroke.sampleCount;
+      }
+    }
+
+    final useMask =
+        candidates.isNotEmpty &&
+        _lassoPoints.length >= 3 &&
+        (candidates.length >= rasterStrokeThreshold ||
+            candidateSamples >= rasterSampleThreshold);
+    if (useMask) {
+      final mask = LassoCoverageMask.fromPolyline(_lassoPoints);
+      if (mask != null) {
+        for (final stroke in candidates) {
+          if (_centerlineMostlyInside(mask, stroke)) {
+            selectResult.strokes.add(stroke);
+          }
+        }
+      }
+    } else {
+      final path = selectResult.path;
+      for (final stroke in candidates) {
+        if (_polygonMostlyInside(path, stroke.lowQualityPolygon)) {
+          selectResult.strokes.add(stroke);
+        }
       }
     }
 
     for (int i = 0; i < images.length; i++) {
       final image = images[i];
+      if (lassoBounds.width > 0 || lassoBounds.height > 0) {
+        if (!image.dstRect.overlaps(lassoBounds)) continue;
+      }
       final percentInside = rectPercentInside(selectResult.path, image.dstRect);
       if (percentInside >= minPercentInside) {
         selectResult.images.add(image);
       }
     }
-    
 
     if (selectResult.images.isNotEmpty) {
       final firstImage = selectResult.images.first;
@@ -134,6 +187,7 @@ class Select extends Tool {
   }
 
   static double polygonPercentInside(Path selection, List<Offset> polygon) {
+    if (polygon.isEmpty) return 0;
     int pointsInside = 0;
     for (final point in polygon) {
       if (selection.contains(point)) {
@@ -142,6 +196,47 @@ class Select extends Tool {
     }
     return pointsInside / polygon.length;
   }
+
+  /// Same threshold as [polygonPercentInside], but stops once the stroke is
+  /// clearly inside or clearly outside so a miss does not walk the whole
+  /// outline against a long lasso.
+  static bool _polygonMostlyInside(Path selection, List<Offset> polygon) {
+    final total = polygon.length;
+    if (total == 0) return false;
+    var inside = 0;
+    for (var seen = 0; seen < total; seen++) {
+      if (selection.contains(polygon[seen])) inside++;
+      final remaining = total - seen - 1;
+      if (inside / total > minPercentInside) return true;
+      if ((inside + remaining) / total <= minPercentInside) return false;
+    }
+    return false;
+  }
+
+  static bool _centerlineMostlyInside(LassoCoverageMask mask, Stroke stroke) {
+    final points = stroke.pointsForEraser;
+    final n = points.length;
+    if (n == 0) return false;
+    final step = math.max(1, n ~/ rasterSamplesPerStroke);
+    final last = n - 1;
+    final extraLast = last % step != 0;
+    final total = ((n + step - 1) ~/ step) + (extraLast ? 1 : 0);
+    var inside = 0;
+    var seen = 0;
+    for (var i = 0; i < n; i += step) {
+      seen++;
+      final p = points[i];
+      if (mask.contains(Offset(p.x, p.y))) inside++;
+      final remaining = total - seen;
+      if (inside / total > minPercentInside) return true;
+      if ((inside + remaining) / total <= minPercentInside) return false;
+    }
+    if (extraLast) {
+      final p = points[last];
+      if (mask.contains(Offset(p.x, p.y))) inside++;
+    }
+    return inside / total > minPercentInside;
+  }
 }
 
 class SelectResult {
@@ -149,10 +244,9 @@ class SelectResult {
   final List<Stroke> strokes;
   final List<EditorImage> images;
   Path path;
-  
 
   int pageIndexStart;
-  
+
   double _rotationDeg = 0.0;
   double get rotationDeg => _rotationDeg;
   set rotationDeg(double value) {
@@ -205,7 +299,10 @@ class SelectResult {
     if (displayBounds != null) return displayBounds!;
     if (isEmpty) return Rect.zero;
 
-    displayBounds = _boundsUnrotatedAround(getCentroid());
+    // Un-rotation is a no-op at 0°, and [getCentroid] would otherwise walk
+    // every selected sample (or outline) only to discard the result.
+    final pivot = rotationDeg == 0 ? Offset.zero : getCentroid();
+    displayBounds = _boundsUnrotatedAround(pivot);
     return displayBounds!;
   }
 
@@ -242,22 +339,32 @@ class SelectResult {
         center.dy + dx * sinUnrotate + dy * cosUnrotate,
       );
     }
-    
 
-    for (final stroke in strokes) {
-      final poly = stroke.highQualityPolygon;
-      
-      for (final pt in poly) {
-        final transformedPt = unrotateAroundSelection(pt);
-        
-        final pointRect = Rect.fromLTWH(transformedPt.dx, transformedPt.dy, 0, 0);
-        final currentBounds = bounds;
-        bounds = currentBounds == null
-            ? pointRect
-            : currentBounds.expandToInclude(pointRect);
+    if (strokes.length >= Select.rasterStrokeThreshold) {
+      // Union of stroke bounds (or unrotated centerline samples). Building
+      // the high-quality outline of every selected stroke just to size the
+      // box repeats the pen-up stall after a large lasso.
+      bounds = _fastStrokeBounds(unrotateAroundSelection);
+    } else {
+      for (final stroke in strokes) {
+        final poly = stroke.highQualityPolygon;
+
+        for (final pt in poly) {
+          final transformedPt = unrotateAroundSelection(pt);
+
+          final pointRect = Rect.fromLTWH(
+            transformedPt.dx,
+            transformedPt.dy,
+            0,
+            0,
+          );
+          final currentBounds = bounds;
+          bounds = currentBounds == null
+              ? pointRect
+              : currentBounds.expandToInclude(pointRect);
+        }
       }
     }
-    
 
     for (final image in images) {
       final imageRotationRad = image.rotationDeg * math.pi / 180.0;
@@ -293,8 +400,51 @@ class SelectResult {
             : currentBounds.expandToInclude(pointRect);
       }
     }
-    
+
     return bounds ?? Rect.zero;
+  }
+
+  Rect? _fastStrokeBounds(Offset Function(Offset) unrotate) {
+    Rect? bounds;
+    if (rotationDeg == 0) {
+      for (final stroke in strokes) {
+        if (stroke.sampleCount == 0) continue;
+        final strokeBounds = stroke.bounds;
+        final currentBounds = bounds;
+        bounds = currentBounds == null
+            ? strokeBounds
+            : currentBounds.expandToInclude(strokeBounds);
+      }
+      return bounds;
+    }
+
+    for (final stroke in strokes) {
+      final points = stroke.pointsForEraser;
+      if (points.isEmpty) continue;
+      var minX = double.infinity;
+      var minY = double.infinity;
+      var maxX = double.negativeInfinity;
+      var maxY = double.negativeInfinity;
+      for (final point in points) {
+        final unrotated = unrotate(Offset(point.x, point.y));
+        if (unrotated.dx < minX) minX = unrotated.dx;
+        if (unrotated.dy < minY) minY = unrotated.dy;
+        if (unrotated.dx > maxX) maxX = unrotated.dx;
+        if (unrotated.dy > maxY) maxY = unrotated.dy;
+      }
+      final margin = stroke.options.size / 2;
+      final strokeBounds = Rect.fromLTRB(
+        minX - margin,
+        minY - margin,
+        maxX + margin,
+        maxY + margin,
+      );
+      final currentBounds = bounds;
+      bounds = currentBounds == null
+          ? strokeBounds
+          : currentBounds.expandToInclude(strokeBounds);
+    }
+    return bounds;
   }
 
   bool contains(Offset position) {
@@ -314,7 +464,10 @@ class SelectResult {
     if (isEmpty) return Offset.zero;
     final bounds = displayBounds;
     if (bounds != null) return bounds.center;
-    
+    if (strokes.length >= Select.rasterStrokeThreshold) {
+      return _sampleCentroid();
+    }
+
     final allPoints = <Offset>[];
     for (final stroke in strokes) {
       allPoints.addAll(stroke.highQualityPolygon);
@@ -322,8 +475,35 @@ class SelectResult {
     for (final image in images) {
       allPoints.add(image.dstRect.center);
     }
-    
+
     return getCentroidForPoints(allPoints);
+  }
+
+  /// Average of stored centerline samples. Used when outlining every stroke
+  /// just to find a pivot would stall. [getBounds] calls this while
+  /// [displayBounds] is still null, so it must not call back into [getBounds].
+  Offset _sampleCentroid() {
+    var x = 0.0;
+    var y = 0.0;
+    var count = 0;
+    for (final stroke in strokes) {
+      final points = stroke.pointsForEraser;
+      if (points.isEmpty) continue;
+      final step = math.max(1, points.length ~/ 32);
+      for (var i = 0; i < points.length; i += step) {
+        x += points[i].x;
+        y += points[i].y;
+        count++;
+      }
+    }
+    for (final image in images) {
+      final center = image.dstRect.center;
+      x += center.dx;
+      y += center.dy;
+      count++;
+    }
+    if (count == 0) return Offset.zero;
+    return Offset(x / count, y / count);
   }
 
   static Offset getCentroidForPoints(Iterable<Offset> points) {
@@ -364,9 +544,7 @@ class SelectionTransformPreview {
   final double rotationDeltaDeg;
 
   bool get isIdentity =>
-      translation == Offset.zero &&
-      scale == 1.0 &&
-      rotationDeltaDeg == 0.0;
+      translation == Offset.zero && scale == 1.0 && rotationDeltaDeg == 0.0;
 
   double get effectiveRotationDeg => baseRotationDeg + rotationDeltaDeg;
 
@@ -376,13 +554,12 @@ class SelectionTransformPreview {
     height: baseBounds.height * scale,
   );
 
-  vmath.Matrix4 get transformMatrix =>
-      vmath.Matrix4.identity()
-        ..translate(translation.dx, translation.dy)
-        ..translate(pivot.dx, pivot.dy)
-        ..rotateZ(rotationDeltaDeg * math.pi / 180.0)
-        ..scale(scale, scale)
-        ..translate(-pivot.dx, -pivot.dy);
+  vmath.Matrix4 get transformMatrix => vmath.Matrix4.identity()
+    ..translate(translation.dx, translation.dy)
+    ..translate(pivot.dx, pivot.dy)
+    ..rotateZ(rotationDeltaDeg * math.pi / 180.0)
+    ..scale(scale, scale)
+    ..translate(-pivot.dx, -pivot.dy);
 
   Offset transformPoint(Offset point, {bool includeRotation = true}) {
     final scaled = Offset(

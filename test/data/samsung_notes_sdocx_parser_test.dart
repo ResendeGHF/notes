@@ -7,7 +7,7 @@ import 'dart:typed_data';
 import 'package:archive/archive_io.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
-import 'package:saber/data/samsung_notes/sdocx_importer.dart';
+import 'package:saber/data/samsung_notes/sdocx_mapping.dart';
 import 'package:saber/data/samsung_notes/sdocx_parser.dart';
 import 'package:saber/data/tools/_tool.dart';
 
@@ -103,7 +103,7 @@ void main() {
       expect(p.templateUri, isNull);
       expect(p.templateType, isNull);
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
           templateType: p.templateType,
           templateUri: p.templateUri ?? doc.defaultTemplateUri,
         ),
@@ -168,7 +168,7 @@ void main() {
         'DefaultPen',
       ]) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.ballpointPen,
           reason: name,
         );
@@ -176,7 +176,7 @@ void main() {
       // Fountain.
       for (final name in ['FountainPen', 'MontblancFountainPen']) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.fountainPen,
           reason: name,
         );
@@ -188,7 +188,7 @@ void main() {
         'ObliquePen',
       ]) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.calligraphyPen,
           reason: name,
         );
@@ -196,7 +196,7 @@ void main() {
       // Pencil.
       for (final name in ['Pencil', 'Pencil2', 'Pencil3', 'ColoredPencil']) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.pencil,
           reason: name,
         );
@@ -211,7 +211,7 @@ void main() {
         'StraightHighlighter',
       ]) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.highlighter,
           reason: name,
         );
@@ -228,14 +228,14 @@ void main() {
         null,
       ]) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(name),
+          samsungPenToToolId(name),
           ToolId.ballpointPen,
           reason: '$name',
         );
       }
       // Translucent unknown ink still behaves like a highlighter.
       expect(
-        SamsungNotesImporter.samsungPenToToolId('SomeFuturePen',
+        samsungPenToToolId('SomeFuturePen',
             colorArgb: 0x80123456),
         ToolId.highlighter,
       );
@@ -246,7 +246,7 @@ void main() {
       final doc = SdocxParser.parseArchive(_unzip(file));
       for (final s in doc.pages.first.strokes) {
         expect(
-          SamsungNotesImporter.samsungPenToToolId(s.penName,
+          samsungPenToToolId(s.penName,
               colorArgb: s.colorArgb),
           ToolId.ballpointPen,
         );
@@ -262,28 +262,28 @@ void main() {
       const blank = CanvasBackgroundPattern.none;
       for (final id in [1, 2, 3]) {
         expect(
-          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          samsungTemplateToPattern(templateType: id),
           lined,
           reason: 'id $id',
         );
       }
       for (final id in [4, 5, 6]) {
         expect(
-          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          samsungTemplateToPattern(templateType: id),
           grid,
           reason: 'id $id',
         );
       }
       for (final id in [7, 8, 9]) {
         expect(
-          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          samsungTemplateToPattern(templateType: id),
           dots,
           reason: 'id $id',
         );
       }
       for (final id in [null, 0, 42]) {
         expect(
-          SamsungNotesImporter.samsungTemplateToPattern(templateType: id),
+          samsungTemplateToPattern(templateType: id),
           blank,
           reason: 'id $id',
         );
@@ -292,28 +292,28 @@ void main() {
 
     test('template URIs map by keyword', () {
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
             templateUri: ' honor_grid_normal '),
         CanvasBackgroundPattern.grid,
       );
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
             templateUri: 'something_lined_narrow'),
         CanvasBackgroundPattern.lined,
       );
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
             templateUri: 'DOT_big'),
         CanvasBackgroundPattern.dots,
       );
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
             templateUri: 'blank_template'),
         CanvasBackgroundPattern.none,
       );
       // URI keywords win over a conflicting numeric id.
       expect(
-        SamsungNotesImporter.samsungTemplateToPattern(
+        samsungTemplateToPattern(
             templateType: 1, templateUri: 'my_grid'),
         CanvasBackgroundPattern.grid,
       );

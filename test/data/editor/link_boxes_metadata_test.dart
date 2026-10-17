@@ -119,4 +119,43 @@ void main() {
       p.dispose();
     }
   });
+
+  test('showPdfLinkBoxes round-trips saveToBinaryAsync (editor autosave path)',
+      () async {
+    final info = EditorCoreInfo(filePath: '/tmp/linkboxes-note', readOnly: false);
+    info.pages.add(EditorPage());
+
+    // Autosave uses saveToBinaryAsync: disabled must survive it.
+    info.showPdfLinkBoxes = false;
+    final bytesOff = await info.saveToBinaryAsync(currentPageIndex: 0);
+    final loadedOff = EditorCoreInfo.fromBinary(
+      buffer: bytesOff,
+      filePath: '/tmp/linkboxes-note',
+      readOnly: false,
+      onlyFirstPage: false,
+    );
+    expect(loadedOff.showPdfLinkBoxes, isFalse);
+    final loadedOffAsync = await EditorCoreInfo.fromBinaryAsync(
+      buffer: bytesOff,
+      filePath: '/tmp/linkboxes-note',
+      readOnly: false,
+      onlyFirstPage: false,
+    );
+    expect(loadedOffAsync.showPdfLinkBoxes, isFalse);
+
+    // Default true stays true.
+    info.showPdfLinkBoxes = true;
+    final bytesOn = await info.saveToBinaryAsync(currentPageIndex: 0);
+    final loadedOn = EditorCoreInfo.fromBinary(
+      buffer: bytesOn,
+      filePath: '/tmp/linkboxes-note',
+      readOnly: false,
+      onlyFirstPage: false,
+    );
+    expect(loadedOn.showPdfLinkBoxes, isTrue);
+
+    for (final p in info.pages) {
+      p.dispose();
+    }
+  });
 }

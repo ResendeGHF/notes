@@ -32,6 +32,10 @@ List<Offset> composeAdvancedOutline(
   required double strokeWidth,
   required AdvancedPenPressureCurve curve,
   bool roundedCaps = true,
+  // Split cap control for staged chunks: butt-cut ends join invisibly.
+  // Default to [roundedCaps] so existing callers are unaffected.
+  bool? startRounded,
+  bool? endRounded,
 }) {
   if (points.isEmpty || strokeWidth <= 0) return const [];
   if (points.length == 1) {
@@ -301,8 +305,11 @@ List<Offset> composeAdvancedOutline(
   if (posRail.isEmpty || negRail.isEmpty) return const [];
 
   final outline = <Offset>[];
+  final bool doStartCap = startRounded ?? roundedCaps;
+  final bool doEndCap = endRounded ?? roundedCaps;
   // Start cap: exact semicircle in the (-startTangent, startNormal) frame.
-  if (roundedCaps && rStart > 0 && posRail.first != negRail.first) {
+  // Butt joints skip the arc so staged chunks join invisibly.
+  if (doStartCap && rStart > 0 && posRail.first != negRail.first) {
     outline.add(negRail.first);
     _appendCircularArc(
       outline,
@@ -324,7 +331,7 @@ List<Offset> composeAdvancedOutline(
   }
 
   // End cap: exact semicircle in the (+endTangent, endNormal) frame.
-  if (roundedCaps && rEnd > 0 && posRail.last != negRail.last) {
+  if (doEndCap && rEnd > 0 && posRail.last != negRail.last) {
     _appendCircularArc(
       outline,
       center: Offset(pts.last.x, pts.last.y),

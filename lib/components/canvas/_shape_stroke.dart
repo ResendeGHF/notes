@@ -416,6 +416,10 @@ class ShapeStroke extends Stroke {
       );
     }
 
+    // Carve bites are page-space marks on the ink, so they rotate with the
+    // shape around the same pivot (select-tool rotation must not leave them
+    // behind).
+    carveMask?.rotate(angleRad, center);
     _regeneratePoints();
   }
 
@@ -475,6 +479,9 @@ class ShapeStroke extends Stroke {
     );
     options.size *= factor;
 
+    // Carve bites scale with the shape around the same pivot, so select-tool
+    // resize preserves the carve edits instead of resetting the stroke.
+    carveMask?.scale(factor, center);
     _regeneratePoints();
   }
 
@@ -891,7 +898,8 @@ class ShapeStroke extends Stroke {
       fill: fill,
       fillColor: fillColor,
       shapeVertices: shapeVertices,
-    )..rotationDeg = rotationDeg;
+    )..rotationDeg = rotationDeg
+    ..carveMask = carveMask?.clone();
   }
 
   Path _buildPath(ShapeConfig cfg) {

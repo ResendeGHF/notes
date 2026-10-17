@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 
@@ -338,6 +340,62 @@ abstract final class PdfTileMath {
       cap,
     );
     return (clip: snapped, width: w, height: h, density: density);
+  }
+
+  /// Overdraw margin for viewport tiles (map-tile bleed discipline).
+  ///
+  /// A tile planned for exactly the visible rect leaves the screen rim
+  /// covered by the soft upscaled base after any small pan or micro-drift,
+  /// until the next settle retiles: center sharp, edges blurry. Inflating
+  /// the want-rect (~50% of the smallest side per side, 16..96pt, clamped
+  /// to the page) keeps pans and drift gliding over sharp pixels. The
+  /// bitmap cap still bounds VRAM, so at deep zoom (where the cap binds
+  /// anyway) the margin costs nothing; at moderate zoom it trades a little
+  /// center density for uniform sharpness.
+  static Rect withTileMargin(Rect want, Size pageSize) {
+    if (want.isEmpty || pageSize.isEmpty) return want;
+    final m =
+        (math.min(want.width, want.height) * 0.5).clamp(16.0, 96.0);
+    return Rect.fromLTWH(
+      want.left - m,
+      want.top - m,
+      want.width + 2 * m,
+      want.height + 2 * m,
+    ).intersect(Offset.zero & pageSize);
+  }
+
+  /// Bitmap height for a tile so the painted box is a pure uniform scale of
+  /// the bitmap (zero relative distortion against the base layer).
+  ///
+  /// The tile paints into a box mapped page-pt -> box units, whose aspect is
+  /// `(clip.w*sx)/(clip.h*sy)`; the box aspect only equals the clip aspect
+  /// when the page widget preserves the page aspect exactly (sx == sy),
+  /// which layout rounding routinely breaks by 1-3%. Locking the bitmap to
+  /// the clip aspect then stretches the tile against the base on every
+  /// quality swap (visible micro-stretch/shift). Rendering at the painted
+  /// aspect instead makes `BoxFit.fill` a uniform scale: base and tile share
+  /// the same (slightly non-uniform) page sampling, so swaps only change
+  /// sharpness, never geometry. [width] is kept (density anchor); the
+  /// height follows, within [cap].
+  static ({int width, int height}) fitBitmapToBox({
+    required Rect clipPt,
+    required int width,
+    required Size boxSize,
+    required Size pageSizePt,
+    int cap = 3072,
+  }) {
+    final w = width.clamp(1, cap);
+    final sx = pageSizePt.width > 0 ? boxSize.width / pageSizePt.width : 1.0;
+    final sy = pageSizePt.height > 0 ? boxSize.height / pageSizePt.height : 1.0;
+    if (!sx.isFinite || !sy.isFinite || sx <= 0 || sy <= 0) {
+      return (width: w, height: w);
+    }
+    final boxAspect = (clipPt.width * sx) / (clipPt.height * sy);
+    if (!boxAspect.isFinite || boxAspect <= 0) {
+      return (width: w, height: w);
+    }
+    final h = (w / boxAspect).round().clamp(1, cap);
+    return (width: w, height: h);
   }
 
   /// Document-space box for painting a tile: maps [clipPt] (displayed page

@@ -4,7 +4,6 @@
 import 'package:flutter/material.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
-import 'package:saber/data/tools/highlighter.dart';
 
 class NoteLayer extends ChangeNotifier {
   NoteLayer({this.name, List<Stroke>? strokes, List<EditorImage>? images})
@@ -26,18 +25,23 @@ class NoteLayer extends ChangeNotifier {
   bool get isEmpty => _strokes.isEmpty && _images.isEmpty;
 
   void insertStroke(Stroke stroke) {
-    int newStrokeColor = stroke.color.toARGB32();
-    int index = 0;
-    for (final Stroke s in _strokes) {
-      final penCmp = s.penType.compareTo(stroke.penType);
-      final color = s.color.toARGB32();
-      if (penCmp > 0) break;
-      if (s.penType == (Highlighter).toString() &&
-          penCmp == 0 &&
-          color > newStrokeColor) break;
-      index++;
+    // Temporal z-order: newer strokes append on top, painted back-to-front so
+    // the newest ends on top regardless of pen or color. (An old revision
+    // grouped by pen type here; that broke temporal layering, top-first
+    // erasing and undo positioning. File order on load is preserved as-is,
+    // so already-saved notes render exactly as before.)
+    _strokes.add(stroke);
+    notifyListeners();
+  }
+
+  /// Positional insert for undo/redo restore (exact draw-order slot, clamped).
+  /// Does not group or sort: the caller owns positions.
+  void insertStrokeAt(Stroke stroke, int index) {
+    if (index < 0 || index >= _strokes.length) {
+      _strokes.add(stroke);
+    } else {
+      _strokes.insert(index, stroke);
     }
-    _strokes.insert(index, stroke);
     notifyListeners();
   }
 

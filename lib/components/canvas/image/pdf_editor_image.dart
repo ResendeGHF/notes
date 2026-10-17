@@ -309,7 +309,19 @@ class PdfEditorImage extends EditorImage {
     required bool invert,
     double renderScale = 1.0,
   }) {
-    final pdfNotifier = assetCacheAll.getPdfNotifier(assetId);
+    final resolvedPathEarly =
+        assetCacheAll.getResolvedPdfPath(assetId) ?? pdfFile?.path;
+    // The native renderer paints from the file descriptor. Opening pdfrx
+    // in the same frame duplicates that work and stalls first paint.
+    final nativeFirst = !isThumbnail &&
+        PdfNativeTexture.shouldAttemptFor(
+          resolvedPathEarly,
+          vaultUnlocked: VaultAdapter.isUnlocked,
+        );
+    final pdfNotifier = assetCacheAll.getPdfNotifier(
+      assetId,
+      startOpen: !nativeFirst,
+    );
     return ValueListenableBuilder(
       valueListenable: pdfNotifier,
       builder: (context, pdfDocument, child) {
@@ -337,11 +349,18 @@ class PdfEditorImage extends EditorImage {
           // the single pdfrx worker queue).
           onFirstPaint: isThumbnail
               ? null
-              : () => assetCacheAll.kickProgressiveLoad(assetId),
+              : () {
+                  assetCacheAll.getPdfNotifier(assetId);
+                  assetCacheAll.kickProgressiveLoad(assetId);
+                },
           // Phase-1 parse of just this page's window (see AssetCacheAll).
           onEnsureVisibleWindow: isThumbnail
               ? null
-              : () => assetCacheAll.ensureVisiblePagesLoaded(assetId, pdfPage),
+              : () => assetCacheAll.ensureVisiblePagesLoaded(
+                    assetId,
+                    pdfPage,
+                    radius: 0,
+                  ),
           tileIdentity: (
             size: assetCacheAll.getAssetFileSize(assetId),
             hash: assetCacheAll.getAssetPreviewHash(assetId),
@@ -454,7 +473,12 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
 
   /// Safety net if a page status event is ever missed: fall back to mounting
   /// anyway rather than spinning forever.
-  static const _readyFallbackTimeout = Duration(seconds: 8);
+  static const _readyFallbackTimeout = Duration(seconds: 5);
+
+  /// Minimum visible area fraction for the mid-motion released→full upgrade
+  /// (see [_upgradeFromReleasedIfVisible]). ~A fifth of the page on screen:
+  /// the user is reading it, not flicking past it — time to mount content.
+  static const double _kMotionUpgradeMinFraction = 0.2;
 
   /// Instant first paint: low-res JPEG from the background tile cache,
   /// probed synchronously (no PDFium, no FFI). Shown under the live render.
@@ -470,14 +494,32 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   /// the visible rect at native zoom resolution (deep zoom stays sharp);
   /// `released` holds no big surface (offscreen VRAM discipline) and shows
   /// the cached tile until the page re-enters the viewport.
-  // Released until the post-frame retile proves visibility: band
-  // members outside the viewport never mount full surfaces (no wasted
-  // parses/renders ahead of the visible page). Thumbnails keep full.
-  _PdfSurfaceMode _mode = _PdfSurfaceMode.released;
+  // Full by default: a page that is mounted (i.e. already inside the render
+  // cache extent, which is prebuilt ahead of visibility) mounts its big
+  // surface immediately, so content is on screen before the user finishes
+  // panning onto it. The one exception is a mount during a FAST fling (see
+  // [_initialSurfaceMode]): pages crossing the zone in milliseconds must not
+  // each open a texture — that backlogs the single native executor and
+  // stalls the page the user actually lands on. Released pages show the
+  // cheap cached tile and upgrade on the viewport tick (slow pans) or at
+  // settle via [_retile].
+  _PdfSurfaceMode _mode = _PdfSurfaceMode.full;
 
   /// Identity of the mounted big surface (`full` or `t:<clip>:<w>x<h>`).
-  /// Retiling skips work when the key is unchanged.
-  String? _surfaceKey;
+  /// Retiling skips work when the key is unchanged. Starts as `full` to
+  /// match [_mode]: the first retile early-outs instead of remounting.
+  String? _surfaceKey = 'full';
+
+  /// Mid-motion released→full geometry check in flight (see
+  /// [_scheduleMotionUpgrade]). At most one per frame.
+  bool _motionCheckScheduled = false;
+
+  /// One cheap-tile fill job per page at a time (see [_ensureCheapTile]).
+  bool _cheapTileInFlight = false;
+
+  /// Concurrent native thumbnail fills (bounded: the native executor also
+  /// serves the visible page's texture open; a scroll must never backlog it).
+  static int _activeNativeTiles = 0;
 
   /// Viewport tick debounce (pan/zoom retile). Fires only; the rect compare
   /// inside [_retile] early-outs when nothing moved enough to matter.
@@ -500,14 +542,27 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   @override
   void initState() {
     super.initState();
-    Logger('PDFTIMING').info('PDFTIMING renderer.initState page=${widget.pageIndex} doc=${widget.pdfDocument == null ? "null" : "ready"}');
+    final dbgPath = widget.pdfFile?.path;
+    var dbgTrackedTemp = false;
+    try {
+      dbgTrackedTemp = dbgPath != null &&
+          VaultAdapter.instance.isTrackedPlaintextDecryptTemp(dbgPath);
+    } catch (_) {}
+    Logger('PDFTIMING').info(
+      'PDFTIMING renderer.initState page=${widget.pageIndex} '
+      'doc=${widget.pdfDocument == null ? "null" : "ready"} '
+      'native=${_nativeEligible()} vault=${VaultAdapter.isUnlocked} '
+      'trackedTemp=$dbgTrackedTemp path=${dbgPath?.split('/').last}',
+    );
     _probeThumbnail();
+    _mode = _initialSurfaceMode();
+    _surfaceKey = _mode == _PdfSurfaceMode.full ? 'full' : null;
     // Armed here; fired only from render events (native first frame, or
     // 400ms after pdfrx readiness). Arming alone queues nothing.
     _armKick();
     _watchPageAndLoadLinks();
     _ensureVisibleWindow();
-    _renderTileOnMiss();
+    _ensureCheapTile();
     if (!widget.isThumbnail) {
       PdfViewportBus.epoch.addListener(_onViewportTick);
       PdfViewportBus.settleEpoch.addListener(_onViewportSettle);
@@ -532,10 +587,8 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
         (oldWidget.pdfDocument != null &&
             !identical(oldWidget.pdfDocument, widget.pdfDocument))) {
       _nativeFailed = false;
-      _mode = widget.isThumbnail
-          ? _PdfSurfaceMode.full
-          : _PdfSurfaceMode.released;
-      _surfaceKey = null;
+      _mode = _initialSurfaceMode();
+      _surfaceKey = _mode == _PdfSurfaceMode.full ? 'full' : null;
       _nativeTiled = null;
       _tiledClip = null;
       _tiledBitmap = null;
@@ -546,6 +599,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       _clearTilePending();
       _probeThumbnail();
       _watchPageAndLoadLinks();
+      _ensureCheapTile();
       if (!widget.isThumbnail) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _retile());
       }
@@ -556,7 +610,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       // resetting the mounted native texture or re-probing disk.
       _watchPageAndLoadLinks();
       _ensureVisibleWindow();
-      _renderTileOnMiss();
+      _ensureCheapTile();
       return;
     }
     // Zoom bucket crossed (or rotation/invert irrelevant): retile soon so
@@ -593,8 +647,90 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
 
   void _onViewportTick() {
     if (widget.isThumbnail || !mounted) return;
+    _scheduleMotionUpgrade();
     _viewportTimer?.cancel();
     _viewportTimer = Timer(const Duration(milliseconds: 250), () => _retile());
+  }
+
+  /// Initial surface mode for a freshly mounted page. Full in every case
+  /// except a mount during a FAST fling: those pages cross the render zone
+  /// in milliseconds, so opening a texture per crossing page backlogs the
+  /// single native executor and stalls the page the user actually lands on.
+  /// Released pages show the cheap cached tile and upgrade via the viewport
+  /// tick (slow pans) or the settle retile.
+  _PdfSurfaceMode _initialSurfaceMode() {
+    if (widget.isThumbnail) return _PdfSurfaceMode.full;
+    if (PageRasterCacheManager.viewportMoving &&
+        !PageRasterCacheManager.viewportSlowMotion) {
+      return _PdfSurfaceMode.released;
+    }
+    return _PdfSurfaceMode.full;
+  }
+
+  /// Slow-pan content guarantee: a page released while offscreen mounts its
+  /// big surface as soon as a real portion of it is on screen — NOT at
+  /// settle. The tick debounce in [_onViewportTick] intentionally never
+  /// fires during continuous motion, so the upgrade rides a post-frame
+  /// geometry check instead (at most one per frame; flips a mode only, the
+  /// surface's open job is enqueued once). Fast flings skip it (see
+  /// [_initialSurfaceMode]); the settle retile owns that case, and the tile
+  /// underlay glides meanwhile.
+  void _scheduleMotionUpgrade() {
+    if (_mode != _PdfSurfaceMode.released) return;
+    if (_motionCheckScheduled) return;
+    if (!PageRasterCacheManager.viewportMoving) return;
+    if (!PageRasterCacheManager.viewportSlowMotion) return;
+    _motionCheckScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _motionCheckScheduled = false;
+      if (!mounted || widget.isThumbnail) return;
+      if (_mode != _PdfSurfaceMode.released) return;
+      if (!PageRasterCacheManager.viewportMoving) return;
+      if (!PageRasterCacheManager.viewportSlowMotion) return;
+      _upgradeFromReleasedIfVisible();
+    });
+  }
+
+  /// Upgrades `released → full` when a meaningful portion of this page is on
+  /// screen right now. Geometry only: no worker jobs beyond the one surface
+  /// open the mode flip mounts. [minFraction] lets the settle path (finger
+  /// lifted) upgrade earlier than mid-motion ticks, which stay
+  /// slow-motion-gated upstream.
+  void _upgradeFromReleasedIfVisible({
+    double minFraction = _kMotionUpgradeMinFraction,
+  }) {
+    if (_mode != _PdfSurfaceMode.released) return;
+    if (!_nativeEligible() && !_pageReady) return;
+    RenderBox? box;
+    try {
+      final ro = context.findRenderObject();
+      if (ro is! RenderBox || !ro.hasSize) return;
+      box = ro;
+    } catch (_) {
+      return;
+    }
+    Size screen;
+    try {
+      screen = MediaQuery.sizeOf(context);
+    } catch (_) {
+      return;
+    }
+    final displaySize = PdfTileMath.displaySize(
+      widget.naturalSize,
+      _pageRotationIndex(),
+    );
+    if (displaySize.isEmpty) return;
+    final region = PdfTileMath.computeVisible(
+      box: box,
+      screenSize: screen,
+      pageSizePt: displaySize,
+    );
+    if (region.fullyOffscreen) return;
+    if (region.fraction < minFraction) return;
+    setState(() {
+      _mode = _PdfSurfaceMode.full;
+      _surfaceKey = 'full';
+    });
   }
 
   /// Gesture settle: finger lifted — cancel the motion debounce and retile
@@ -603,6 +739,10 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     if (widget.isThumbnail || !mounted) return;
     _viewportTimer?.cancel();
     _viewportTimer = null;
+    // The page the finger left on mounts its surface NOW instead of waiting
+    // out the settle window (viewportMoving only clears after the settle
+    // delay, which blocks [_retile]): ~200ms earlier content after a fling.
+    _upgradeFromReleasedIfVisible();
     _retile();
   }
 
@@ -650,19 +790,17 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       // links, no tiles/prefetch): reload deferred work now that the page
       // (and its rotation) is known.
       if (_kickDone) {
-        _ensureOwnTile();
+        _ensureCheapTile();
         _prefetchNeighbors();
       }
       WidgetsBinding.instance.addPostFrameCallback((_) => _retile());
       return;
     }
 
-    // Page still streaming in: jump-start exactly this page (one worker job)
-    // instead of waiting for the deferred progressive chunks to reach it,
-    // and hold the tile until it is ready so the full-res texture mounts
-    // exactly once and never blanks afterwards.
+    // Do not call ensureLoaded here. Every mounted page would enqueue a
+    // PDFium job at once and stall the visible native texture. The delayed
+    // visible-window load and the paced metadata stream cover this page.
     _pageReady = false;
-    unawaited(pdfPage.ensureLoaded().catchError((Object _) => pdfPage));
     // If progressive load finishes after our first attempt (or ensureLoaded
     // misses a status race), reload highlights when the page becomes ready.
     _pageStatusSub = pdfPage.events.listen((change) {
@@ -673,7 +811,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
         _armKick();
         if (mounted) setState(() {});
         if (_kickDone) {
-          _ensureOwnTile();
+          _ensureCheapTile();
           _prefetchNeighbors();
         }
         WidgetsBinding.instance.addPostFrameCallback((_) => _retile());
@@ -690,6 +828,21 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   }
 
   void _ensureVisibleWindow() {
+    if (widget.isThumbnail) return;
+    // Parse of the visible window must start NOW: tile renders and the
+    // pdfrx-ready gate both wait on it. The only reason to defer is letting
+    // the native texture win the single pdfrx worker — and only when native
+    // is actually eligible (Android). Anywhere else the delay is pure blank
+    // time for every far page.
+    if (_nativeEligible()) {
+      Future<void>.delayed(const Duration(milliseconds: 300), () {
+        if (!mounted || widget.isThumbnail) return;
+        try {
+          widget.onEnsureVisibleWindow?.call();
+        } catch (_) {}
+      });
+      return;
+    }
     try {
       widget.onEnsureVisibleWindow?.call();
     } catch (_) {}
@@ -712,18 +865,30 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     if (!mounted || widget.isThumbnail) return;
     _kickDone = true;
     Logger('PDFTIMING').info('PDFTIMING renderer.doKick page=${widget.pageIndex}');
+    // Neighbor JPEG renders stay off this path: they share the one worker
+    // and were the stall while pages loaded. The visible render job was sent
+    // synchronously during this surface's build, so even a short delay keeps
+    // the kick strictly behind it — 1600ms was pure blank time for far pages
+    // waiting on progressive streaming + neighbor tiles.
+    Future<void>.delayed(const Duration(milliseconds: 600), _finishKick);
+  }
+
+  void _finishKick() {
+    if (!mounted || widget.isThumbnail) return;
+    if (PageRasterCacheManager.viewportMoving) {
+      Future<void>.delayed(const Duration(milliseconds: 400), _finishKick);
+      return;
+    }
     try {
       widget.onFirstPaint?.call();
     } catch (_) {}
-    // Own tile for the next cold open + neighbors. (Link detection lives
-    // in the editor sweep, scoped and ordered post-paint.)
-    _ensureOwnTile();
-    _prefetchNeighbors();
   }
 
   /// Neighbor tile prefetch, strictly post-paint: the current page's full
   /// render already owns the worker queue, so warming the next pages cannot
-  /// delay first paint. Vault-safe (memory-only when unlocked).
+  /// delay first paint. Next two + previous one: users scroll both ways, and
+  /// a neighbor with its cheap tile already cached shows content the instant
+  /// it enters the viewport. Vault-safe (memory-only when unlocked).
   void _prefetchNeighbors() {
     try {
       final doc = widget.pdfDocument;
@@ -733,8 +898,12 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       final ident = widget.tileIdentity;
       final n = doc.pages.length;
       final upcoming = <int>[];
-      for (var i = widget.pageIndex + 1; i < n && upcoming.length < 3; i++) {
-        upcoming.add(i);
+      for (final i in <int>[
+        widget.pageIndex + 1,
+        widget.pageIndex + 2,
+        widget.pageIndex - 1,
+      ]) {
+        if (i >= 0 && i < n && i != widget.pageIndex) upcoming.add(i);
       }
       if (upcoming.isEmpty) return;
       PdfPageThumbnailCache.prefetch(
@@ -756,46 +925,122 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     } catch (_) {}
   }
 
-  /// Ensures this page's own low-res tile exists for the next cold open.
-  /// Called for thumbnails (which never kick) and as the blur-up completion.
-  /// Cold-open blur-up: when the probe MISSED (nothing to show), render
-  /// one 360px tile immediately. It queues a single tiny job ahead of the
-  /// full rasters and typically paints content ~seconds earlier on cold
-  /// opens; warm opens skip it (probe hit, zero jobs). The kick still runs
-  /// strictly after (streaming/text/prefetch unchanged).
-  void _renderTileOnMiss() {
+  /// The cheap underlay every mounted page must have: one low-res JPEG in
+  /// the shared tile cache, shown instantly while the big surface opens (and
+  /// as the only content in `released` mode — the "low-cost page" that makes
+  /// panning show *something* immediately). Native PdfRenderer bytes first
+  /// (Kotlin, file path only — no pdfrx doc or worker needed), pdfrx
+  /// `getOrRender` otherwise (non-Android, vault-forbidden, native failure).
+  ///
+  /// Bounded to two concurrent native fills: the native executor also serves
+  /// the visible page's texture open, and a scroll must never backlog it. The
+  /// 40ms yield lets the mount frame paint (and the visible page's texture
+  /// open reach the executor) before this job does.
+  void _ensureCheapTile() {
     if (widget.isThumbnail) return;
-    final doc = widget.pdfDocument;
-    if (doc == null) return;
+    if (_thumbFile != null || _thumbMemory != null) return;
+    if (_cheapTileInFlight) return;
     final key = _thumbCacheKey;
-    if (key == null || _thumbFile != null || _thumbMemory != null) return;
+    if (key == null) return;
+    final path = widget.pdfFile?.path;
+    if (path == null || path.isEmpty) return;
     final pageIndex = widget.pageIndex;
-    unawaited(
-      PdfPageThumbnailCache.getOrRender(
-        doc: doc,
-        pageIndex: pageIndex,
-        cacheKey: key,
-        targetWidth: _policyPreviewWidth,
-        jpegQuality: _policyPreviewQuality,
-        stillNeeded: () =>
-            mounted &&
-            identical(widget.pdfDocument, doc) &&
-            widget.pageIndex == pageIndex,
-      ).then((_) {
-        if (!mounted) return;
-        if (!identical(widget.pdfDocument, doc) ||
-            widget.pageIndex != pageIndex) {
-          return;
+    _cheapTileInFlight = true;
+    final sw = Stopwatch()..start();
+    Logger('PDFTIMING').info(
+      'PDFTIMING tile.start page=$pageIndex native=${_nativeEligible()}',
+    );
+    unawaited(() async {
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        if (!mounted || widget.pageIndex != pageIndex) return;
+        if (_thumbFile != null || _thumbMemory != null) return;
+        if (widget.pdfFile?.path != path) return;
+        // 1. Native fast path.
+        try {
+          while (_activeNativeTiles >= 2) {
+            await Future<void>.delayed(const Duration(milliseconds: 60));
+            if (!mounted || widget.pageIndex != pageIndex) return;
+          }
+          _activeNativeTiles++;
+          Uint8List? bytes;
+          try {
+            bytes = await PdfNativeTexture.renderThumbnailBytes(
+              filePath: path,
+              pageIndex: pageIndex,
+              widthPx: _policyPreviewWidth,
+              quality: _policyPreviewQuality,
+              vaultUnlocked: VaultAdapter.isUnlocked,
+            );
+          } finally {
+            _activeNativeTiles--;
+          }
+          Logger('PDFTIMING').info(
+            'PDFTIMING tile.native page=$pageIndex '
+            'bytes=${bytes?.length ?? -1} ms=${sw.elapsedMilliseconds}',
+          );
+          if (bytes != null && bytes.isNotEmpty) {
+            await PdfPageThumbnailCache.putBytes(key, bytes);
+            if (!mounted || widget.pageIndex != pageIndex) return;
+            if (widget.pdfFile?.path != path) return;
+            final mem = PdfPageThumbnailCache.tryGetMemory(key);
+            if (mem != null && mem.isNotEmpty) {
+              Logger('PDFTIMING').info(
+                'PDFTIMING tile.painted page=$pageIndex src=native '
+                'ms=${sw.elapsedMilliseconds}',
+              );
+              setState(() => _thumbMemory = mem);
+              return;
+            }
+            final f = PdfPageThumbnailCache.tryGetDiskFileSync(key);
+            if (f != null && mounted) {
+              Logger('PDFTIMING').info(
+                'PDFTIMING tile.painted page=$pageIndex src=nativeDisk '
+                'ms=${sw.elapsedMilliseconds}',
+              );
+              setState(() => _thumbFile = f);
+            }
+            return;
+          }
+        } catch (_) {
+          // Fall through to the pdfrx path.
         }
+        if (!mounted || widget.pageIndex != pageIndex) return;
+        // 2. pdfrx path (shared worker + cache dedupe).
+        final doc = widget.pdfDocument;
+        if (doc == null) return;
+        Logger('PDFTIMING').info(
+          'PDFTIMING tile.pdfrx page=$pageIndex ms=${sw.elapsedMilliseconds}',
+        );
+        try {
+          await PdfPageThumbnailCache.getOrRender(
+            doc: doc,
+            pageIndex: pageIndex,
+            cacheKey: key,
+            targetWidth: _policyPreviewWidth,
+            jpegQuality: _policyPreviewQuality,
+            stillNeeded: () =>
+                mounted &&
+                identical(widget.pdfDocument, doc) &&
+                widget.pageIndex == pageIndex,
+          );
+        } catch (_) {}
+        if (!mounted || widget.pageIndex != pageIndex) return;
         final mem = PdfPageThumbnailCache.tryGetMemory(key);
+        Logger('PDFTIMING').info(
+          'PDFTIMING tile.pdfrxDone page=$pageIndex mem=${mem != null} '
+          'ms=${sw.elapsedMilliseconds}',
+        );
         if (mem != null && mem.isNotEmpty) {
           setState(() => _thumbMemory = mem);
           return;
         }
         final f = PdfPageThumbnailCache.tryGetDiskFileSync(key);
         if (f != null) setState(() => _thumbFile = f);
-      }).catchError((Object _) {}),
-    );
+      } finally {
+        _cheapTileInFlight = false;
+      }
+    }());
   }
 
   void _ensureOwnTile() {
@@ -840,19 +1085,66 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
         pageIndex: widget.pageIndex,
         targetWidth: _policyPreviewWidth,
       );
-      if (key == null) return;
-      _thumbCacheKey = key;
-      final mem = PdfPageThumbnailCache.tryGetMemory(key);
-      if (mem != null && mem.isNotEmpty) {
-        _thumbMemory = mem;
-        Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe MEM-HIT page=${widget.pageIndex}');
-        return;
+      if (key != null) {
+        _thumbCacheKey = key;
+        final mem = PdfPageThumbnailCache.tryGetMemory(key);
+        if (mem != null && mem.isEmpty == false) {
+          _thumbMemory = mem;
+          Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe MEM-HIT page=${widget.pageIndex}');
+          return;
+        }
+        _thumbFile = PdfPageThumbnailCache.tryGetDiskFileSync(key);
+        if (_thumbFile != null) {
+          Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe DISK-HIT page=${widget.pageIndex}');
+          return;
+        }
       }
-      _thumbFile = PdfPageThumbnailCache.tryGetDiskFileSync(key);
-      Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe ${_thumbFile != null ? "DISK-HIT" : "MISS"} page=${widget.pageIndex}');
+      // Cold MISS (or keyless): reuse the home card snapshot from the same
+      // process memory (zero IO) so page 0 never opens blank — the
+      // Samsung-style snapshot-then-live. Only page 0: the note snapshot
+      // depicts the note's first page, so showing it elsewhere would flash
+      // wrong content. Transient (<1 frame of truth away): the live render
+      // replaces it imminently via the normal commit path.
+      Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe MISS page=${widget.pageIndex}');
+      if (widget.pageIndex == 0 && !widget.isThumbnail) {
+        final snap = _homeSnapshotForAsset(path);
+        if (snap != null && snap.isNotEmpty) {
+          _thumbMemory = snap;
+          Logger('PDFTIMING').info('PDFTIMING renderer.tileProbe SNAPSHOT-HIT page=0');
+        }
+      }
     } catch (_) {
       _thumbFile = null;
       _thumbMemory = null;
+    }
+  }
+
+  /// Home card snapshot bytes for a note PDF asset path (`X.sbn2.<n>`),
+  /// or null. Synchronous memory read, zero IO; null when the card was
+  /// never rendered this session, the note isn't a plain `.sbn2.<n>`
+  /// asset, or anything fails. Vault-safe: these are the exact bytes the
+  /// home grid already displays.
+  ///
+  /// Both key forms are tried: home cards address the cache by the
+  /// extensionless note path (`X` -> key `X.sbn2.p`), while the note body
+  /// form (`X.sbn2`) keys to itself.
+  Uint8List? _homeSnapshotForAsset(String assetPath) {
+    try {
+      final m = RegExp(r'\.sbn2\.\d+$').firstMatch(assetPath);
+      if (m == null) {
+        Logger('PDFTIMING').info('PDFTIMING snapshot SKIP non-asset');
+        return null;
+      }
+      final base = assetPath.substring(0, m.start);
+      final snap = ThumbnailCache.instance.get(base);
+      if (snap != null && snap.isNotEmpty) return snap;
+      final snap2 = ThumbnailCache.instance.get('$base.sbn2');
+      Logger('PDFTIMING').info(
+        'PDFTIMING snapshot MISS base=${base.split('/').last} mem1=${snap?.length ?? -1} mem2=${snap2?.length ?? -1}',
+      );
+      return snap2;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -877,8 +1169,14 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
   /// Skips work when the surface key is unchanged. Disposes the previous
   /// big surface synchronously inside setState so two big surfaces are
   /// never resident at once.
+  bool _partialRasterDeferred = false;
+
   void _retile() {
     if (!mounted || widget.isThumbnail) return;
+    // A fling must glide the GPU frame already on screen. Opening a new
+    // PdfRenderer bitmap for every page that crosses the viewport is the
+    // scroll stall.
+    if (PageRasterCacheManager.viewportMoving) return;
     // Native-eligible pages retile without pdfrx readiness (the OS renderer
     // never waits on pdfPage.isLoaded); pdfrx surfaces still need the page.
     final nativeOk = _nativeEligible();
@@ -930,11 +1228,33 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     final tiling = zoomWantsTile && (useNative || _pageIsLoaded());
 
     if (region.fullyOffscreen) {
+      // Never release the big surface for a page with nothing else to show:
+      // a released page with no tile is a guaranteed white flash the moment
+      // it scrolls back in. Tile-less pages keep the surface (zone-bounded).
+      final hasTile = _thumbFile != null || _thumbMemory != null;
+      if (!hasTile) return;
       if (_mode == _PdfSurfaceMode.released && _surfaceKey == null) return;
       _clearTilePending();
       setState(() {
         _mode = _PdfSurfaceMode.released;
         _surfaceKey = null;
+      });
+      return;
+    }
+
+    // The page that owns the screen rasters first. A sliver of the next
+    // page waits one beat so two full bitmaps are not decoded in the same
+    // instant — but only one beat: every extra millisecond here is blank
+    // time for a page the user already scrolled to. Native pages skip the
+    // beat entirely (their render runs on the native executor; it does not
+    // contend with the pdfrx decode this staggers against).
+    if (_mode == _PdfSurfaceMode.released &&
+        region.fraction < 0.55 &&
+        !_partialRasterDeferred &&
+        !nativeOk) {
+      _partialRasterDeferred = true;
+      Future<void>.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) _retile();
       });
       return;
     }
@@ -956,9 +1276,18 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     // multiples, density an integer multiple of the base density, bitmap
     // exact. Same key (clip+size at coarse granularity) across pan frames
     // would thrash; quantize the request to 8pt so small pans reuse the
-    // mounted tile and only settle retiles re-render.
-    final q = _quantizeRect(region.clip, 8.0);
-    final need = _visiblePhysicalSize(box, screen, dpr);
+    // mounted tile and only settle retiles re-render. Overdraw margin first:
+    // render past the visible edge so small pans keep gliding over sharp
+    // pixels instead of exposing the soft base at the screen rim.
+    final q = _quantizeRect(
+      PdfTileMath.withTileMargin(region.clip, displaySize),
+      8.0,
+    );
+    // Scale the physical need by the margined/visible ratio so the density
+    // target tracks the inflated clip (uniform sharpness, rim included).
+    final visW = region.clip.width > 0 ? region.clip.width : q.width;
+    final needScale = (q.width / visW).clamp(1.0, 3.0);
+    final need = _visiblePhysicalSize(box, screen, dpr) * needScale;
     final basePxNow =
         PdfTileMath.baseBitmap(boxSize: box.size, devicePixelRatio: dpr);
     final baseDensity = displaySize.width > 0
@@ -978,7 +1307,17 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
       cap: _policyTileEdge,
     );
     if (plan.clip.isEmpty) return;
-    final bmp = (width: plan.width, height: plan.height);
+    // Box-true bitmap aspect (see PdfTileMath.fitBitmapToBox): the painted
+    // box maps page-pt through the box aspect, so locking the bitmap to the
+    // clip aspect would stretch the tile against the base on every quality
+    // swap. Render at the painted aspect: fill becomes a uniform scale.
+    final bmp = PdfTileMath.fitBitmapToBox(
+      clipPt: plan.clip,
+      width: plan.width,
+      boxSize: box.size,
+      pageSizePt: displaySize,
+      cap: _policyTileEdge,
+    );
     if (PageRasterCacheManager.viewportMoving) return;
     final key =
         '${useNative ? 'n' : 'p'}:'
@@ -1234,10 +1573,23 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
           fallback: _thumbOrPlaceholder(),
           onFirstFrame: () {
             if (!mounted) return;
-            if (!_firstNativeFramePainted) {
-              setState(() => _firstNativeFramePainted = true);
-            }
             _doKick();
+            // The 512px frame is already on the GPU. The full-size upgrade
+            // is a second bitmap; wait until the open frame has landed.
+            Future<void>.delayed(const Duration(milliseconds: 900), () {
+              if (!mounted || _firstNativeFramePainted) return;
+              if (PageRasterCacheManager.viewportMoving) {
+                Future<void>.delayed(
+                  const Duration(milliseconds: 400),
+                  () {
+                    if (!mounted || _firstNativeFramePainted) return;
+                    setState(() => _firstNativeFramePainted = true);
+                  },
+                );
+                return;
+              }
+              setState(() => _firstNativeFramePainted = true);
+            });
           },
           onFallback: () {
             if (mounted && !_nativeFailed) {
@@ -1588,13 +1940,18 @@ class _PdfTiledRawViewState extends State<_PdfTiledRawView> {
     // flash between two correct frames.
     return Positioned.fromRect(
       rect: pos,
-      // Bitmap aspect matches the clip aspect: fill is exact, no distortion.
-      child: InvertWidget(
-        invert: widget.invert,
-        child: RawImage(
-          image: img,
-          fit: BoxFit.fill,
-          filterQuality: FilterQuality.medium,
+      // Bitmap aspect matches the painted box aspect (see fitBitmapToBox):
+      // fill is a uniform scale, no distortion against the base. The settled
+      // tile deblurs over the base instead of popping.
+      child: TileSharpenFade(
+        commitKey: '${committed}_${img.width}x${img.height}',
+        child: InvertWidget(
+          invert: widget.invert,
+          child: RawImage(
+            image: img,
+            fit: BoxFit.fill,
+            filterQuality: FilterQuality.medium,
+          ),
         ),
       ),
     );

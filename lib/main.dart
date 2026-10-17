@@ -94,7 +94,11 @@ Future<void> appRunner(List<String> args) async {
   final parser = ArgParser()..addFlag('verbose', abbr: 'v', negatable: false);
   final parsedArgs = parser.parse(args);
 
-  Logger.root.level = (kDebugMode || parsedArgs.flag('verbose'))
+  // `--dart-define=saberDebugLogs=true` keeps release-mode performance but
+  // emits INFO logs (PDFTIMING etc.) for on-device diagnostics.
+  const bool debugLogs = bool.fromEnvironment('saberDebugLogs');
+  Logger.root.level =
+      (kDebugMode || parsedArgs.flag('verbose') || debugLogs)
       ? Level.INFO
       : Level.WARNING;
   Logger.root.onRecord.listen((record) {
@@ -255,13 +259,9 @@ class App extends StatefulWidget {
                   pdfPath: pdfPath,
                   initialPageIndexOverride: initialPageIndexOverride,
                 );
-          return CustomTransitionPage(
+          return NoTransitionPage(
             key: state.pageKey,
             child: child,
-            transitionsBuilder:
-                (context, animation, secondaryAnimation, child) =>
-                    FadeTransition(opacity: animation, child: child),
-            transitionDuration: const Duration(milliseconds: 120),
           );
         },
       ),

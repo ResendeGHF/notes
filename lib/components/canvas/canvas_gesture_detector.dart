@@ -524,8 +524,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
         }
         // Prebuild one page beyond each viewport edge so the entering page
         // widget (and its first paint) exists before its pixels scroll in.
-        final liveStart = (firstClamped - 1).clamp(0, widget.pages.length - 1);
-        final liveEnd = (lastClamped + 1).clamp(0, widget.pages.length - 1);
+        final liveStart = firstClamped;
+        final liveEnd = lastClamped;
         if (hydratedSync ||
             _liveRangeStart != liveStart ||
             _liveRangeEnd != liveEnd) {
@@ -921,19 +921,27 @@ class _PagesBuilder extends StatefulWidget {
 
 class _PagesBuilderState extends State<_PagesBuilder> {
   static const double _renderCacheExtent = 500;
-  // Same prebuild margin as stroke notes: the viewport driving the render
-  // zone is bucket-throttled, so a smaller PDF margin routinely left the
-  // entering page unbuilt (dark flash). Building the widget early is cheap;
-  // bitmap budgets are still owned by the raster band logic.
-  static const double _pdfRenderCacheExtent = 500;
-  static const int _minHydrateRadius = 2;
-  static const int _maxShellsPerIdleFrame = 3;
+  // PDF notes prebuild ~one page ahead. Two mechanical reasons this must
+  // exceed one page:
+  // 1. [boundingBox] is bucket-floored (360px leaves) and rebuilt at most
+  //    every 180ms during motion, so the live viewport can run up to
+  //    ~360px + sprint past the render zone before a rebuild catches up —
+  //    a page entering that gap has NO widget at all (bare canvas = the
+  //    white band while panning).
+  // 2. The entering page's load chain (tile probe/fill, native texture
+  //    open) starts at widget mount; without look-ahead, that chain starts
+  //    when the page is already visible, i.e. seconds of blank.
+  // Widgets are cheap to build; big surfaces are still owned by the retile
+  // logic inside the PDF page renderer.
+  static const double _pdfRenderCacheExtent = 1000;
+  static const int _minHydrateRadius = 1;
+  static const int _maxShellsPerIdleFrame = 1;
   // Parse-ahead horizon for the aggressive warmer: scrolls land inside it.
-  static const int _warmHydrateRadius = 6;
+  static const int _warmHydrateRadius = 2;
   // Far-horizon pacing: one slice per tick, no vsync storm while waiting.
   // Fast enough that a freshly opened note converges in about a second;
   // each tick still yields, so opening stays interactive.
-  static const int _trickleIntervalMs = 150;
+  static const int _trickleIntervalMs = 500;
 
   final List<double> _pageOffsets = [];
   final List<double> _pageHeights = [];
@@ -1026,6 +1034,13 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   /// paint work; [RepaintBoundary] still contains ink invalidations per page.
   Widget _pageChild(BuildContext context, int pageIndex) {
     final page = widget.pages[pageIndex];
+    // Never blank a mounted PDF page on zoom/scroll/pan: the GPU texture
+    // glides with the page at zero CPU cost, and [_PdfPageRendererState]
+    // gates NEW renders on [viewportMoving] internally — so keeping the
+    // widget mounted never opens a bitmap per page during a fling. Swapping
+    // to the placeholder here is exactly the "pages turn white while
+    // moving" flash: the placeholder is a bare colored rect with no PDF
+    // content. Only lazy BSON shells (no content parsed yet) use it.
     final child = page.isLazyShell
         ? widget.placeholderPageBuilder(context, pageIndex)
         : widget.pageBuilder(context, pageIndex);
@@ -1036,6 +1051,18 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     if (widget.pages.isEmpty) return;
     _lastVisibleStart = startIndex.clamp(0, widget.pages.length - 1);
     _lastVisibleEnd = endIndex.clamp(0, widget.pages.length - 1);
+    final deferUntil = PageRasterCacheManager.deferBakesUntil;
+    if (deferUntil != null && DateTime.now().isBefore(deferUntil)) {
+      final wait = deferUntil.difference(DateTime.now()) +
+          const Duration(milliseconds: 40);
+      _trickleTimer?.cancel();
+      _trickleTimer = Timer(wait, () {
+        _trickleTimer = null;
+        if (!mounted) return;
+        _scheduleIdlePageWork(_lastVisibleStart, _lastVisibleEnd);
+      });
+      return;
+    }
     _kickTrickle();
     if (_warming || _idleWorkScheduled) return;
     _warming = true;
@@ -1084,32 +1111,29 @@ class _PagesBuilderState extends State<_PagesBuilder> {
         .round()
         .clamp(0, pageCount - 1);
     var hydrated = 0;
+    final horizon = _warmHydrateRadius + 1;
+    final lo = (center - horizon).clamp(0, pageCount - 1);
+    final hi = (center + horizon).clamp(0, pageCount - 1);
     if (widget.tryHydratePage != null) {
-      // Nearest shells anywhere in the note (beyond the aggressive band),
-      // up to two per tick so a fresh open converges quickly. Dense slices
-      // hydrate chunked-async with UI yields, so this stays interactive.
-      for (var n = 0; n < 2; n++) {
-        var nearest = -1;
-        var bestDist = pageCount + 1;
-        for (var i = 0; i < pageCount; i++) {
-          if (!widget.pages[i].isLazyShell) continue;
-          final dist = (i - center).abs();
-          if (dist < bestDist) {
-            bestDist = dist;
-            nearest = i;
-          }
-        }
-        if (nearest < 0) break;
-        if (widget.tryHydratePage!(nearest)) {
-          hydrated++;
-        } else {
-          break;
+      // Nearest shells just outside the warm band. Scanning the whole note
+      // and parsing it in the background is what kept the UI busy after open.
+      var nearest = -1;
+      var bestDist = horizon + 1;
+      for (var i = lo; i <= hi; i++) {
+        if (!widget.pages[i].isLazyShell) continue;
+        final dist = (i - center).abs();
+        if (dist < bestDist) {
+          bestDist = dist;
+          nearest = i;
         }
       }
+      if (nearest >= 0 && widget.tryHydratePage!(nearest)) {
+        hydrated++;
+      }
     }
-    // Whole-note tile trickle; the editor orders outward from the viewport.
-    final prewarmed =
-        widget.onPrefetchNearbyPages?.call(0, pageCount - 1) ?? 0;
+    // Only the near horizon. A whole-note sweep records tiles for every
+    // hydrated page and keeps the UI busy after open.
+    final prewarmed = widget.onPrefetchNearbyPages?.call(lo, hi) ?? 0;
     if (hydrated > 0 && mounted) setState(() {});
     if (hydrated > 0 || prewarmed > 0) {
       _kickTrickle();

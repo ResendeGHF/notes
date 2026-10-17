@@ -217,6 +217,9 @@ class PencilShader {
     double currentScale = 1.0,
     int visibleCount = 1,
     double? strokeSize,
+    // Interior staged chunks skip the contact shadow: a butt joint would
+    // otherwise cast a hairline across the stroke interior.
+    bool includeShadow = true,
   }) {
     final double quality = currentScale < 0.82 ? 0.0 : 1.0;
 
@@ -240,7 +243,7 @@ class PencilShader {
       visibleCount: visibleCount,
       quality: quality,
       lodTier: lodTierForScale(currentScale),
-      enabled: cfg.pencilShadow,
+      enabled: includeShadow && cfg.pencilShadow,
     );
 
     if (mesh != null) {

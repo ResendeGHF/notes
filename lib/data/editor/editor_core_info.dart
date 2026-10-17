@@ -23,12 +23,14 @@ import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/note_tool_settings.dart';
 import 'package:saber/data/editor/page.dart';
+import 'package:saber/data/editor/note_page_index.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/pages/editor/editor.dart';
+import 'package:saber/services/note_open_store.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:saber/services/vault_blob_crypto.dart';
 import 'package:saber/services/vault_worker.dart';
@@ -119,11 +121,465 @@ class _LazyPageLoadState {
     required this.fileVersion,
   });
 
-  final Uint8List buffer;
+  /// Full decompressed body when it lives in the Dart heap. Empty when page
+  /// bytes stay in the native session and are fetched per range.
+  Uint8List buffer;
   final List<int> pageByteOffsets;
   final int fileVersion;
   final Set<int> unhydratedIndices = {};
+  final Map<int, Uint8List> sliceCache = {};
+  Future<Uint8List> Function(int start, int end)? readRange;
+  int? fullLength;
+
+  bool get bufferCoversAll {
+    final expected = fullLength;
+    if (expected == null) return buffer.isNotEmpty;
+    return buffer.length == expected;
+  }
+
+  Uint8List? residentSlice(int index) {
+    final cached = sliceCache[index];
+    if (cached != null) return cached;
+    if (index < 0 || index + 1 >= pageByteOffsets.length) return null;
+    final start = pageByteOffsets[index];
+    final end = pageByteOffsets[index + 1];
+    if (!bufferCoversAll) return null;
+    if (start < 0 || end < start || end > buffer.length) return null;
+    return Uint8List.sublistView(buffer, start, end);
+  }
+
+  Future<Uint8List> sliceAsync(int index) async {
+    final resident = residentSlice(index);
+    if (resident != null) return resident;
+    final read = readRange;
+    if (read == null) {
+      throw StateError('Page $index bytes are not resident');
+    }
+    final start = pageByteOffsets[index];
+    final end = pageByteOffsets[index + 1];
+    final bytes = await read(start, end);
+    sliceCache[index] = bytes;
+    return bytes;
+  }
+
+  Future<void> ensureUnhydratedResident() async {
+    if (bufferCoversAll || readRange == null) return;
+    for (final index in unhydratedIndices.toList()) {
+      await sliceAsync(index);
+    }
+  }
 }
+
+class _SbnHeader {
+  _SbnHeader({
+
+    required this.fileVersion,
+    required this.readOnly,
+    required this.readOnlyBecauseOfVersion,
+    required this.nextImageId,
+    required this.backgroundColor,
+    required this.pattern,
+    required this.lineHeight,
+    required this.lineThickness,
+    required this.initialPageIndex,
+    required this.firstPageHash,
+    required this.pdfOutlines,
+    required this.tags,
+    required this.links,
+    required this.replaceDefaultLoaded,
+    required this.isInfiniteLoaded,
+    required this.showPdfLinkBoxesLoaded,
+    required this.infiniteThumbnailModeLoaded,
+    required this.creationDateLoaded,
+    required this.lastModificationLoaded,
+    required this.lastAccessLoaded,
+    required this.totalTimeSpentEditingLoaded,
+    required this.totalTimeSpentLoaded,
+    required this.locationLoaded,
+    required this.noteIdLoaded,
+    required this.noteDefaultPatternLoaded,
+    required this.noteDefaultPageColorLoaded,
+    required this.noteDefaultLineColorLoaded,
+    required this.noteDefaultLineHeightLoaded,
+    required this.noteDefaultLineThicknessLoaded,
+    required this.noteDefaultMarginLeftLoaded,
+    required this.noteDefaultMarginRightLoaded,
+    required this.noteDefaultMarginTopLoaded,
+    required this.noteDefaultMarginBottomLoaded,
+    required this.noteDefaultBorderColorLoaded,
+    required this.notePageOrientationLoaded,
+    required this.noteToolSettingsLoaded,
+    required this.floatingCalculatorMetadataLoaded,
+  });
+
+  final int fileVersion;
+  final bool readOnly;
+  final bool readOnlyBecauseOfVersion;
+  final int nextImageId;
+  final Color? backgroundColor;
+  final String pattern;
+  final int lineHeight;
+  final int lineThickness;
+  final int initialPageIndex;
+  final String? firstPageHash;
+  final List<PdfOutlineItem>? pdfOutlines;
+  final List<String> tags;
+  final List<NoteLink> links;
+  final bool replaceDefaultLoaded;
+  final bool isInfiniteLoaded;
+  final bool showPdfLinkBoxesLoaded;
+  final String infiniteThumbnailModeLoaded;
+  final int creationDateLoaded;
+  final int lastModificationLoaded;
+  final int lastAccessLoaded;
+  final int totalTimeSpentEditingLoaded;
+  final int totalTimeSpentLoaded;
+  final String? locationLoaded;
+  final String? noteIdLoaded;
+  final CanvasBackgroundPattern? noteDefaultPatternLoaded;
+  final int? noteDefaultPageColorLoaded;
+  final int? noteDefaultLineColorLoaded;
+  final int? noteDefaultLineHeightLoaded;
+  final double? noteDefaultLineThicknessLoaded;
+  final double? noteDefaultMarginLeftLoaded;
+  final double? noteDefaultMarginRightLoaded;
+  final double? noteDefaultMarginTopLoaded;
+  final double? noteDefaultMarginBottomLoaded;
+  final int? noteDefaultBorderColorLoaded;
+  final PageOrientation notePageOrientationLoaded;
+  final NoteToolSettings? noteToolSettingsLoaded;
+  final String? floatingCalculatorMetadataLoaded;
+
+  /// Parses the note header and leaves [reader] on the pages key.
+  static _SbnHeader read(BinaryReader reader, bool readOnly) {
+    reader.readIntNoKey();
+    int key;
+    final int fileVersion;
+    key = reader.readKey();
+    if (key == SBNBinaryKeys.version) {
+      fileVersion = reader.readIntNoKey();
+    } else {
+      fileVersion = 0;
+    }
+    final readOnlyBecauseOfVersion = fileVersion > EditorCoreInfo.sbnVersion;
+    readOnly = readOnly || readOnlyBecauseOfVersion;
+
+    final int nextImageId;
+    final Color? backgroundColor;
+    final String pattern;
+    final int lineHeight;
+    final int lineThickness;
+    final int initialPageIndex;
+
+    key = reader.readKey();
+    if (key != SBNBinaryKeys.nextImageId) {
+      throw Exception('Editor.fromBinary: nextImageId not set');
+    }
+    nextImageId = reader.readIntNoKey();
+
+    key = reader.readKey();
+    if (key == SBNBinaryKeys.backgroundColor) {
+      backgroundColor = reader.readColor();
+      key = reader.readKey();
+    } else {
+      backgroundColor = null;
+    }
+
+    if (key != SBNBinaryKeys.backgroundPattern) {
+      throw Exception('Editor.fromBinary: backgroundPattern not set');
+    }
+
+    pattern = reader.readStringNoKey();
+
+    key = reader.readKey();
+    if (key != SBNBinaryKeys.lineHeight) {
+      throw Exception('Editor.fromBinary: lineHeight not set');
+    }
+    lineHeight = reader.readIntNoKey();
+
+    key = reader.readKey();
+    if (key != SBNBinaryKeys.lineThickness) {
+      throw Exception('Editor.fromBinary: lineThickness not set');
+    }
+    lineThickness = reader.readIntNoKey();
+
+    key = reader.readKey();
+    if (key != SBNBinaryKeys.initialPageIndex) {
+      throw Exception('Editor.fromBinary: initialPageIndex not set');
+    }
+    initialPageIndex = reader.readIntNoKey();
+
+    key = reader.readKey();
+    if (key != SBNBinaryKeys.pageCount) {
+      throw Exception('Editor.fromBinary: pageCount not set');
+    }
+    reader.readIntNoKey();
+
+    String? firstPageHash;
+    if (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+      if (nextKey == SBNBinaryKeys.firstPageHash) {
+        reader.readKey();
+        firstPageHash = reader.readStringNoKey();
+      }
+    }
+
+    List<PdfOutlineItem>? pdfOutlines;
+    if (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+      if (nextKey == SBNBinaryKeys.pdfOutlines) {
+        reader.readKey();
+        final first = reader.readIntNoKey();
+        final int count;
+        final int outlineFormatVersion;
+        if (first == EditorCoreInfo._outlineBinaryMagic) {
+          outlineFormatVersion = reader.readIntNoKey();
+          count = reader.readIntNoKey();
+        } else {
+          outlineFormatVersion = 1;
+          count = first;
+        }
+        pdfOutlines = [];
+        for (int i = 0; i < count; i++) {
+          pdfOutlines.add(
+            EditorCoreInfo._readOutlineStatic(reader, formatVersion: outlineFormatVersion),
+          );
+        }
+      }
+    }
+
+    List<String> tags = const [];
+    if (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+      if (nextKey == SBNBinaryKeys.noteTags) {
+        reader.readKey();
+        final count = reader.readIntNoKey();
+        final loaded = <String>[];
+        for (int i = 0; i < count; i++) {
+          final tag = reader.readStringNoKey().trim();
+          if (tag.isNotEmpty) loaded.add(tag);
+        }
+        tags = loaded.toSet().toList();
+      }
+    }
+
+    List<NoteLink> links = const [];
+    if (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+      if (nextKey == SBNBinaryKeys.noteLinks) {
+        reader.readKey();
+        final linkFormatVersion = reader.readIntNoKey();
+        final count = reader.readIntNoKey();
+        final loaded = <NoteLink>[];
+        for (int i = 0; i < count; i++) {
+          final int? sourcePageId;
+          final int sourcePageIndex;
+          if (linkFormatVersion >= 2) {
+            final sid = reader.readIntNoKey();
+            sourcePageId = sid >= 0 ? sid : null;
+            sourcePageIndex = reader.readIntNoKey();
+          } else {
+            sourcePageId = null;
+            sourcePageIndex = reader.readIntNoKey();
+          }
+          final targetPath = reader.readStringNoKey().trim();
+          final targetPageIndex = reader.readIntNoKey();
+          int? targetPageIndexEnd;
+          if (linkFormatVersion >= 3) {
+            final hasRange = reader.readBoolNoKey();
+            if (hasRange) {
+              final tie = reader.readIntNoKey();
+              if (tie >= 0 && tie != targetPageIndex) targetPageIndexEnd = tie;
+            }
+          }
+          final hasLabel = reader.readBoolNoKey();
+          final label = hasLabel ? reader.readStringNoKey() : null;
+
+          int? targetPageId;
+          int? targetPageIdEnd;
+          if (linkFormatVersion >= 4) {
+            final tpid = reader.readIntNoKey();
+            targetPageId = tpid >= 0 ? tpid : null;
+            final hasTpie = reader.readBoolNoKey();
+            if (hasTpie) {
+              final tpide = reader.readIntNoKey();
+              if (tpide >= 0) targetPageIdEnd = tpide;
+            }
+          }
+
+          loaded.add(
+            NoteLink(
+              sourcePageId: sourcePageId,
+              sourcePageIndex: sourcePageIndex,
+              targetPath: targetPath,
+              targetPageIndex: targetPageIndex,
+              targetPageIndexEnd:
+                  targetPageIndexEnd != null &&
+                      targetPageIndexEnd >= 0 &&
+                      targetPageIndexEnd != targetPageIndex
+                  ? targetPageIndexEnd
+                  : null,
+              label: label,
+              targetPageId: targetPageId,
+              targetPageIdEnd: targetPageIdEnd,
+            ),
+          );
+        }
+        links = loaded;
+      }
+    }
+
+    bool replaceDefaultLoaded = false;
+    bool isInfiniteLoaded = false;
+    bool showPdfLinkBoxesLoaded = true;
+    String infiniteThumbnailModeLoaded = 'jdenticon';
+    int creationDateLoaded = 0;
+    int lastModificationLoaded = 0;
+    int lastAccessLoaded = 0;
+    int totalTimeSpentEditingLoaded = 0;
+    int totalTimeSpentLoaded = 0;
+    String? locationLoaded;
+    String? noteIdLoaded;
+    CanvasBackgroundPattern? noteDefaultPatternLoaded;
+    int? noteDefaultPageColorLoaded;
+    int? noteDefaultLineColorLoaded;
+    int? noteDefaultLineHeightLoaded;
+    double? noteDefaultLineThicknessLoaded;
+    double? noteDefaultMarginLeftLoaded;
+    double? noteDefaultMarginRightLoaded;
+    double? noteDefaultMarginTopLoaded;
+    double? noteDefaultMarginBottomLoaded;
+    int? noteDefaultBorderColorLoaded;
+    PageOrientation notePageOrientationLoaded = PageOrientation.portrait;
+    NoteToolSettings? noteToolSettingsLoaded;
+    String? floatingCalculatorMetadataLoaded;
+
+    while (!reader.isEOF) {
+      final nextKey = reader.peekKey();
+      if (nextKey == SBNBinaryKeys.pages) break;
+      reader.readKey();
+      if (nextKey == SBNBinaryKeys.replaceDefaultWithPageSettings) {
+        replaceDefaultLoaded = reader.readBoolNoKey();
+
+        final k13 = reader.readKey();
+        if (k13 == SBNBinaryKeys.noteDefaultPattern) {
+          final patternName = reader.readStringNoKey();
+          for (final p in CanvasBackgroundPattern.values) {
+            if (p.name == patternName) {
+              noteDefaultPatternLoaded = p;
+              break;
+            }
+          }
+          noteDefaultPatternLoaded ??= CanvasBackgroundPattern.none;
+        }
+        while (!reader.isEOF) {
+          final pk = reader.peekKey();
+          if (pk == SBNBinaryKeys.noteDefaultPageColor) {
+            reader.readKey();
+            noteDefaultPageColorLoaded = reader.readIntNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultLineColor) {
+            reader.readKey();
+            noteDefaultLineColorLoaded = reader.readIntNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultLineHeight) {
+            reader.readKey();
+            noteDefaultLineHeightLoaded = reader.readIntNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultLineThickness) {
+            reader.readKey();
+            noteDefaultLineThicknessLoaded = reader.readDoubleNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultMarginLeft) {
+            reader.readKey();
+            noteDefaultMarginLeftLoaded = reader.readDoubleNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultMarginRight) {
+            reader.readKey();
+            noteDefaultMarginRightLoaded = reader.readDoubleNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultMarginTop) {
+            reader.readKey();
+            noteDefaultMarginTopLoaded = reader.readDoubleNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultMarginBottom) {
+            reader.readKey();
+            noteDefaultMarginBottomLoaded = reader.readDoubleNoKey();
+          } else if (pk == SBNBinaryKeys.noteDefaultBorderColor) {
+            reader.readKey();
+            noteDefaultBorderColorLoaded = reader.readIntNoKey();
+          } else {
+            break;
+          }
+        }
+      } else if (nextKey == SBNBinaryKeys.notePageOrientation) {
+        notePageOrientationLoaded =
+            PageOrientation.values[reader.readIntNoKey()];
+      } else if (nextKey == SBNBinaryKeys.noteToolSettings) {
+        noteToolSettingsLoaded = NoteToolSettings.fromJsonString(
+          reader.readStringNoKey(),
+        );
+      } else if (nextKey == SBNBinaryKeys.floatingCalculatorMetadata) {
+        floatingCalculatorMetadataLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.isInfinite) {
+        isInfiniteLoaded = reader.readBoolNoKey();
+      } else if (nextKey == SBNBinaryKeys.infiniteThumbnailMode) {
+        infiniteThumbnailModeLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.creationDate) {
+        creationDateLoaded = reader.readDoubleNoKey().toInt();
+      } else if (nextKey == SBNBinaryKeys.lastModification) {
+        lastModificationLoaded = reader.readDoubleNoKey().toInt();
+      } else if (nextKey == SBNBinaryKeys.lastAccess) {
+        lastAccessLoaded = reader.readDoubleNoKey().toInt();
+      } else if (nextKey == SBNBinaryKeys.totalTimeSpentEditing) {
+        totalTimeSpentEditingLoaded = reader.readDoubleNoKey().toInt();
+      } else if (nextKey == SBNBinaryKeys.totalTimeSpent) {
+        totalTimeSpentLoaded = reader.readDoubleNoKey().toInt();
+      } else if (nextKey == SBNBinaryKeys.location) {
+        locationLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.noteId) {
+        noteIdLoaded = reader.readStringNoKey();
+      } else if (nextKey == SBNBinaryKeys.showPdfLinkBoxes) {
+        showPdfLinkBoxesLoaded = reader.readBoolNoKey();
+      }
+    }
+
+
+    return _SbnHeader(
+      fileVersion: fileVersion,
+      readOnly: readOnly,
+      readOnlyBecauseOfVersion: readOnlyBecauseOfVersion,
+      nextImageId: nextImageId,
+      backgroundColor: backgroundColor,
+      pattern: pattern,
+      lineHeight: lineHeight,
+      lineThickness: lineThickness,
+      initialPageIndex: initialPageIndex,
+      firstPageHash: firstPageHash,
+      pdfOutlines: pdfOutlines,
+      tags: tags,
+      links: links,
+      replaceDefaultLoaded: replaceDefaultLoaded,
+      isInfiniteLoaded: isInfiniteLoaded,
+      showPdfLinkBoxesLoaded: showPdfLinkBoxesLoaded,
+      infiniteThumbnailModeLoaded: infiniteThumbnailModeLoaded,
+      creationDateLoaded: creationDateLoaded,
+      lastModificationLoaded: lastModificationLoaded,
+      lastAccessLoaded: lastAccessLoaded,
+      totalTimeSpentEditingLoaded: totalTimeSpentEditingLoaded,
+      totalTimeSpentLoaded: totalTimeSpentLoaded,
+      locationLoaded: locationLoaded,
+      noteIdLoaded: noteIdLoaded,
+      noteDefaultPatternLoaded: noteDefaultPatternLoaded,
+      noteDefaultPageColorLoaded: noteDefaultPageColorLoaded,
+      noteDefaultLineColorLoaded: noteDefaultLineColorLoaded,
+      noteDefaultLineHeightLoaded: noteDefaultLineHeightLoaded,
+      noteDefaultLineThicknessLoaded: noteDefaultLineThicknessLoaded,
+      noteDefaultMarginLeftLoaded: noteDefaultMarginLeftLoaded,
+      noteDefaultMarginRightLoaded: noteDefaultMarginRightLoaded,
+      noteDefaultMarginTopLoaded: noteDefaultMarginTopLoaded,
+      noteDefaultMarginBottomLoaded: noteDefaultMarginBottomLoaded,
+      noteDefaultBorderColorLoaded: noteDefaultBorderColorLoaded,
+      notePageOrientationLoaded: notePageOrientationLoaded,
+      noteToolSettingsLoaded: noteToolSettingsLoaded,
+      floatingCalculatorMetadataLoaded: floatingCalculatorMetadataLoaded,
+    );
+  }
+}
+
 
 class EditorCoreInfo extends ChangeNotifier {
   static final log = Logger('EditorCoreInfo');
@@ -181,9 +637,42 @@ class EditorCoreInfo extends ChangeNotifier {
 
   _LazyPageLoadState? _lazyPages;
 
+  @visibleForTesting
+  List<int>? get debugLazyPageByteOffsets => _lazyPages?.pageByteOffsets;
+
+  /// Page bodies stay in the native session. [length] is the decompressed
+  /// note size; [read] copies only the requested range into Dart.
+  void attachLazyRangeReader({
+    required int length,
+    required Future<Uint8List> Function(int start, int end) read,
+    required Future<void> Function() close,
+  }) {
+    final lazy = _lazyPages;
+    if (lazy == null) {
+      unawaited(close());
+      return;
+    }
+    lazy.fullLength = length;
+    lazy.readRange = read;
+    _closeLazyRange = close;
+  }
+
+  Future<void> Function()? _closeLazyRange;
+
+  Future<void> releaseLazyRangeReader() async {
+    final close = _closeLazyRange;
+    _closeLazyRange = null;
+    if (close != null) await close();
+  }
+
+
   int? _pageBinaryCacheValidStructureKey;
   final List<Uint8List?> _pageBinaryEncodeCache = [];
   final List<int> _pageBinaryCacheRevision = [];
+
+  /// Pooled page writer reused across dirty pages per save (clear() after
+  /// toBytes, which copies). Same bytes, no per-page BytesBuilder churn.
+  final BinaryWriter _sharedPageWriter = BinaryWriter();
 
   /// Drops per-page binary reuse from incremental saves (e.g. after asset
   /// renumbering that may change embedded image ids/paths).
@@ -258,9 +747,8 @@ class EditorCoreInfo extends ChangeNotifier {
     final lazy = _lazyPages;
     if (lazy == null || !lazy.unhydratedIndices.contains(index)) return;
     if (index < 0 || index >= pages.length) return;
-    final start = lazy.pageByteOffsets[index];
-    final end = lazy.pageByteOffsets[index + 1];
-    final slice = Uint8List.sublistView(lazy.buffer, start, end);
+    final slice = lazy.residentSlice(index);
+    if (slice == null) return;
     final old = pages[index];
     old.dispose();
     pages[index] = EditorPage.fromBinary(
@@ -316,9 +804,7 @@ class EditorCoreInfo extends ChangeNotifier {
     if (index < 0 || index >= pages.length) return null;
     if (!_hydratingIndices.add(index)) return null;
     try {
-      final start = lazy.pageByteOffsets[index];
-      final end = lazy.pageByteOffsets[index + 1];
-      final slice = Uint8List.sublistView(lazy.buffer, start, end);
+      final slice = lazy.residentSlice(index) ?? await lazy.sliceAsync(index);
       final old = pages[index];
       if (!old.isLazyShell) return null;
       final page = await EditorPage.fromBinaryAsync(
@@ -354,6 +840,14 @@ class EditorCoreInfo extends ChangeNotifier {
     if (lazy == null || !lazy.unhydratedIndices.contains(index)) return false;
     if (index < 0 || index >= pages.length) return false;
     if (_hydratingIndices.contains(index)) return true;
+    if (lazy.residentSlice(index) == null) {
+      unawaited(
+        hydratePageChunked(index).then((page) {
+          if (page != null) onAsyncHydrated?.call(page);
+        }),
+      );
+      return true;
+    }
     final sliceBytes =
         lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
     if (sliceBytes <= _kChunkedHydrateByteThreshold) {
@@ -1074,7 +1568,33 @@ class EditorCoreInfo extends ChangeNotifier {
         } catch (_) {}
       }
 
-      final bsonBytes = await FileManager.readFile(noteBodyPath);
+      final tBody0 = DateTime.now();
+      // Disk notes with a sidecar: the inflated body stays in the Kotlin
+      // heap. Dart copies the header and the landing page only.
+      NoteBodySession? bodySession;
+      NotePageDirectory? sessionDirectory;
+      if (!vaultOpen && !onlyFirstPage) {
+        bodySession = await NoteOpenStore.open(noteBodyPath);
+        if (bodySession != null) {
+          sessionDirectory = NotePageIndex.tryLoadMatching(
+            noteBodyPath,
+            bodySession.sampleHash,
+            bodySession.length,
+          );
+          if (sessionDirectory == null || sessionDirectory.pageCount <= 2) {
+            await bodySession.close();
+            bodySession = null;
+            sessionDirectory = null;
+          }
+        }
+      }
+      Uint8List? bsonBytes;
+      if (bodySession == null) {
+        bsonBytes = await FileManager.readFile(noteBodyPath);
+      }
+      log.info(
+        'PDFTIMING coreInfo.readBody bytes=${bsonBytes?.length ?? 0} elapsed=${DateTime.now().difference(tBody0).inMilliseconds}ms',
+      );
 
       // After note body is cached, warm PDF in background (do not race body
       // AES). Asset capacity counting runs after parse off the critical path
@@ -1105,7 +1625,9 @@ class EditorCoreInfo extends ChangeNotifier {
       }
 
       final String? jsonString;
-      if (bsonBytes != null) {
+      if (bodySession != null) {
+        jsonString = null;
+      } else if (bsonBytes != null) {
         log.fine(
           '[EditorCoreInfo.loadFromFilePath] Found binary file: $noteBodyPath',
         );
@@ -1125,7 +1647,7 @@ class EditorCoreInfo extends ChangeNotifier {
         }
       }
 
-      if (bsonBytes == null && jsonString == null) {
+      if (bsonBytes == null && jsonString == null && bodySession == null) {
         if (stows.localEncryptionEnabled.value && VaultAdapter.isUnlocked) {
           final relPath = FileManager.toRelativePath(path + Editor.extension);
           try {
@@ -1150,15 +1672,83 @@ class EditorCoreInfo extends ChangeNotifier {
       }
 
       try {
-        final coreInfo = await loadFromFileContents(
+        final tParse0 = DateTime.now();
+        EditorCoreInfo? sessionCore;
+        if (bodySession != null && sessionDirectory != null) {
+          final session = bodySession;
+          final directory = sessionDirectory;
+          final headerEnd = directory.spans.first.start;
+          final headerBytes = headerEnd <= 0
+              ? Uint8List(0)
+              : await session.slice(0, headerEnd);
+          final preview = _SbnHeader.read(BinaryReader(headerBytes), readOnly);
+          final center = preview.initialPageIndex.clamp(
+            0,
+            math.max(0, directory.pageCount - 1),
+          ).toInt();
+          final span = directory.spans[center];
+          final pageBytes = await session.slice(span.start, span.end);
+          final coreInfo = await EditorCoreInfo.fromBinaryAsync(
+            buffer: headerBytes,
+            filePath: path,
+            readOnly: readOnly,
+            onlyFirstPage: false,
+            pageDirectory: directory,
+            trustPageDirectory: true,
+            eagerPageBytes: pageBytes,
+          );
+          coreInfo.attachLazyRangeReader(
+            length: session.length,
+            read: session.slice,
+            close: session.close,
+          );
+          bodySession = null;
+          log.info(
+            'PDFTIMING coreInfo.parseBody slices elapsed=${DateTime.now().difference(tParse0).inMilliseconds}ms',
+          );
+          sessionCore = coreInfo;
+        }
+        if (sessionCore != null) {
+          // Shared tail below warms tags and asset slots off the first frame.
+        } else {
+        NotePageDirectory? pageDirectory;
+        if (bsonBytes != null && _isCustomSbnBinaryHeader(bsonBytes)) {
+          if (!vaultOpen) {
+            pageDirectory = NotePageIndex.tryLoad(noteBodyPath, bsonBytes);
+          }
+          if (pageDirectory == null) {
+            try {
+              pageDirectory = await vaultWorkerRun(
+                EditorCoreInfo.scanNotePageDirectory,
+                bsonBytes,
+              );
+            } catch (e, st) {
+              log.fine('Background page index failed; scanning inline: $e', e, st);
+              pageDirectory = EditorCoreInfo.scanNotePageDirectory(bsonBytes);
+            }
+            final indexed = pageDirectory;
+            if (!vaultOpen && indexed != null && indexed.pageCount > 2) {
+              unawaited(NotePageIndex.store(noteBodyPath, indexed));
+            }
+          }
+        }
+
+        final loaded = await loadFromFileContents(
           jsonString: jsonString,
           bsonBytes: bsonBytes,
           path: path,
           readOnly: readOnly,
           onlyFirstPage: onlyFirstPage,
           preferEagerAllPages: hasPdfAsset0,
+          pageDirectory: pageDirectory,
         );
+        log.info(
+          'PDFTIMING coreInfo.parseBody elapsed=${DateTime.now().difference(tParse0).inMilliseconds}ms',
+        );
+        sessionCore = loaded;
+        }
 
+        final coreInfo = sessionCore!;
         coreInfo.ensureDocumentDefaultsFromGlobal();
 
         coreInfo.ensureNoteId();
@@ -1241,6 +1831,7 @@ class EditorCoreInfo extends ChangeNotifier {
           e,
           stack,
         );
+        await bodySession?.close();
         rethrow;
       }
     } finally {
@@ -1258,6 +1849,7 @@ class EditorCoreInfo extends ChangeNotifier {
     required bool readOnly,
     required bool onlyFirstPage,
     bool preferEagerAllPages = false,
+    NotePageDirectory? pageDirectory,
   }) async {
     EditorCoreInfo coreInfo;
     try {
@@ -1271,6 +1863,7 @@ class EditorCoreInfo extends ChangeNotifier {
         readOnly,
         onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
+        pageDirectory: pageDirectory,
       );
 
       final bool customBinary =
@@ -1359,6 +1952,7 @@ class EditorCoreInfo extends ChangeNotifier {
     bool preferEagerAllPages = false,
     int? lineHeightFallback,
     int? lineThicknessFallback,
+    NotePageDirectory? pageDirectory,
   }) async {
     final dynamic json;
     final bool isBinaryFile;
@@ -1415,8 +2009,42 @@ class EditorCoreInfo extends ChangeNotifier {
         readOnly: readOnly,
         onlyFirstPage: onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
+        pageDirectory: pageDirectory,
       );
     }
+  }
+
+
+  /// Walks page bodies without allocating strokes or Quill controllers.
+  /// Meant for a background isolate; the UI isolate then parses one page.
+  static NotePageDirectory scanNotePageDirectory(Uint8List buffer) {
+    final reader = BinaryReader(buffer);
+    _SbnHeader.read(reader, false);
+    if (reader.isEOF || reader.readKey() != SBNBinaryKeys.pages) {
+      throw const FormatException('Note body has no page table');
+    }
+    final count = reader.readIntNoKey();
+    if (count < 0) {
+      throw FormatException('Invalid page count $count');
+    }
+    final spans = <NotePageSpan>[];
+    for (var i = 0; i < count; i++) {
+      final start = reader.offset;
+      final measured = EditorPage.skipPagePayload(reader);
+      spans.add(
+        NotePageSpan(
+          start: start,
+          end: reader.offset,
+          width: measured.width,
+          height: measured.height,
+          id: measured.id,
+        ),
+      );
+    }
+    return NotePageDirectory(
+      sampleHash: NotePageIndex.sampleHash(buffer),
+      spans: spans,
+    );
   }
 
   static Future<EditorCoreInfo> fromBinaryAsync({
@@ -1425,321 +2053,85 @@ class EditorCoreInfo extends ChangeNotifier {
     required bool readOnly,
     required bool onlyFirstPage,
     bool preferEagerAllPages = false,
+    NotePageDirectory? pageDirectory,
+    bool trustPageDirectory = false,
+    Uint8List? eagerPageBytes,
   }) async {
     final reader = BinaryReader(buffer);
 
-    reader.readIntNoKey();
-    int key;
-    final int fileVersion;
-    key = reader.readKey();
-    if (key == SBNBinaryKeys.version) {
-      fileVersion = reader.readIntNoKey();
-    } else {
-      fileVersion = 0;
-    }
-    final readOnlyBecauseOfVersion = fileVersion > sbnVersion;
-    readOnly = readOnly || readOnlyBecauseOfVersion;
-
-    final int nextImageId;
-    final Color? backgroundColor;
-    final String pattern;
-    final int lineHeight;
-    final int lineThickness;
-    final int initialPageIndex;
-
-    key = reader.readKey();
-    if (key != SBNBinaryKeys.nextImageId) {
-      throw Exception('Editor.fromBinary: nextImageId not set');
-    }
-    nextImageId = reader.readIntNoKey();
-
-    key = reader.readKey();
-    if (key == SBNBinaryKeys.backgroundColor) {
-      backgroundColor = reader.readColor();
-      key = reader.readKey();
-    } else {
-      backgroundColor = null;
-    }
-
-    if (key != SBNBinaryKeys.backgroundPattern) {
-      throw Exception('Editor.fromBinary: backgroundPattern not set');
-    }
-
-    pattern = reader.readStringNoKey();
-
-    key = reader.readKey();
-    if (key != SBNBinaryKeys.lineHeight) {
-      throw Exception('Editor.fromBinary: lineHeight not set');
-    }
-    lineHeight = reader.readIntNoKey();
-
-    key = reader.readKey();
-    if (key != SBNBinaryKeys.lineThickness) {
-      throw Exception('Editor.fromBinary: lineThickness not set');
-    }
-    lineThickness = reader.readIntNoKey();
-
-    key = reader.readKey();
-    if (key != SBNBinaryKeys.initialPageIndex) {
-      throw Exception('Editor.fromBinary: initialPageIndex not set');
-    }
-    initialPageIndex = reader.readIntNoKey();
-
-    key = reader.readKey();
-    if (key != SBNBinaryKeys.pageCount) {
-      throw Exception('Editor.fromBinary: pageCount not set');
-    }
-    reader.readIntNoKey();
-
-    String? firstPageHash;
-    if (!reader.isEOF) {
-      final nextKey = reader.peekKey();
-      if (nextKey == SBNBinaryKeys.firstPageHash) {
-        reader.readKey();
-        firstPageHash = reader.readStringNoKey();
-      }
-    }
-
-    List<PdfOutlineItem>? pdfOutlines;
-    if (!reader.isEOF) {
-      final nextKey = reader.peekKey();
-      if (nextKey == SBNBinaryKeys.pdfOutlines) {
-        reader.readKey();
-        final first = reader.readIntNoKey();
-        final int count;
-        final int outlineFormatVersion;
-        if (first == _outlineBinaryMagic) {
-          outlineFormatVersion = reader.readIntNoKey();
-          count = reader.readIntNoKey();
-        } else {
-          outlineFormatVersion = 1;
-          count = first;
-        }
-        pdfOutlines = [];
-        for (int i = 0; i < count; i++) {
-          pdfOutlines.add(
-            _readOutlineStatic(reader, formatVersion: outlineFormatVersion),
-          );
-        }
-      }
-    }
-
-    List<String> tags = const [];
-    if (!reader.isEOF) {
-      final nextKey = reader.peekKey();
-      if (nextKey == SBNBinaryKeys.noteTags) {
-        reader.readKey();
-        final count = reader.readIntNoKey();
-        final loaded = <String>[];
-        for (int i = 0; i < count; i++) {
-          final tag = reader.readStringNoKey().trim();
-          if (tag.isNotEmpty) loaded.add(tag);
-        }
-        tags = loaded.toSet().toList();
-      }
-    }
-
-    List<NoteLink> links = const [];
-    if (!reader.isEOF) {
-      final nextKey = reader.peekKey();
-      if (nextKey == SBNBinaryKeys.noteLinks) {
-        reader.readKey();
-        final linkFormatVersion = reader.readIntNoKey();
-        final count = reader.readIntNoKey();
-        final loaded = <NoteLink>[];
-        for (int i = 0; i < count; i++) {
-          final int? sourcePageId;
-          final int sourcePageIndex;
-          if (linkFormatVersion >= 2) {
-            final sid = reader.readIntNoKey();
-            sourcePageId = sid >= 0 ? sid : null;
-            sourcePageIndex = reader.readIntNoKey();
-          } else {
-            sourcePageId = null;
-            sourcePageIndex = reader.readIntNoKey();
-          }
-          final targetPath = reader.readStringNoKey().trim();
-          final targetPageIndex = reader.readIntNoKey();
-          int? targetPageIndexEnd;
-          if (linkFormatVersion >= 3) {
-            final hasRange = reader.readBoolNoKey();
-            if (hasRange) {
-              final tie = reader.readIntNoKey();
-              if (tie >= 0 && tie != targetPageIndex) targetPageIndexEnd = tie;
-            }
-          }
-          final hasLabel = reader.readBoolNoKey();
-          final label = hasLabel ? reader.readStringNoKey() : null;
-
-          int? targetPageId;
-          int? targetPageIdEnd;
-          if (linkFormatVersion >= 4) {
-            final tpid = reader.readIntNoKey();
-            targetPageId = tpid >= 0 ? tpid : null;
-            final hasTpie = reader.readBoolNoKey();
-            if (hasTpie) {
-              final tpide = reader.readIntNoKey();
-              if (tpide >= 0) targetPageIdEnd = tpide;
-            }
-          }
-
-          loaded.add(
-            NoteLink(
-              sourcePageId: sourcePageId,
-              sourcePageIndex: sourcePageIndex,
-              targetPath: targetPath,
-              targetPageIndex: targetPageIndex,
-              targetPageIndexEnd:
-                  targetPageIndexEnd != null &&
-                      targetPageIndexEnd >= 0 &&
-                      targetPageIndexEnd != targetPageIndex
-                  ? targetPageIndexEnd
-                  : null,
-              label: label,
-              targetPageId: targetPageId,
-              targetPageIdEnd: targetPageIdEnd,
-            ),
-          );
-        }
-        links = loaded;
-      }
-    }
-
-    bool replaceDefaultLoaded = false;
-    bool isInfiniteLoaded = false;
-    bool showPdfLinkBoxesLoaded = true;
-    String infiniteThumbnailModeLoaded = 'jdenticon';
-    int creationDateLoaded = 0;
-    int lastModificationLoaded = 0;
-    int lastAccessLoaded = 0;
-    int totalTimeSpentEditingLoaded = 0;
-    int totalTimeSpentLoaded = 0;
-    String? locationLoaded;
-    String? noteIdLoaded;
-    CanvasBackgroundPattern? noteDefaultPatternLoaded;
-    int? noteDefaultPageColorLoaded;
-    int? noteDefaultLineColorLoaded;
-    int? noteDefaultLineHeightLoaded;
-    double? noteDefaultLineThicknessLoaded;
-    double? noteDefaultMarginLeftLoaded;
-    double? noteDefaultMarginRightLoaded;
-    double? noteDefaultMarginTopLoaded;
-    double? noteDefaultMarginBottomLoaded;
-    int? noteDefaultBorderColorLoaded;
-    PageOrientation notePageOrientationLoaded = PageOrientation.portrait;
-    NoteToolSettings? noteToolSettingsLoaded;
-    String? floatingCalculatorMetadataLoaded;
-
-    while (!reader.isEOF) {
-      final nextKey = reader.peekKey();
-      if (nextKey == SBNBinaryKeys.pages) break;
-      reader.readKey();
-      if (nextKey == SBNBinaryKeys.replaceDefaultWithPageSettings) {
-        replaceDefaultLoaded = reader.readBoolNoKey();
-
-        final k13 = reader.readKey();
-        if (k13 == SBNBinaryKeys.noteDefaultPattern) {
-          final patternName = reader.readStringNoKey();
-          for (final p in CanvasBackgroundPattern.values) {
-            if (p.name == patternName) {
-              noteDefaultPatternLoaded = p;
-              break;
-            }
-          }
-          noteDefaultPatternLoaded ??= CanvasBackgroundPattern.none;
-        }
-        while (!reader.isEOF) {
-          final pk = reader.peekKey();
-          if (pk == SBNBinaryKeys.noteDefaultPageColor) {
-            reader.readKey();
-            noteDefaultPageColorLoaded = reader.readIntNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultLineColor) {
-            reader.readKey();
-            noteDefaultLineColorLoaded = reader.readIntNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultLineHeight) {
-            reader.readKey();
-            noteDefaultLineHeightLoaded = reader.readIntNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultLineThickness) {
-            reader.readKey();
-            noteDefaultLineThicknessLoaded = reader.readDoubleNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultMarginLeft) {
-            reader.readKey();
-            noteDefaultMarginLeftLoaded = reader.readDoubleNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultMarginRight) {
-            reader.readKey();
-            noteDefaultMarginRightLoaded = reader.readDoubleNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultMarginTop) {
-            reader.readKey();
-            noteDefaultMarginTopLoaded = reader.readDoubleNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultMarginBottom) {
-            reader.readKey();
-            noteDefaultMarginBottomLoaded = reader.readDoubleNoKey();
-          } else if (pk == SBNBinaryKeys.noteDefaultBorderColor) {
-            reader.readKey();
-            noteDefaultBorderColorLoaded = reader.readIntNoKey();
-          } else {
-            break;
-          }
-        }
-      } else if (nextKey == SBNBinaryKeys.notePageOrientation) {
-        notePageOrientationLoaded =
-            PageOrientation.values[reader.readIntNoKey()];
-      } else if (nextKey == SBNBinaryKeys.noteToolSettings) {
-        noteToolSettingsLoaded = NoteToolSettings.fromJsonString(
-          reader.readStringNoKey(),
-        );
-      } else if (nextKey == SBNBinaryKeys.floatingCalculatorMetadata) {
-        floatingCalculatorMetadataLoaded = reader.readStringNoKey();
-      } else if (nextKey == SBNBinaryKeys.isInfinite) {
-        isInfiniteLoaded = reader.readBoolNoKey();
-      } else if (nextKey == SBNBinaryKeys.infiniteThumbnailMode) {
-        infiniteThumbnailModeLoaded = reader.readStringNoKey();
-      } else if (nextKey == SBNBinaryKeys.creationDate) {
-        creationDateLoaded = reader.readDoubleNoKey().toInt();
-      } else if (nextKey == SBNBinaryKeys.lastModification) {
-        lastModificationLoaded = reader.readDoubleNoKey().toInt();
-      } else if (nextKey == SBNBinaryKeys.lastAccess) {
-        lastAccessLoaded = reader.readDoubleNoKey().toInt();
-      } else if (nextKey == SBNBinaryKeys.totalTimeSpentEditing) {
-        totalTimeSpentEditingLoaded = reader.readDoubleNoKey().toInt();
-      } else if (nextKey == SBNBinaryKeys.totalTimeSpent) {
-        totalTimeSpentLoaded = reader.readDoubleNoKey().toInt();
-      } else if (nextKey == SBNBinaryKeys.location) {
-        locationLoaded = reader.readStringNoKey();
-      } else if (nextKey == SBNBinaryKeys.noteId) {
-        noteIdLoaded = reader.readStringNoKey();
-      } else if (nextKey == SBNBinaryKeys.showPdfLinkBoxes) {
-        showPdfLinkBoxesLoaded = reader.readBoolNoKey();
-      }
-    }
+    final header = _SbnHeader.read(reader, readOnly);
+    readOnly = header.readOnly;
+    final fileVersion = header.fileVersion;
+    final readOnlyBecauseOfVersion = header.readOnlyBecauseOfVersion;
+    final nextImageId = header.nextImageId;
+    final backgroundColor = header.backgroundColor;
+    final pattern = header.pattern;
+    final lineHeight = header.lineHeight;
+    final lineThickness = header.lineThickness;
+    final initialPageIndex = header.initialPageIndex;
+    final firstPageHash = header.firstPageHash;
+    final pdfOutlines = header.pdfOutlines;
+    final tags = header.tags;
+    final links = header.links;
+    final replaceDefaultLoaded = header.replaceDefaultLoaded;
+    final isInfiniteLoaded = header.isInfiniteLoaded;
+    final showPdfLinkBoxesLoaded = header.showPdfLinkBoxesLoaded;
+    final infiniteThumbnailModeLoaded = header.infiniteThumbnailModeLoaded;
+    final creationDateLoaded = header.creationDateLoaded;
+    final lastModificationLoaded = header.lastModificationLoaded;
+    final lastAccessLoaded = header.lastAccessLoaded;
+    final totalTimeSpentEditingLoaded = header.totalTimeSpentEditingLoaded;
+    final totalTimeSpentLoaded = header.totalTimeSpentLoaded;
+    final locationLoaded = header.locationLoaded;
+    final noteIdLoaded = header.noteIdLoaded;
+    final noteDefaultPatternLoaded = header.noteDefaultPatternLoaded;
+    final noteDefaultPageColorLoaded = header.noteDefaultPageColorLoaded;
+    final noteDefaultLineColorLoaded = header.noteDefaultLineColorLoaded;
+    final noteDefaultLineHeightLoaded = header.noteDefaultLineHeightLoaded;
+    final noteDefaultLineThicknessLoaded = header.noteDefaultLineThicknessLoaded;
+    final noteDefaultMarginLeftLoaded = header.noteDefaultMarginLeftLoaded;
+    final noteDefaultMarginRightLoaded = header.noteDefaultMarginRightLoaded;
+    final noteDefaultMarginTopLoaded = header.noteDefaultMarginTopLoaded;
+    final noteDefaultMarginBottomLoaded = header.noteDefaultMarginBottomLoaded;
+    final noteDefaultBorderColorLoaded = header.noteDefaultBorderColorLoaded;
+    final notePageOrientationLoaded = header.notePageOrientationLoaded;
+    final noteToolSettingsLoaded = header.noteToolSettingsLoaded;
+    final floatingCalculatorMetadataLoaded = header.floatingCalculatorMetadataLoaded;
 
     final assetCache = AssetCacheAll();
 
     final List<EditorPage> pages = [];
     _LazyPageLoadState? lazyStateFromPages;
-    key = reader.readKey();
+    final key = reader.readKey();
     if (key == SBNBinaryKeys.pages) {
       final int count = reader.readIntNoKey();
+      final directory = pageDirectory;
       late final Set<int> eagerIndices;
       if (onlyFirstPage) {
         eagerIndices = count > 0 ? {0} : {};
       } else if (count <= 2) {
         eagerIndices = Set<int>.from(List.generate(count, (i) => i));
       } else {
-        const window = 2;
-        // ±2 keeps the landing page plus its immediate neighbors fully parsed
-        // at open, so a first scroll never exposes empty shells. Distant pages
-        // stay lazy until idle hydrate/tap lands on them.
         final center = initialPageIndex
             .clamp(0, math.max(0, count - 1))
             .toInt();
-        eagerIndices = <int>{};
-        for (
-          var i = math.max(0, center - window);
-          i <= math.min(count - 1, center + window);
-          i++
-        ) {
-          eagerIndices.add(i);
+        final indexedLandingOnly = pageDirectory != null &&
+            pageDirectory.pageCount == count;
+        if (indexedLandingOnly) {
+          // The sidecar (or the background scan) already knows every page
+          // range. Materialize only the page the user will see; neighbors
+          // hydrate after the first frame.
+          eagerIndices = {center};
+        } else {
+          const window = 2;
+          eagerIndices = <int>{};
+          for (
+            var i = math.max(0, center - window);
+            i <= math.min(count - 1, center + window);
+            i++
+          ) {
+            eagerIndices.add(i);
+          }
         }
       }
 
@@ -1748,32 +2140,71 @@ class EditorCoreInfo extends ChangeNotifier {
       _LazyPageLoadState? lazyState;
       if (trackSlicesForHydration) {
         lazyState = _LazyPageLoadState(
-          buffer: buffer,
+          buffer: trustPageDirectory ? Uint8List(0) : buffer,
           pageByteOffsets: List<int>.filled(count + 1, 0),
           fileVersion: fileVersion,
         );
       }
 
+      final indexedDirectory = directory != null &&
+              directory.pageCount == count &&
+              (trustPageDirectory || directory.structurallyValid(buffer))
+          ? directory
+          : null;
       for (int i = 0; i < count; i++) {
-        lazyState?.pageByteOffsets[i] = reader.offset;
-        if (eagerIndices.contains(i)) {
-          // YIELD: Evita travar a UI Thread inteira de uma vez.
-          if (i > 0) await Future<void>.delayed(const Duration(milliseconds: 2));
-          pages.add(
-            EditorPage.fromBinary(
-              reader,
-              readOnly: readOnly,
-              fileVersion: fileVersion,
-              sbnPath: filePath,
-              assetCacheAll: assetCache,
-            ),
-          );
+        if (indexedDirectory != null) {
+          final span = indexedDirectory.spans[i];
+          lazyState?.pageByteOffsets[i] = span.start;
+          if (eagerIndices.contains(i)) {
+            final BinaryReader pageReader;
+            if (eagerPageBytes != null) {
+              pageReader = BinaryReader(eagerPageBytes);
+            } else {
+              reader.offset = span.start;
+              pageReader = reader;
+            }
+            pages.add(
+              await EditorPage.fromBinaryAsync(
+                pageReader,
+                readOnly: readOnly,
+                fileVersion: fileVersion,
+                sbnPath: filePath,
+                assetCacheAll: assetCache,
+              ),
+            );
+          } else {
+            pages.add(
+              EditorPage(
+                size: Size(span.width, span.height),
+                id: span.id,
+                isLazyShell: true,
+              ),
+            );
+            lazyState?.unhydratedIndices.add(i);
+          }
         } else {
-          pages.add(EditorPage.skipPageBinary(reader));
-          lazyState?.unhydratedIndices.add(i);
+          lazyState?.pageByteOffsets[i] = reader.offset;
+          if (eagerIndices.contains(i)) {
+            if (i > 0) await Future<void>.delayed(Duration.zero);
+            pages.add(
+              await EditorPage.fromBinaryAsync(
+                reader,
+                readOnly: readOnly,
+                fileVersion: fileVersion,
+                sbnPath: filePath,
+                assetCacheAll: assetCache,
+              ),
+            );
+          } else {
+            pages.add(EditorPage.skipPageBinary(reader));
+            lazyState?.unhydratedIndices.add(i);
+            if ((i & 3) == 3) await Future<void>.delayed(Duration.zero);
+          }
         }
       }
-      lazyState?.pageByteOffsets[count] = reader.offset;
+      lazyState?.pageByteOffsets[count] = indexedDirectory != null
+          ? indexedDirectory.spans.last.end
+          : reader.offset;
       if (lazyState != null && lazyState.unhydratedIndices.isEmpty) {
         lazyState = null;
       }
@@ -2668,18 +3099,8 @@ class EditorCoreInfo extends ChangeNotifier {
     if (canReuseLazySlice) {
       // An unhydrated page is only a lightweight shell. Preserve the original
       // BSON until the page is explicitly hydrated.
-      final start = lazyForSave.pageByteOffsets[i];
-      final end = lazyForSave.pageByteOffsets[i + 1];
-      if (start < 0 ||
-          end < start ||
-          end > lazyForSave.buffer.length) {
-        throw StateError(
-          'Refusing to save: corrupt lazy page slice for page $i '
-          '(start=$start end=$end buf=${lazyForSave.buffer.length})',
-        );
-      }
-      final slice = Uint8List.sublistView(lazyForSave.buffer, start, end);
-      if (slice.isEmpty) {
+      final slice = lazyForSave.residentSlice(i);
+      if (slice == null || slice.isEmpty) {
         throw StateError('Refusing to save: empty lazy page slice for page $i');
       }
       writer.writeBytes(slice);
@@ -2728,6 +3149,7 @@ class EditorCoreInfo extends ChangeNotifier {
     bool includeExportMetadata = true,
   }) async {
     initialPageIndex = currentPageIndex ?? initialPageIndex;
+    await _lazyPages?.ensureUnhydratedResident();
 
     final structureKey = _computePagesStructureKey();
     _syncPageBinaryEncodeCachesForSave(structureKey);
@@ -2895,6 +3317,15 @@ class EditorCoreInfo extends ChangeNotifier {
       writer.writeStringNoKey(noteId);
     }
 
+    // Per-note Link Boxes toggle (default true; only stored when disabled
+    // so legacy files without the key keep showing boxes).
+    // Must mirror saveToBinary(): the editor autosave uses this async path,
+    // so omitting it here silently drops the user's toggle on every save.
+    if (!showPdfLinkBoxes) {
+      writer.writeKey(SBNBinaryKeys.showPdfLinkBoxes);
+      writer.writeBoolNoKey(false);
+    }
+
     writer.writeKey(SBNBinaryKeys.pages);
     writer.writeIntNoKey(pages.length);
     final headerBytes = writer.toBytes();
@@ -2906,19 +3337,13 @@ class EditorCoreInfo extends ChangeNotifier {
 
       late final Uint8List pageBytes;
       if (canReuseLazySlice) {
-        final start = lazyForSave.pageByteOffsets[i];
-        final end = lazyForSave.pageByteOffsets[i + 1];
-        if (start < 0 ||
-            end < start ||
-            end > lazyForSave.buffer.length) {
+        final resident = lazyForSave.residentSlice(i);
+        if (resident == null) {
           throw StateError(
-            'Refusing to save: corrupt lazy page slice for page $i '
-            '(start=$start end=$end buf=${lazyForSave.buffer.length})',
+            'Refusing to save: page $i bytes are not resident',
           );
         }
-        pageBytes = Uint8List.fromList(
-          Uint8List.sublistView(lazyForSave.buffer, start, end),
-        );
+        pageBytes = Uint8List.fromList(resident);
         if (pageBytes.isEmpty) {
           throw StateError(
             'Refusing to save: empty lazy page slice for page $i',
@@ -2946,9 +3371,12 @@ class EditorCoreInfo extends ChangeNotifier {
         if (cacheHit) {
           pageBytes = _pageBinaryEncodeCache[i]!;
         } else {
-          final pw = BinaryWriter();
-          await page.toBinaryAsync(pw);
-          pageBytes = pw.toBytes();
+          // Pooled writer: one BytesBuilder+scratch set reused across dirty
+          // pages (clear() after toBytes, which copies). Same bytes out.
+          _sharedPageWriter.clear();
+          await page.toBinaryAsync(_sharedPageWriter);
+          pageBytes = _sharedPageWriter.toBytes();
+          _sharedPageWriter.clear();
           if (i < _pageBinaryEncodeCache.length) {
             _pageBinaryEncodeCache[i] = pageBytes;
             _pageBinaryCacheRevision[i] = page.saveBinaryRevision;

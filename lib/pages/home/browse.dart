@@ -447,6 +447,23 @@ class _BrowsePageState extends State<BrowsePage> {
       return;
     }
 
+    // True deletes are rare (unlike autosave writes) and must feel instant,
+    // including ops started outside browse (preview-card menu) that have no
+    // direct [_refreshAfterMutation]. Refresh synchronously instead of
+    // waiting for the write debounce below. Moves/renames stay debounced:
+    // their delete carries removal=renamed/moved and is paired with a write,
+    // and browse-initiated moves already refresh directly via onMoved.
+    if (event.type == FileOperationType.delete &&
+        event.removal == FileRemovalCause.deleted) {
+      _fileWriteDebounce?.cancel();
+      _fileWriteDebounce = null;
+      findChildrenOfPath(fromFileListener: true);
+      if (_isSearching) {
+        _filterFiles(_searchController.text);
+      }
+      return;
+    }
+
     _fileWriteDebounce?.cancel();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -710,10 +727,26 @@ class _BrowsePageState extends State<BrowsePage> {
     }
   }
 
+  /// Immediate refresh after a file/folder mutation.
+  /// Invalidates first so the root path never repaints the stale
+  /// HomeDataCache snapshot taken before the op. This is what makes
+  /// vault-off (disk) updates appear instantly instead of waiting for
+  /// the debounced [fileWriteListener].
+  void _refreshAfterMutation() {
+    _fileWriteDebounce?.cancel();
+    _fileWriteDebounce = null;
+    _needsRefresh = false;
+    HomeDataCache.instance.invalidate();
+    findChildrenOfPath();
+  }
+
   Future<void> createFolder(String folderName) async {
     final folderPath = '${path ?? ''}/$folderName';
     await FileManager.createFolder(folderPath);
-    findChildrenOfPath();
+    // Invalidate first: otherwise the root path repaints the stale
+    // HomeDataCache snapshot taken before the op (vault-off stays stale
+    // until the debounced file listener fires).
+    _refreshAfterMutation();
   }
 
   Future<void> _renameFolder(String folderName) async {
@@ -801,6 +834,8 @@ class _BrowsePageState extends State<BrowsePage> {
 
   Future<void> _deleteFolderLink(String linkKey) async {
     await FolderLinkManager.removeLink(path ?? '/', linkKey);
+    // Links affect children listing (incl. cached root): invalidate first.
+    HomeDataCache.instance.invalidate();
     findChildrenOfPath();
   }
 
@@ -1135,193 +1170,49 @@ class _BrowsePageState extends State<BrowsePage> {
 
         selectedFiles.value = [];
       },
-      child: Scaffold(
-        extendBody: true,
-        body: LayoutBuilder(
-          builder: (context, constraints) {
-            return ValueListenableBuilder<bool>(
-              valueListenable: stows.homeBrowseTreeView,
-              builder: (context, treeView, _) {
-                return ValueListenableBuilder<bool>(
-                  valueListenable: stows.homeListMode,
-                  builder: (context, listMode, _) {
-                    final screenWidth = MediaQuery.sizeOf(context).width;
-                    final folderGridCount = (screenWidth / 180).floor().clamp(
-                      2,
-                      6,
-                    );
-                    final notesCrossAxisCount = listMode
-                        ? 1
-                        : (screenWidth ~/ 200).clamp(1, 10);
+      child: ValueListenableBuilder<bool>(
+        valueListenable: stows.homeListMode,
+        builder: (context, listMode, _) {
+          return Scaffold(
+            extendBody: true,
+            appBar: _buildFixedBrowseAppBar(
+              context,
+              theme,
+              colorScheme,
+              listMode,
+            ),
+            body: LayoutBuilder(
+              builder: (context, constraints) {
+                final screenWidth = MediaQuery.sizeOf(context).width;
+                final folderGridCount = (screenWidth / 180).floor().clamp(
+                  2,
+                  6,
+                );
+                final notesCrossAxisCount = listMode
+                    ? 1
+                    : (screenWidth ~/ 200).clamp(1, 10);
 
-                    final isDark =
-                        Theme.of(context).brightness == Brightness.dark;
-
-                    return Container(
-                      color: Theme.of(context).colorScheme.surface,
-                      child: RefreshIndicator(
-                        onRefresh: () => Future.wait([
-                          findChildrenOfPath(),
-                          Future.delayed(const Duration(milliseconds: 500)),
-                        ]),
-                        child: CustomScrollView(
-                          primary: false,
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          cacheExtent: 1000,
-                          slivers: [
-                            SliverAppBar(
-                              primary: false,
-                              pinned: true,
-                              toolbarHeight: 72,
-                              collapsedHeight: 72,
-                              expandedHeight: 72,
-                              scrolledUnderElevation: 2,
-                              surfaceTintColor: Colors.transparent,
-                              shadowColor: Colors.transparent,
-                              leading: null,
-                              automaticallyImplyLeading: false,
-                              titleSpacing: 0,
-                              backgroundColor: homeAppBarBackgroundColor(context),
-                              title: Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: colorScheme.surfaceContainerHigh,
-                                    borderRadius: BorderRadius.circular(28),
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsetsDirectional.fromSTEB(16, 4, 8, 4),
-                                    child: Row(
-                                      crossAxisAlignment: CrossAxisAlignment.center,
-                                      children: [
-                                        Expanded(
-                                          child: ValueListenableBuilder<String>(
-                                            valueListenable: _searchText,
-                                            builder: (context, currentSearchText, _) {
-                                              return TextField(
-                                                controller: _searchController,
-                                                style: theme.textTheme.bodyLarge?.copyWith(
-                                                  color: colorScheme.onSurface,
-                                                  fontSize: 15,
-                                                ),
-                                                decoration: InputDecoration(
-                                                  hintText: t.home.titles.browse,
-                                                  hintStyle: theme.textTheme.bodyLarge?.copyWith(
-                                                    color: colorScheme.onSurfaceVariant,
-                                                    fontSize: 15,
-                                                  ),
-                                                  border: InputBorder.none,
-                                                  isDense: true,
-                                                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                                                  prefixIcon: Icon(
-                                                    Icons.search,
-                                                    color: colorScheme.onSurfaceVariant,
-                                                    size: 22,
-                                                  ),
-                                                  suffixIcon: currentSearchText.isNotEmpty
-                                                      ? IconButton(
-                                                          style: homeToolbarCompactIconStyle(context),
-                                                          icon: const Icon(Icons.clear, size: 22),
-                                                          onPressed: () {
-                                                            _searchController.clear();
-                                                            _filterFiles('');
-                                                          },
-                                                        )
-                                                      : null,
-                                                ),
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            IconButton(
-                                              color: colorScheme.onSurfaceVariant,
-                                              tooltip: t.home.tooltips.viewMode,
-                                              onPressed: () {
-                                                stows.homeListMode.value = !listMode;
-                                              },
-                                              icon: Icon(listMode ? Icons.grid_view_rounded : Icons.view_list_rounded),
-                                            ),
-                                            const SizedBox(width: 4),
-                                            IconButton(
-                                              color: colorScheme.onSurfaceVariant,
-                                              icon: const Icon(Icons.create_new_folder_outlined),
-                                              tooltip: 'New Folder',
-                                              onPressed: () => showDialog(
-                                                context: context,
-                                                builder: (context) => NewFolderDialog(
-                                                  createFolder: createFolder,
-                                                  doesFolderExist: (String folderName) {
-                                                    return children?.directories.contains(folderName) ?? false;
-                                                  },
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(width: 4),
-                                            IconButton(
-                                              color: colorScheme.onSurfaceVariant,
-                                              icon: const Icon(Icons.add_link),
-                                              tooltip: 'Create Shortcut Link',
-                                              onPressed: _showAddLinkDialog,
-                                            ),
-                                            ValueListenableBuilder<bool>(
-                                              valueListenable: stows.localEncryptionEnabled,
-                                              builder: (context, encryptionOn, _) {
-                                                return ValueListenableBuilder<bool>(
-                                                  valueListenable: VaultAdapter.unlockListenable,
-                                                  builder: (context, vaultUnlocked, _) {
-                                                    if (encryptionOn && vaultUnlocked) {
-                                                      return Padding(
-                                                        padding: const EdgeInsets.only(left: 4),
-                                                        child: IconButton(
-                                                          color: colorScheme.primary,
-                                                          tooltip: 'Lock Vault',
-                                                          onPressed: () {
-                                                            unawaited(VaultAdapter.lockAndGoToLogin());
-                                                          },
-                                                          icon: const Icon(Icons.power_settings_new),
-                                                        ),
-                                                      );
-                                                    }
-                                                    return const SizedBox.shrink();
-                                                  },
-                                                );
-                                              },
-                                            ),
-                                            const SizedBox(width: 4),
-                                            IconTheme.merge(
-                                              data: IconThemeData(color: colorScheme.onSurfaceVariant),
-                                              child: SortButton(
-                                                sortContext: SortContext.browse,
-                                                callback: () async {
-                                                  if (SortNotes.isNeeded) {
-                                                    if (_isSearching) {
-                                                      await SortNotes.sortNotes(
-                                                        _filteredSearchFiles,
-                                                        context: SortContext.browse,
-                                                        forced: true,
-                                                      );
-                                                    } else {
-                                                      await findChildrenOfPath(fromSort: true);
-                                                    }
-                                                    setState(() {});
-                                                  }
-                                                },
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              actions: const [SizedBox.shrink()],
+                return Container(
+                  color: colorScheme.surface,
+                  child: Column(
+                    children: [
+                      if (!_isSearching) _buildFixedBreadcrumbBar(context),
+                      Expanded(
+                        child: RefreshIndicator(
+                          onRefresh: () => Future.wait([
+                            findChildrenOfPath(),
+                            Future.delayed(
+                              const Duration(milliseconds: 500),
                             ),
-
+                          ]),
+                          child: CustomScrollView(
+                            primary: false,
+                            physics:
+                                const AlwaysScrollableScrollPhysics(
+                                  parent: ClampingScrollPhysics(),
+                                ),
+                            cacheExtent: 1000,
+                            slivers: [
                             if (_isSearching) ...[
                               if (_searchFailed)
                                 SliverFillRemaining(
@@ -1352,28 +1243,6 @@ class _BrowsePageState extends State<BrowsePage> {
                                   ),
                                 ),
                             ] else ...[
-                              SliverToBoxAdapter(
-                                child: Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    16,
-                                    12,
-                                    16,
-                                    12,
-                                  ),
-                                  child: PathComponents(
-                                    path,
-                                    trailingSectionLabel:
-                                        children != null &&
-                                            (_cachedNotesInCwd.isNotEmpty ||
-                                                children!
-                                                    .linkedFiles
-                                                    .isNotEmpty)
-                                        ? 'Notes'
-                                        : null,
-                                    onPathComponentTap: onPathComponentTap,
-                                  ),
-                                ),
-                              ),
 
                               if (children == null)
                                 const SliverFillRemaining(
@@ -1575,14 +1444,13 @@ class _BrowsePageState extends State<BrowsePage> {
                           ],
                         ),
                       ),
-                    );
-                  },
-                );
+                    ),
+                  ],
+                ),
+              );
               },
-            );
-          },
-        ),
-        bottomNavigationBar: isSelecting
+            ),
+            bottomNavigationBar: isSelecting
             ? SafeArea(
                 child: HomeSelectionActionBar(
                   child: Row(
@@ -1596,16 +1464,18 @@ class _BrowsePageState extends State<BrowsePage> {
                               ? ''
                               : selectedFiles.value.first,
                           unselectNotes: () => selectedFiles.value = [],
+                          onRenamed: _refreshAfterMutation,
                         ),
                       ),
                       MoveNoteButton(
                         filesToMove: selectedFiles.value,
                         unselectNotes: () => selectedFiles.value = [],
+                        onMoved: _refreshAfterMutation,
                       ),
                       DeleteNoteButton(
                         selectedFiles: selectedFiles.value,
                         unselectNotes: () => selectedFiles.value = [],
-                        onDeleted: findChildrenOfPath,
+                        onDeleted: _refreshAfterMutation,
                       ),
                       ExportNoteButton(
                         selectedFiles: selectedFiles.value,
@@ -1645,6 +1515,182 @@ class _BrowsePageState extends State<BrowsePage> {
         floatingActionButton: isSelecting
             ? null
             : NewNoteButton(cupertino: platform.isCupertino, path: path),
+          );
+        },
+      ),
+    );
+  }
+
+
+  PreferredSizeWidget _buildFixedBrowseAppBar(
+    BuildContext context,
+    ThemeData theme,
+    ColorScheme colorScheme,
+    bool listMode,
+  ) {
+    return AppBar(
+      toolbarHeight: 72,
+      scrolledUnderElevation: 2,
+      surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.transparent,
+      automaticallyImplyLeading: false,
+      titleSpacing: 0,
+      backgroundColor: homeAppBarBackgroundColor(context),
+      title: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Container(
+            decoration: BoxDecoration(
+              color: colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(28),
+            ),
+            child: Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(16, 4, 8, 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: ValueListenableBuilder<String>(
+                      valueListenable: _searchText,
+                      builder: (context, currentSearchText, _) {
+                        return TextField(
+                          controller: _searchController,
+                          style: theme.textTheme.bodyLarge?.copyWith(
+                            color: colorScheme.onSurface,
+                            fontSize: 15,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: t.home.titles.browse,
+                            hintStyle: theme.textTheme.bodyLarge?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                              fontSize: 15,
+                            ),
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                            prefixIcon: Icon(
+                              Icons.search,
+                              color: colorScheme.onSurfaceVariant,
+                              size: 22,
+                            ),
+                            suffixIcon: currentSearchText.isNotEmpty
+                                ? IconButton(
+                                    style: homeToolbarCompactIconStyle(context),
+                                    icon: const Icon(Icons.clear, size: 22),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      _filterFiles('');
+                                    },
+                                  )
+                                : null,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        color: colorScheme.onSurfaceVariant,
+                        tooltip: t.home.tooltips.viewMode,
+                        onPressed: () {
+                          stows.homeListMode.value = !listMode;
+                        },
+                        icon: Icon(listMode ? Icons.grid_view_rounded : Icons.view_list_rounded),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        color: colorScheme.onSurfaceVariant,
+                        icon: const Icon(Icons.create_new_folder_outlined),
+                        tooltip: 'New Folder',
+                        onPressed: () => showDialog(
+                          context: context,
+                          builder: (context) => NewFolderDialog(
+                            createFolder: createFolder,
+                            doesFolderExist: (String folderName) {
+                              return children?.directories.contains(folderName) ?? false;
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        color: colorScheme.onSurfaceVariant,
+                        icon: const Icon(Icons.add_link),
+                        tooltip: 'Create Shortcut Link',
+                        onPressed: _showAddLinkDialog,
+                      ),
+                      ValueListenableBuilder<bool>(
+                        valueListenable: stows.localEncryptionEnabled,
+                        builder: (context, encryptionOn, _) {
+                          return ValueListenableBuilder<bool>(
+                            valueListenable: VaultAdapter.unlockListenable,
+                            builder: (context, vaultUnlocked, _) {
+                              if (encryptionOn && vaultUnlocked) {
+                                return Padding(
+                                  padding: const EdgeInsets.only(left: 4),
+                                  child: IconButton(
+                                    color: colorScheme.primary,
+                                    tooltip: 'Lock Vault',
+                                    onPressed: () {
+                                      unawaited(VaultAdapter.lockAndGoToLogin());
+                                    },
+                                    icon: const Icon(Icons.power_settings_new),
+                                  ),
+                                );
+                              }
+                              return const SizedBox.shrink();
+                            },
+                          );
+                        },
+                      ),
+                      const SizedBox(width: 4),
+                      IconTheme.merge(
+                        data: IconThemeData(color: colorScheme.onSurfaceVariant),
+                        child: SortButton(
+                          sortContext: SortContext.browse,
+                          callback: () async {
+                            if (SortNotes.isNeeded) {
+                              if (_isSearching) {
+                                await SortNotes.sortNotes(
+                                  _filteredSearchFiles,
+                                  context: SortContext.browse,
+                                  forced: true,
+                                );
+                              } else {
+                                await findChildrenOfPath(fromSort: true);
+                              }
+                              setState(() {});
+                            }
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+    );
+  }
+
+  Widget _buildFixedBreadcrumbBar(BuildContext context) {
+    return Material(
+      color: homeAppBarBackgroundColor(context),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: PathComponents(
+          path,
+          trailingSectionLabel:
+              children != null &&
+                  (_cachedNotesInCwd.isNotEmpty ||
+                      children!.linkedFiles.isNotEmpty)
+              ? 'Notes'
+              : null,
+          onPathComponentTap: onPathComponentTap,
+        ),
       ),
     );
   }

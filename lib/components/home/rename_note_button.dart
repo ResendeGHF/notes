@@ -15,10 +15,12 @@ class RenameNoteButton extends StatelessWidget {
     super.key,
     required this.existingPath,
     required this.unselectNotes,
+    this.onRenamed,
   });
 
   final String existingPath;
   final void Function() unselectNotes;
+  final void Function()? onRenamed;
 
   @override
   Widget build(BuildContext context) {
@@ -35,6 +37,7 @@ class RenameNoteButton extends StatelessWidget {
             return RenameNoteDialog(
               existingPath: existingPath,
               unselectNotes: unselectNotes,
+              onRenamed: onRenamed,
             );
           },
         );
@@ -50,10 +53,12 @@ class RenameNoteDialog extends StatefulWidget {
     super.key,
     required this.existingPath,
     required this.unselectNotes,
+    this.onRenamed,
   });
 
   final String existingPath;
   final void Function() unselectNotes;
+  final void Function()? onRenamed;
 
   @override
   State<RenameNoteDialog> createState() => _RenameNoteDialogState();
@@ -134,6 +139,7 @@ class _RenameNoteDialogState extends State<RenameNoteDialog>
 
     if (newName != oldName) {
       await renameNote(newName);
+      widget.onRenamed?.call();
     }
   }
 

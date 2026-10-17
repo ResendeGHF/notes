@@ -19,6 +19,7 @@ import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
+import 'package:saber/data/samsung_notes/sdocx_mapping.dart';
 import 'package:saber/data/samsung_notes/sdocx_models.dart';
 import 'package:saber/data/samsung_notes/sdocx_parser.dart';
 import 'package:saber/data/stroke_geometry/point_vector.dart';
@@ -107,9 +108,13 @@ class SamsungNotesImporter {
           );
         }
 
-        // Drop fully-empty Samsung pages (e.g. sticker/attachment shells).
+        // Drop content-less Samsung pages (e.g. sticker/attachment shells).
+        // This is content-based rather than [EditorPage.isEmpty] on purpose:
+        // imported pages always carry an explicit local pattern (even blank),
+        // which would make every shell look non-empty. Pattern-only pages
+        // (grid/lined with no ink yet) are real content and must survive.
         // Keep at least one page so the note is never page-less.
-        coreInfo.pages.removeWhere((p) => p.isEmpty);
+        coreInfo.pages.removeWhere(_isContentEmpty);
         if (coreInfo.pages.isEmpty) {
           final fallback = doc.pages.first;
           coreInfo.pages.add(
@@ -316,7 +321,13 @@ class SamsungNotesImporter {
     // Stock background artwork embedded in the file wins over the pattern
     // name; otherwise map the Samsung template to Saber's equivalent so a
     // blank Samsung page stays blank regardless of Saber defaults.
-    final bgImage = await _toSaberBackgroundImage(doc, spage, coreInfo, page);
+    final bgImage = await _toSaberBackgroundImage(
+      doc,
+      spage,
+      coreInfo,
+      page,
+      idx,
+    );
     if (bgImage != null) {
       page.backgroundImage = bgImage;
     } else {
@@ -327,103 +338,13 @@ class SamsungNotesImporter {
       page.hasLocalPattern = true;
     }
     await _addStrokesAndImages(doc, spage, coreInfo, page, idx);
+    // Same as the editor's own onSetPagePattern path: plain field writes
+    // above don't bump the revision, so mark explicitly. Fresh coreInfos
+    // encode everything on first save anyway; this guards any later
+    // incremental-save flow from reusing a stale page encoding.
+    page.markSaveBinaryDirty();
   }
 
-  /// Map a Samsung pen name to the closest Saber tool.
-  ///
-  /// Samsung preload names (prefix `…pen.preload.` already stripped):
-  /// ballpoint pens (`InkPen`, `InkPen2`, …) → [ToolId.ballpointPen],
-  /// `FountainPen` family → [ToolId.fountainPen], calligraphy nibs
-  /// (`MontblancCalligraphyPen`, `ChineseBrush`, `ObliquePen`) →
-  /// [ToolId.calligraphyPen], pencils → [ToolId.pencil], markers →
-  /// [ToolId.highlighter]. Brushes and anything unrecognized fall back to
-  /// [ToolId.ballpointPen] per requirements; translucent unknown ink still
-  /// behaves like a highlighter.
-  static ToolId samsungPenToToolId(String? penName, {int? colorArgb}) {
-    final short = (penName ?? '').trim();
-    switch (short) {
-      case 'FountainPen':
-      case 'MontblancFountainPen':
-        return ToolId.fountainPen;
-      case 'MontblancCalligraphyPen':
-      case 'ChineseBrush':
-      case 'ObliquePen':
-        return ToolId.calligraphyPen;
-      case 'Pencil':
-      case 'Pencil2':
-      case 'Pencil3':
-      case 'ColoredPencil':
-        return ToolId.pencil;
-      case 'Marker':
-      case 'Marker2':
-      case 'Marker3':
-      case 'Marker4':
-      case 'StraightMarker':
-      case 'StraightHighlighter':
-        return ToolId.highlighter;
-      case 'InkPen':
-      case 'InkPen2':
-      case 'StraightInkPen2':
-      case 'DefaultPen':
-        return ToolId.ballpointPen;
-      default:
-        final alpha = colorArgb == null ? 255 : ((colorArgb >> 24) & 0xFF);
-        if (alpha < 200) return ToolId.highlighter;
-        return ToolId.ballpointPen;
-    }
-  }
-
-  /// Map a Samsung page template to Saber's equivalent background pattern.
-  ///
-  /// Keyword matching on the template URI comes first (most descriptive);
-  /// otherwise built-in numeric ids apply: 1..3 ruled, 4..6 grid, 7..9
-  /// dots (each narrow/normal/big, which Saber renders as one pattern),
-  /// 0/absent/unknown means blank ([CanvasBackgroundPattern.none]).
-  static CanvasBackgroundPattern samsungTemplateToPattern({
-    int? templateType,
-    String? templateUri,
-  }) {
-    final uri = (templateUri ?? '').toLowerCase();
-    if (uri.isNotEmpty) {
-      if (uri.contains('grid')) return CanvasBackgroundPattern.grid;
-      if (uri.contains('dot')) return CanvasBackgroundPattern.dots;
-      if (uri.contains('line') ||
-          uri.contains('ruled') ||
-          uri.contains('lined') ||
-          uri.contains('college')) {
-        return CanvasBackgroundPattern.lined;
-      }
-      if (uri.contains('blank') ||
-          uri.contains('none') ||
-          uri.contains('plain')) {
-        return CanvasBackgroundPattern.none;
-      }
-      if (uri.contains('staff') || uri.contains('music')) {
-        return CanvasBackgroundPattern.staffs;
-      }
-      if (uri.contains('cornell')) return CanvasBackgroundPattern.cornell;
-      if (uri.contains('calligraphy')) {
-        return CanvasBackgroundPattern.calligraphy;
-      }
-      if (uri.contains('tab')) return CanvasBackgroundPattern.tablature;
-    }
-    switch (templateType) {
-      case 1:
-      case 2:
-      case 3:
-        return CanvasBackgroundPattern.lined;
-      case 4:
-      case 5:
-      case 6:
-        return CanvasBackgroundPattern.grid;
-      case 7:
-      case 8:
-      case 9:
-        return CanvasBackgroundPattern.dots;
-      default:
-        return CanvasBackgroundPattern.none;
-    }
-  }
 
   static Future<void> _addStrokesAndImages(
     SdocxDocument doc,
@@ -435,11 +356,13 @@ class SamsungNotesImporter {
     for (final s in spage.strokes) {
       final stroke = _toSaberStroke(s, pageIndex, page);
       if (stroke != null) {
-        // insertStroke keeps Saber color/tool ordering stable.
+        // Page-level insert keeps color/tool ordering stable and bumps the
+        // page's binary revision (same as the editor's own stroke paths).
         try {
-          page.layerAt(0).insertStroke(stroke);
+          page.insertStroke(stroke);
         } catch (_) {
           page.layerAt(0).backingStrokes.add(stroke);
+          page.markSaveBinaryDirty();
         }
       }
     }
@@ -447,6 +370,7 @@ class SamsungNotesImporter {
       final image = await _toSaberImage(doc, im, coreInfo, page, pageIndex);
       if (image != null) {
         page.layerAt(0).addImage(image);
+        page.markSaveBinaryDirty();
       }
     }
   }
@@ -595,6 +519,7 @@ class SamsungNotesImporter {
     SdocxPage spage,
     EditorCoreInfo coreInfo,
     EditorPage page,
+    int pageIndex,
   ) async {
     try {
       final bgId = spage.backgroundImageId;
@@ -639,7 +564,7 @@ class SamsungNotesImporter {
         imageProviderNotifier: coreInfo.assetCacheAll.getImageProviderNotifier(
           assetId,
         ),
-        pageIndex: 0,
+        pageIndex: pageIndex,
         pageSize: page.size,
         backgroundFit: BoxFit.cover,
         onMoveImage: null,
@@ -685,6 +610,18 @@ class SamsungNotesImporter {
   static double _sanePageDim(double v, double fallback) {
     if (!v.isFinite || v < 200 || v > 5000) return fallback;
     return v;
+  }
+
+  /// True when a Saber page built by this importer holds no user-visible
+  /// content: no strokes/images (any layer), no background image, no quill
+  /// text, and at most an explicit blank pattern.
+  static bool _isContentEmpty(EditorPage page) {
+    if (page.allStrokesInDrawOrder.isNotEmpty) return false;
+    if (page.allImagesInDrawOrder.isNotEmpty) return false;
+    if (page.backgroundImage != null) return false;
+    if (!page.quill.controller.document.isEmpty()) return false;
+    final pattern = page.backgroundPattern;
+    return pattern == null || pattern == CanvasBackgroundPattern.none;
   }
 }
 

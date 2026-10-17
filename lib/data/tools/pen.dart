@@ -167,7 +167,8 @@ class Pen extends Tool {
     if (stroke == null) return null;
 
     stroke.options.isComplete = true;
-    stroke.clearLivePrediction();
+    // Live prediction ownership moved to finishLiveGeometry, which commits
+    // the shown tip as real points before clearing (no tip snap-back).
 
     if (this is Highlighter &&
         Highlighter.straightLine.value &&
