@@ -32,7 +32,7 @@ class CanvasBackgroundPainter extends CustomPainter {
   final CanvasBackgroundPattern backgroundPattern;
 
   final int lineHeight;
-  final int lineThickness;
+  final double lineThickness;
   final Color primaryColor, secondaryColor;
 
   final bool preview;
@@ -79,7 +79,7 @@ class CanvasBackgroundPainter extends CustomPainter {
       canvas.drawRect(canvasRect, paint);
     }
 
-    paint.strokeWidth = lineThickness.toDouble();
+    paint.strokeWidth = lineThickness;
     final innerSize = Size(innerRight - innerLeft, innerBottom - innerTop);
     final innerOffset = Offset(innerLeft, innerTop);
 

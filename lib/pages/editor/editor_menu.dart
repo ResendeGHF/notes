@@ -56,6 +56,7 @@ class ModernEditorMenu extends StatefulWidget {
 
   final Future<void> Function() onDeleteNote;
   final Future<void> Function()? onSaveBeforeProperties;
+  final VoidCallback? onOpenNoteInNewTab;
   final VoidCallback? onOpenSplitView;
   final VoidCallback? onCloseSplitView;
   final VoidCallback? onReopenSplitView;
@@ -114,6 +115,7 @@ class ModernEditorMenu extends StatefulWidget {
     this.onSetCustomThumbnail,
     required this.onDeleteNote,
     this.onSaveBeforeProperties,
+    this.onOpenNoteInNewTab,
     this.onOpenSplitView,
     this.onCloseSplitView,
     this.onReopenSplitView,
@@ -298,9 +300,19 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             onTap: () => setState(() => _page = _MenuPage.backgroundSettings),
           ),
 
-        if (widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
+        if (widget.onOpenNoteInNewTab != null || widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
           const Divider(height: 16),
           subHeader('Split view'),
+          if (widget.onOpenNoteInNewTab != null)
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+              leading: const Icon(Icons.tab_outlined),
+              title: const Text('Open note in new tab'),
+              onTap: () {
+                widget.onClose();
+                widget.onOpenNoteInNewTab?.call();
+              },
+            ),
           if (!widget.splitHasSecondary && widget.onOpenSplitView != null)
             ListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 24),

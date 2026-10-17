@@ -3334,7 +3334,7 @@ abstract class EditorExporter {
       backgroundColor: resolvedBgColor,
       backgroundPattern: pattern,
       lineHeight: lineH,
-      lineThickness: lineT,
+      lineThickness: lineT.toDouble(),
       primaryColor: patternPrimary,
       secondaryColor: patternSecondary,
       marginLeft: page.marginLeft,

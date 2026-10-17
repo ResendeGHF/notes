@@ -64,7 +64,7 @@ class CanvasGestureDetector extends StatefulWidget {
     this.tryHydratePage,
     this.onMaintainPageRasterBand,
     this.onPrefetchNearbyPages,
-    TransformationController? transformationController,
+    TransformationController? transformationController, this.onAddPageAbove, this.onAddPageBelow,
   }) : _transformationController =
            transformationController ?? TransformationController();
 
@@ -138,6 +138,9 @@ class CanvasGestureDetector extends StatefulWidget {
   /// near the viewport so a pan scrolls into already-drawn content.
   /// Returns the number of tiles recorded (progress for the warmer loop).
   final int Function(int bandStart, int bandEnd)? onPrefetchNearbyPages;
+
+  final VoidCallback? onAddPageAbove;
+  final VoidCallback? onAddPageBelow;
 
   late final TransformationController _transformationController;
 
@@ -512,22 +515,12 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
             first.clamp(0, widget.pages.length - 1);
         final lastClamped =
             last.clamp(0, widget.pages.length - 1);
-        var hydratedSync = false;
-        for (var i = firstClamped; i <= lastClamped; i++) {
-          if (widget.pages[i].isLazyShell &&
-              widget.tryHydratePage != null) {
-            widget.tryHydratePage!(i);
-            // A synchronous replacement still shows the placeholder until
-            // the page list rebuilds, so request one below.
-            if (!widget.pages[i].isLazyShell) hydratedSync = true;
-          }
-        }
+            
         // Prebuild one page beyond each viewport edge so the entering page
         // widget (and its first paint) exists before its pixels scroll in.
         final liveStart = firstClamped;
         final liveEnd = lastClamped;
-        if (hydratedSync ||
-            _liveRangeStart != liveStart ||
+        if (_liveRangeStart != liveStart ||
             _liveRangeEnd != liveEnd) {
           _liveRangeStart = liveStart;
           _liveRangeEnd = liveEnd;
@@ -846,6 +839,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
               this.axisAlignedPanLock = axisAlignedPanLock;
               stows.lastAxisAlignedPanLock.value = axisAlignedPanLock;
             }),
+            onAddPageAbove: widget.onAddPageAbove,
+            onAddPageBelow: widget.onAddPageBelow,
           ),
         ),
       ],

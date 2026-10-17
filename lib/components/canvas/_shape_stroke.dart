@@ -815,6 +815,40 @@ class ShapeStroke extends Stroke {
   }
 
   @override
+  bool carveCoversAllInk(double eraserRadius) {
+    if (!super.carveCoversAllInk(eraserRadius)) return false;
+    if (!fill) return true;
+    final mask = carveMask;
+    if (mask == null || mask.isEmpty) return false;
+    // A filled shape paints its interior too, so the outline check alone
+    // would let a bitten frame drop a shape whose fill is still visible.
+    // Grid-sample the filled region; every sample must sit `slack` inside
+    // the bites so no fill pixel can survive the delete.
+    final path = shapePath;
+    final bounds = path.getBounds();
+    if (bounds.isEmpty) return true;
+    final spacing = math.max(
+      4.0,
+      math.sqrt(bounds.width * bounds.height / 2048),
+    );
+    final slack = spacing * 0.7072; // half a grid cell's diagonal
+    final need = eraserRadius - slack;
+    if (need <= 0) return false;
+    final needSq = need * need;
+    for (var x = bounds.left + spacing * 0.5; x < bounds.right; x += spacing) {
+      for (
+        var y = bounds.top + spacing * 0.5;
+        y < bounds.bottom;
+        y += spacing
+      ) {
+        if (!path.contains(Offset(x, y))) continue;
+        if (mask.distanceSq(x, y) > needSq) return false;
+      }
+    }
+    return true;
+  }
+
+  @override
   bool get isEmpty =>
       config.bounds.width == 0 &&
       config.bounds.height == 0 &&

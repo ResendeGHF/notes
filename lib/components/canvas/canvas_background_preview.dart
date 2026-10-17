@@ -104,7 +104,7 @@ class CanvasBackgroundPreview extends StatelessWidget {
                     }
                   }(),
                   lineHeight: lineHeight,
-                  lineThickness: lineThickness,
+                  lineThickness: lineThickness.toDouble(),
                   primaryColor: lineColor ?? colorScheme.primary
                       .withSaturation(selected ? 1 : 0)
                       .withValues(alpha: selected ? 1 : 0.5),

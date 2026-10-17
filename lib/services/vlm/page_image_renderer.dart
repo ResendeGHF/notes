@@ -151,8 +151,8 @@ final class PageImageRenderer {
             : (page.backgroundPattern ?? backgroundPattern),
         lineHeight: page.hasLocalLineHeight ? page.lineHeight : lineHeight,
         lineThickness: page.hasLocalLineThickness
-            ? page.lineThickness.toInt()
-            : lineThickness.toInt(),
+            ? page.lineThickness.toDouble()
+            : lineThickness.toDouble(),
         primaryColor: page.lineColor.toARGB32() != 0xFF9E9E9E
             ? page.lineColor
             : primaryColor,

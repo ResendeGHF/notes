@@ -59,7 +59,7 @@ final class PageRasterBgParams {
   final Color backgroundColor;
   final CanvasBackgroundPattern backgroundPattern;
   final int lineHeight;
-  final int lineThickness;
+  final double lineThickness;
   final Color primaryColor;
   final Color secondaryColor;
   final double marginLeft;
@@ -1336,8 +1336,8 @@ PageRasterBgParams pageRasterBgParamsFor({
         ? page.lineHeight
         : defaultLineHeight,
     lineThickness: page.hasLocalLineThickness
-        ? page.lineThickness.toInt()
-        : defaultLineThickness.toInt(),
+        ? page.lineThickness
+        : defaultLineThickness,
     primaryColor: page.lineColor.value != 0xFF9E9E9E
         ? page.lineColor
         : primaryColor,

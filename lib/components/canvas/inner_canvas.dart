@@ -619,6 +619,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     }
     Set<Stroke>? prevSet;
     Set<Stroke>? currentSet;
+    bool inkRemoved = false;
     if (!fastPath) {
       prevSet = previous.toSet();
       currentSet = current.toSet();
@@ -626,9 +627,10 @@ class InnerCanvasState extends State<InnerCanvas> {
       for (final stroke in previous) {
         if (currentSet.contains(stroke)) continue;
         changed = true;
-        if (_pendingInkSet.remove(stroke)) {
-          _pendingInk.remove(stroke);
-        }
+        inkRemoved = true;
+        // DO NOT push to wet ink during erase/undo/redo.
+        // Wet ink is always drawn on top, ruining the original z-order
+        // of the edited strokes during the frame they take to bake.
         final bounds = stroke.bounds;
         if (bounds.isFinite && !bounds.isEmpty) {
           dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
@@ -637,14 +639,15 @@ class InnerCanvasState extends State<InnerCanvas> {
       for (final stroke in current) {
         if (prevSet.contains(stroke)) continue;
         changed = true;
-        if (stroke.toolId != ToolId.highlighter || stroke.hasCarve) {
-          _pushWetInk(stroke);
-        }
+        // DO NOT push to wet ink during erase/undo/redo.
+        // By leaving it in 'currentInk' only, it renders naturally 
+        // through tiles and perfectly respects the original z-order.
         final bounds = stroke.bounds;
         if (bounds.isFinite && !bounds.isEmpty) {
           dirty = dirty == null ? bounds : dirty.expandToInclude(bounds);
         }
       }
+      
       // Safety net: wet cover must never outlive its stroke (undo/erase of a
       // still-baking stroke would otherwise ghost it until catch-up).
       if (_pendingInk.isNotEmpty) {
@@ -671,15 +674,20 @@ class InnerCanvasState extends State<InnerCanvas> {
       // within frame budgets instead of one ~29ms synchronous block that used
       // to start the next stroke behind the pen. No blink (pending covers),
       // no rush (fallback + chaining converge).
-      if (fastAdded.toolId != ToolId.highlighter || fastAdded.hasCarve) {
+      final isHighlighter = fastAdded.toolId == ToolId.highlighter && !fastAdded.hasCarve;
+      if (!isHighlighter) {
         _pushWetInk(fastAdded);
       }
-      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: false);
+      _invalidateCommittedStrokeCache(
+        dirty: dirty, 
+        eagerRefill: isHighlighter, 
+        discardStale: false
+      );
     } else if (!fastPath) {
       // Complex ops (undo/redo/erase/paste): synchronous eager refill as
       // before — scope is computed, not assumed. Replacements render from
       // tiles in draw order (never from the above-everything wet cover).
-      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true);
+      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true, discardStale: inkRemoved);
     }
     _layer2Repaint.value++;
     _pendingRepaint.value++;
@@ -1461,11 +1469,12 @@ class InnerCanvasState extends State<InnerCanvas> {
                         widget.coreInfo.backgroundPattern;
                       }
                     }(),
-                    lineHeight:
-                    widget.lineHeight ?? widget.coreInfo.lineHeight,
-                    lineThickness:
-                    widget.lineThickness ??
-                    widget.coreInfo.lineThickness,
+                    lineHeight: page.hasLocalLineHeight
+                        ? page.lineHeight
+                        : (widget.lineHeight ?? widget.coreInfo.lineHeight),
+                    lineThickness: page.hasLocalLineThickness
+                        ? page.lineThickness
+                        : (widget.lineThickness?.toDouble() ?? widget.coreInfo.lineThickness.toDouble()),
                     primaryColor:
                     widget.lineColor ??
                     (page.lineColor.toARGB32() != 0xFF9E9E9E
@@ -1523,10 +1532,12 @@ class InnerCanvasState extends State<InnerCanvas> {
                       widget.coreInfo.backgroundPattern;
                     }
                   }(),
-
-                  lineHeight: widget.lineHeight ?? widget.coreInfo.lineHeight,
-                  lineThickness:
-                  widget.lineThickness ?? widget.coreInfo.lineThickness,
+                  lineHeight: page.hasLocalLineHeight 
+                      ? page.lineHeight 
+                      : (widget.lineHeight ?? widget.coreInfo.lineHeight),
+                  lineThickness: page.hasLocalLineThickness 
+                      ? page.lineThickness 
+                      : (widget.lineThickness?.toDouble() ?? widget.coreInfo.lineThickness.toDouble()),
 
                   primaryColor:
                   widget.lineColor ??
@@ -2784,12 +2795,6 @@ tileRect,
       return true;
     }
 
-    // Never blank: recorded pictures blit when available; tiles that cannot
-    // be recorded on this frame (cold page, time budget spent, fast motion)
-    // are collected below and covered by one cheap spine-fallback pass after
-    // the loop. The fallback batches are built once per content revision and
-    // reused across frames, so scrolling a cold page costs a handful of
-    // drawPath calls instead of per-stroke tessellation.
     void drawTileGated(int key, Rect tileRect, ui.Picture picture) {
       drawTile(key, tileRect, picture);
     }
@@ -2930,37 +2935,6 @@ tileRect,
         }
         final canRecord = !forbidRecord && countOk && timeOk;
         if (!canRecord) {
-          // Erase dirties the whole stroke, which shares tiles with ink the
-          // eraser never touched. A spine stand-in blanks that ink and draws
-          // the surviving stroke as a centerline until the picture lands —
-          // the "vanished, then reappeared" flash. Paint the real geometry
-          // for those tiles until the picture is recorded.
-          if (eagerRefill && inEagerScope && _eagerDirtyRect != null) {
-            canvas.save();
-            canvas.clipRect(tileRect);
-            _paintTileContents(
-              canvas: canvas,
-              tileRect: tileRect,
-              tileStrokes: tileStrokes,
-              page: page,
-              invert: invert,
-              primaryColor: primaryColor,
-              pageIndex: pageIndex,
-              totalPages: totalPages,
-              currentScale: currentScale,
-              defaultTextStyle: defaultTextStyle,
-              lineHeight: lineHeight,
-              lineThickness: lineThickness,
-              lineColor: lineColor,
-            );
-            canvas.restore();
-            missingTiles = true;
-            fallbackTiles++;
-            continue;
-          }
-          // Recording is capped on this frame, but the strokes must still
-          // be visible: cover this tile with the cheap spine fallback drawn
-          // once after the loop (deduped across tiles, batches cached).
           missingTiles = true;
           fallbackTiles++;
           fallbackRects.add(tileRect);
@@ -2996,9 +2970,6 @@ final pathOnly = needsMesh;
         drawTileGated(key, tileRect, picture);
       }
     }
-    // Single fallback pass for every tile this frame could not record:
-    // clipped to the missing tiles, drawn from batches cached per content
-    // revision, so the page is fully visible at a handful of draw calls.
     if (fallbackRects.isNotEmpty && !forbidRecord) {
       _fallbackPaintedTileCount += fallbackTiles;
       _ensureFallbackBatches(strokes: strokes, page: page, invert: invert);
@@ -3050,15 +3021,36 @@ final pathOnly = needsMesh;
       strokes.length,
     );
     if (_fallbackBatches != null && _fallbackCacheKey == key) return;
-    final strokePaths = <int, Path>{};
-    final strokeStyles = <int, (Color, double)>{};
-    final fillPaths = <int, Path>{};
-    final fillColors = <int, Color>{};
+    
+    final batches = <_FallbackBatch>[];
+    
+    Color? curColor;
+    double? curWidth;
+    bool? curFill;
+    Path? curPath;
 
-    Path strokePathFor(Color color, double width) {
-      final k = Object.hash(color.value, (width * 2).round());
-      strokeStyles[k] = (color, width);
-      return strokePaths.putIfAbsent(k, () => Path());
+    void flush() {
+      if (curPath != null && curColor != null && curWidth != null && curFill != null) {
+        batches.add(_FallbackBatch(
+          color: curColor!,
+          width: curWidth!,
+          path: curPath!,
+          fill: curFill!,
+        ));
+      }
+      curPath = null;
+    }
+
+    Path getPathFor(Color color, double width, bool fill) {
+      if (curColor != color || curWidth != width || curFill != fill || curPath == null) {
+        flush();
+        curColor = color;
+        curWidth = width;
+        curFill = fill;
+        curPath = Path();
+        if (fill) curPath!.fillType = PathFillType.nonZero;
+      }
+      return curPath!;
     }
 
     for (final s in strokes) {
@@ -3066,7 +3058,7 @@ final pathOnly = needsMesh;
       if (s.toolId == ToolId.highlighter) {
         final pts = s.pointsForEraser;
         if (pts.length >= 2) {
-          final path = strokePathFor(color, s.options.size);
+          final path = getPathFor(color, s.options.size, false);
           path.moveTo(pts.first.x, pts.first.y);
           final stride = pts.length > 24 ? (pts.length / 24).ceil() : 1;
           for (var i = stride; i < pts.length; i += stride) {
@@ -3079,29 +3071,25 @@ final pathOnly = needsMesh;
       if (s is ShapeStroke) {
         if (s.fill) {
           final fc = s.fillColor.withInversion(invert);
-          (fillPaths[fc.value] ??= Path()).addPath(s.shapePath, Offset.zero);
-          fillColors[fc.value] = fc;
+          getPathFor(fc, 0, true).addPath(s.shapePath, Offset.zero);
         }
-        strokePathFor(
-          color,
-          s.options.size,
-        ).addPath(s.strokeDrawPath, Offset.zero);
+        getPathFor(color, s.options.size, false).addPath(s.strokeDrawPath, Offset.zero);
         continue;
       }
       if (s is CircleStroke) {
-        strokePathFor(color, s.options.size).addOval(
+        getPathFor(color, s.options.size, false).addOval(
           Rect.fromCircle(center: s.center, radius: s.radius),
         );
         continue;
       }
       if (s is RectangleStroke) {
-        strokePathFor(color, s.options.size).addRect(s.rect);
+        getPathFor(color, s.options.size, false).addRect(s.rect);
         continue;
       }
       final pts = s.pointsForEraser;
       if (pts.isEmpty) continue;
       final w = s.options.size;
-      final path = strokePathFor(color, w);
+      final path = getPathFor(color, w, false);
       if (pts.length == 1) {
         final r = (w / 2).clamp(0.5, 999.0);
         path.addOval(
@@ -3121,23 +3109,9 @@ final pathOnly = needsMesh;
       }
       path.lineTo(pts.last.x, pts.last.y);
     }
+    flush();
 
-    _fallbackBatches = <_FallbackBatch>[
-      for (final e in fillPaths.entries)
-        _FallbackBatch(
-          color: fillColors[e.key]!,
-          width: 0,
-          path: e.value,
-          fill: true,
-        ),
-      for (final e in strokePaths.entries)
-        _FallbackBatch(
-          color: strokeStyles[e.key]!.$1,
-          width: strokeStyles[e.key]!.$2,
-          path: e.value,
-          fill: false,
-        ),
-    ];
+    _fallbackBatches = batches;
     _fallbackCacheKey = key;
   }
 

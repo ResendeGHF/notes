@@ -15,6 +15,8 @@ class PageNavigationButtons extends StatelessWidget {
     required this.onFirstPage,
     required this.onLastPage,
     required this.onGoToPage,
+    this.onAddPageAbove,
+    this.onAddPageBelow,
   });
 
   final int currentPageIndex;
@@ -22,12 +24,23 @@ class PageNavigationButtons extends StatelessWidget {
   final VoidCallback onFirstPage;
   final VoidCallback onLastPage;
   final void Function(int pageIndex) onGoToPage;
+  final VoidCallback? onAddPageAbove;
+  final VoidCallback? onAddPageBelow;
 
   @override
   Widget build(BuildContext context) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (onAddPageAbove != null)
+          IconButton(
+            icon: const AdaptiveIcon(
+              icon: Icons.arrow_upward,
+              cupertinoIcon: CupertinoIcons.arrow_up_circle,
+            ),
+            tooltip: 'Add page above',
+            onPressed: onAddPageAbove,
+          ),
         IconButton(
           icon: const AdaptiveIcon(
             icon: Icons.first_page,
@@ -52,6 +65,15 @@ class PageNavigationButtons extends StatelessWidget {
           tooltip: t.editor.navigation.goToPage,
           onPressed: () => _showGoToPageDialog(context),
         ),
+        if (onAddPageBelow != null)
+          IconButton(
+            icon: const AdaptiveIcon(
+              icon: Icons.arrow_downward,
+              cupertinoIcon: CupertinoIcons.arrow_down_circle,
+            ),
+            tooltip: 'Add page below',
+            onPressed: onAddPageBelow,
+          ),
       ],
     );
   }

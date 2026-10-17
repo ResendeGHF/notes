@@ -480,7 +480,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
                       : (page.backgroundPattern ??
                             widget.coreInfo.backgroundPattern),
                   lineHeight: lineHeight,
-                  lineThickness: lineThickness.toInt(),
+                  lineThickness: lineThickness.toDouble(),
                   primaryColor: lineColor,
                   secondaryColor: lineColor.withValues(alpha: 0.5),
                   preview: true,
@@ -749,41 +749,69 @@ class _SidebarPdfThumbState extends State<_SidebarPdfThumb> {
     final gen = _gen;
     _file = null;
     _memory = null;
-    final path = widget.image.assetCacheAll.getResolvedPdfPath(
-          widget.image.assetId,
-        ) ??
-        widget.image.pdfFile?.path;
-    if (path == null || path.isEmpty) {
+    
+    // Defer the disk IO and hashing to the next event loop cycle so the sidebar
+    // open animation can play smoothly at 60/120fps without blocking the UI thread.
+    Future<void>.delayed(Duration.zero, () async {
+      if (!mounted || gen != _gen) return;
+
+      final path = widget.image.assetCacheAll.getResolvedPdfPath(
+            widget.image.assetId,
+          ) ??
+          widget.image.pdfFile?.path;
+      if (path == null || path.isEmpty) {
+        if (mounted) setState(() {});
+        return;
+      }
+      
+      final cache = widget.image.assetCacheAll;
+      
+      // These cache queries can hit the disk synchronously (e.g. file size)
+      final fileSize = cache.getAssetFileSize(widget.image.assetId);
+      final hash = cache.getAssetPreviewHash(widget.image.assetId);
+      
+      final key = PdfPageThumbnailCache.keyForPage(
+        fileSize: fileSize,
+        identityHash: hash,
+        filePath: path,
+        pageIndex: widget.image.pdfPage,
+        targetWidth: _policyWidth,
+      );
+      
+      if (key == null) {
+        if (mounted) setState(() {});
+        return;
+      }
+      
+      final mem = PdfPageThumbnailCache.tryGetMemory(key);
+      if (mem != null && mem.isNotEmpty) {
+        if (mounted && gen == _gen) {
+          setState(() {
+            _memory = mem;
+          });
+        }
+        return;
+      }
+      
+      // Yield once more before hitting the disk sync check just in case we are 
+      // processing dozens of thumbnails in the same frame.
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted || gen != _gen) return;
+
+      final f = PdfPageThumbnailCache.tryGetDiskFileSync(key);
+      if (f != null) {
+        if (mounted && gen == _gen) {
+          setState(() {
+            _file = f;
+          });
+        }
+        return;
+      }
+      
+      // Miss: fill in the background, show the page-number placeholder meanwhile.
       if (mounted) setState(() {});
-      return;
-    }
-    final cache = widget.image.assetCacheAll;
-    final key = PdfPageThumbnailCache.keyForPage(
-      fileSize: cache.getAssetFileSize(widget.image.assetId),
-      identityHash: cache.getAssetPreviewHash(widget.image.assetId),
-      filePath: path,
-      pageIndex: widget.image.pdfPage,
-      targetWidth: _policyWidth,
-    );
-    if (key == null) {
-      if (mounted) setState(() {});
-      return;
-    }
-    final mem = PdfPageThumbnailCache.tryGetMemory(key);
-    if (mem != null && mem.isNotEmpty) {
-      _memory = mem;
-      if (mounted) setState(() {});
-      return;
-    }
-    final f = PdfPageThumbnailCache.tryGetDiskFileSync(key);
-    if (f != null) {
-      _file = f;
-      if (mounted) setState(() {});
-      return;
-    }
-    // Miss: fill in the background, show the page-number placeholder meanwhile.
-    if (mounted) setState(() {});
-    unawaited(_fillMiss(gen, key, path));
+      unawaited(_fillMiss(gen, key, path));
+    });
   }
 
   Future<void> _fillMiss(int gen, String key, String path) async {

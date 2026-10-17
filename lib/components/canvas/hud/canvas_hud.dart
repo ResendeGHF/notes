@@ -4,6 +4,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:saber/components/canvas/hud/canvas_gesture_lock_btn.dart';
@@ -23,6 +24,8 @@ class CanvasHud extends StatefulWidget {
     required this.setSingleFingerPanLock,
     required this.axisAlignedPanLock,
     required this.setAxisAlignedPanLock,
+    this.onAddPageAbove,
+    this.onAddPageBelow,
   });
 
   final TransformationController transformationController;
@@ -33,6 +36,8 @@ class CanvasHud extends StatefulWidget {
   final ValueChanged<bool> setSingleFingerPanLock;
   final bool axisAlignedPanLock;
   final ValueChanged<bool> setAxisAlignedPanLock;
+  final VoidCallback? onAddPageAbove;
+  final VoidCallback? onAddPageBelow;
 
   @override
   State<CanvasHud> createState() => _CanvasHudState();
@@ -108,6 +113,28 @@ class _CanvasHudState extends State<CanvasHud> {
                 ),
               ),
             ),
+            if (widget.onAddPageAbove != null)
+              Positioned(
+                top: 125,
+                left: 5,
+                child: CanvasGestureLockBtn(
+                  lock: false,
+                  setLock: (_) => widget.onAddPageAbove?.call(),
+                  tooltip: 'Add page above',
+                  icon: CupertinoIcons.arrow_up_circle,
+                ),
+              ),
+            if (widget.onAddPageBelow != null)
+              Positioned(
+                top: 165,
+                left: 5,
+                child: CanvasGestureLockBtn(
+                  lock: false,
+                  setLock: (_) => widget.onAddPageBelow?.call(),
+                  tooltip: 'Add page below',
+                  icon: CupertinoIcons.arrow_down_circle,
+                ),
+              ),
             Positioned(
               top: 5,
               right: 5,

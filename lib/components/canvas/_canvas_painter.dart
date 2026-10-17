@@ -1168,10 +1168,16 @@ class CanvasPainter extends CustomPainter {
                   currentStroke!.pointsForEraser.first.x,
                   currentStroke!.pointsForEraser.first.y,
                 ),
-                radius: (currentStroke!.options.size / 2).clamp(
-                  0.5,
-                  999.0,
-                ),
+                radius: () {
+                  final baseRadius = currentStroke!.options.size / 2;
+                  final pressure = (currentStroke!.pointsForEraser.first.pressure ?? 0.5).clamp(0.0, 1.0);
+                  if (currentStroke!.toolId == ToolId.fountainPen) {
+                    return math.max(0.05, baseRadius * (0.25 + 0.9 * pressure * pressure));
+                  } else if (currentStroke!.toolId == ToolId.ballpointPen || currentStroke!.toolId == ToolId.calligraphyPen) {
+                    return baseRadius;
+                  }
+                  return math.max(0.1, baseRadius * (0.2 + 0.8 * pressure * 2));
+                }().clamp(0.5, 999.0),
               ),
             ))
           : currentStroke!.highQualityPath;
@@ -1269,9 +1275,15 @@ class CanvasPainter extends CustomPainter {
     if (currentStroke!.length == 1) {
       final p = currentStroke!.pointsForEraser.first;
       final center = Offset(p.x, p.y);
-      final radius =
-          (currentStroke!.options.size / 2).clamp(0.5, 999.0);
-      canvas.drawCircle(center, radius, _sharedPaint);
+      final baseRadius = currentStroke!.options.size / 2;
+      final pressure = (p.pressure ?? 0.5).clamp(0.0, 1.0);
+      double radius = baseRadius;
+      if (currentStroke!.toolId == ToolId.fountainPen) {
+        radius = math.max(0.05, baseRadius * (0.25 + 0.9 * pressure * pressure));
+      } else if (currentStroke!.toolId != ToolId.ballpointPen && currentStroke!.toolId != ToolId.calligraphyPen) {
+        radius = math.max(0.1, baseRadius * (0.2 + 0.8 * pressure * 2));
+      }
+      canvas.drawCircle(center, radius.clamp(0.5, 999.0), _sharedPaint);
     } else {
       canvas.drawPath(currentStroke!.highQualityPath, _sharedPaint);
     }

@@ -219,16 +219,12 @@ class Eraser extends Tool {
       final live = _carveLive[origin] ?? candidate;
       if (!_capsuleHits(from, to, live, radius)) continue;
 
-      // Shapes stay the same object: a mask punches the fill without
-      // flattening them into a freehand copy.
-      if (live is ShapeStroke ||
-          live is CircleStroke ||
-          live is RectangleStroke) {
-        live.addCarveSweep(from, to, radius);
-        mutated = true;
-        continue;
-      }
-
+      // No shape special-case: shapes carve like freehand ink. The first
+      // touch clones the same shape type (geometry, fill and existing bites
+      // included) and later touches edit the clone in place, so the punch
+      // stays a mask on a vector shape (never a flattened freehand copy).
+      // Replacing the original keeps the drag undoable, and a fully bitten
+      // shape can be dropped like any other stroke.
       if (identical(live, origin) && !_carveLive.containsKey(origin)) {
         final carved = origin.copy();
         carved.addCarveSweep(from, to, radius);
@@ -250,14 +246,16 @@ class Eraser extends Tool {
       }
 
       live.addCarveSweep(from, to, radius);
-      mutated = true;
+      // Fully bitten ink is dropped instead of keeping an invisible shell:
+      // the page loses the object and undo restores the pristine original.
       if (live.carveCoversAllInk(radius)) {
         removed.add(live);
         groups.add(const []);
         _markRemoved(live);
         _carveLive.remove(origin);
         _carveOriginOf.remove(live);
-        mutated = false;
+      } else {
+        mutated = true;
       }
     }
     return mutated;

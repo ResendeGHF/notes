@@ -394,11 +394,25 @@ class EditorState extends State<Editor>
     return MediaQuery.devicePixelRatioOf(context).clamp(1.0, 4.0);
   }
 
+  bool _showCanvasHud = true;
+  Timer? _hudVisibilityTimer;
+
+  void _pokeCanvasHud() {
+    if (!_showCanvasHud && mounted) {
+      setState(() => _showCanvasHud = true);
+    }
+    _hudVisibilityTimer?.cancel();
+    _hudVisibilityTimer = Timer(const Duration(milliseconds: 2500), () {
+      if (mounted) setState(() => _showCanvasHud = false);
+    });
+  }
+
   /// Pan/zoom tick fan-out for PDF viewport tiling (see [PdfViewportBus]).
   /// The renderer debounces and early-outs on unchanged rects, so per-tick
   /// cost here is a single epoch bump.
   void _onCanvasTransformTick() {
     PdfViewportBus.tick();
+    _pokeCanvasHud();
   }
 
   void _onPageRasterLodSettled() {
@@ -948,19 +962,13 @@ class EditorState extends State<Editor>
         for (final i in order) {
           if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
           if (i < 0 || i >= coreInfo.pages.length) continue;
-          // Reopened notes keep distant pages as lazy BSON shells without any
-          // backgroundImage. Hydrate on demand so their PDF links are found
-          // too; dense pages hydrate chunked and rescan via
-          // [_finishAsyncHydrate] on completion.
-          if (coreInfo.isLazyShellPage(i)) {
-            try {
-              _tryIdleHydratePage(i);
-            } catch (_) {}
-            if (coreInfo.isLazyShellPage(i)) continue;
-            await Future<void>.delayed(Duration.zero);
-            if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
-            if (i < 0 || i >= coreInfo.pages.length) continue;
-          }
+          
+          // DO NOT synchronously hydrate shells just to check for links!
+          // This causes massive UI lockups on large PDFs. If the page is a shell,
+          // simply skip it for now. When the user scrolls to it, the page will 
+          // naturally hydrate and trigger a new link scan.
+          if (coreInfo.isLazyShellPage(i)) continue;
+          
           final bg = coreInfo.pages[i].backgroundImage;
           if (bg is! PdfEditorImage) continue;
           final key = '${bg.assetId}:${bg.pdfPage}';
@@ -1312,8 +1320,14 @@ class EditorState extends State<Editor>
     final to = (target + neighborWindow).clamp(0, coreInfo.pages.length - 1);
 
     for (var i = from; i <= to; i++) {
-      if (!coreInfo.isLazyShellPage(i)) {
-        coreInfo.ensurePageHydrated(i);
+      if (coreInfo.isLazyShellPage(i)) {
+        coreInfo.hydratePageAtIndexAsync(i).then((_) {
+          if (mounted) {
+            _wirePageImageCallbacks(i);
+            setState(() {});
+          }
+        });
+      } else {
         _wirePageImageCallbacks(i);
       }
     }
@@ -9838,77 +9852,6 @@ class EditorState extends State<Editor>
 
       ...leadingActions,
 
-      if (!coreInfo.isInfinite)
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.post_add_outlined),
-          tooltip: 'Insert page',
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          offset: const Offset(0, 48),
-          onSelected: (value) {
-            final currentIdx = currentPageIndex;
-            if (value == 'above') {
-              insertPageBefore(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            } else if (value == 'below') {
-              insertPageAfter(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx + 1,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            }
-          },
-          itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-            PopupMenuItem<String>(
-              value: 'above',
-              child: Row(
-                children: [
-                  Icon(
-                    CupertinoIcons.arrow_up_circle,
-                    color: colorScheme.onSurface,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text('Page above'),
-                ],
-              ),
-            ),
-            PopupMenuItem<String>(
-              value: 'below',
-              child: Row(
-                children: [
-                  Icon(
-                    CupertinoIcons.arrow_down_circle,
-                    color: colorScheme.onSurface,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text('Page below'),
-                ],
-              ),
-            ),
-          ],
-        ),
-
-      // Pages button in the AppBar (single access — no floating FAB)
-      if (!coreInfo.isInfinite)
-        IconButton(
-          icon: const Icon(Icons.article_outlined),
-          tooltip: 'Pages',
-          isSelected: _dockedSidePanel == _EditorDockedSidePanel.pages,
-          onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
-        ),
-
       IconButton(
         icon: const Icon(Icons.more_vert_rounded),
         tooltip: t.home.tabs.settings,
@@ -10015,6 +9958,32 @@ class EditorState extends State<Editor>
         ],
       ),
       actions: actions,
+    );
+  }
+
+  Widget _buildCanvasHudButton(BuildContext context, {required IconData icon, required VoidCallback onPressed, required String tooltip}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface.withOpacity(0.6),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
+            ),
+          ),
+          child: IconButton(
+            padding: EdgeInsets.zero,
+            icon: Icon(icon, size: 22, color: Theme.of(context).colorScheme.onSurface),
+            onPressed: onPressed,
+            tooltip: tooltip,
+          ),
+        ),
+      ),
     );
   }
 
@@ -10453,6 +10422,30 @@ class EditorState extends State<Editor>
             transformationController: _transformationController,
             scrollPhysicsStopNotifier: _scrollPhysicsStopNotifier,
             pageLayoutWidthOverride: _pageLayoutWidthOverride,
+            onAddPageAbove: !coreInfo.isInfinite ? () {
+              final currentIdx = currentPageIndex;
+              insertPageBefore(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            } : null,
+            onAddPageBelow: !coreInfo.isInfinite ? () {
+              final currentIdx = currentPageIndex;
+              insertPageAfter(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx + 1,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            } : null,
           ),
         ),
         LayoutBuilder(
@@ -10495,10 +10488,25 @@ class EditorState extends State<Editor>
               onSelected: _captureRegionScreenshot,
             ),
           ),
+        if (!coreInfo.isInfinite) ...[
+          if (_dockedSidePanel != _EditorDockedSidePanel.pages)
+            Positioned(
+              left: 16,
+              bottom: 16,
+              child: FloatingActionButton.extended(
+                heroTag: 'pages_fab',
+                elevation: 2,
+                onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
+                icon: const Icon(Icons.article_outlined),
+                label: const Text('Pages'),
+              ),
+            ),
+        ],
       ],
     );
 
     final Widget? readonlyBanner = coreInfo.readOnlyBecauseOfVersion
+
         ? Collapsible(
             collapsed:
                 !(coreInfo.readOnly && coreInfo.readOnlyBecauseOfVersion),
@@ -10947,6 +10955,12 @@ class EditorState extends State<Editor>
       hasPdfLinks: _hasPdfLinks,
       showPdfLinkBoxes: _showPdfLinkBoxes,
       onClose: _closeDockedSidePanel,
+      onOpenNoteInNewTab: widget.onOpenNoteInNewTab != null ? () async {
+        final currentPath = coreInfo.filePath;
+        final selected = await _pickNotePath(context, excludePaths: {currentPath});
+        if (!mounted || selected == null) return;
+        widget.onOpenNoteInNewTab?.call(selected);
+      } : null,
       onOpenSplitView: widget.onOpenSplitView ?? _openSplitView,
       onCloseSplitView: widget.onCloseSplitView,
       onReopenSplitView: widget.onReopenSplitView,
@@ -14173,14 +14187,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
           onPressed: _goToHome,
         ),
         title: const Text('Loading…'),
-        actions: [_buildNewTabButton()],
+        actions: const [], // Removido o _buildNewTabButton()
         bottom: _buildTabStripBottom(context, null),
       );
     }
 
     final inner = activeState._buildEditorAppBar(
       context,
-      leadingActions: [_buildNewTabButton()],
+      leadingActions: const [], // Removido o _buildNewTabButton()
       onBackOverride: _goToHome,
     );
     if (inner is AppBar) {

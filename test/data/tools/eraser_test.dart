@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/stroke_geometry/stroke_geometry.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
+import 'package:saber/data/tools/shape_geometry.dart';
+import 'package:saber/data/tools/shape_tool.dart';
 
 import '../../helpers/test_stroke_factory.dart';
 
@@ -26,6 +29,39 @@ void applyEraserDelta(List<Stroke> strokes, EraserResult result) {
       strokes.insertAll(idx, group);
     }
   }
+}
+
+/// Rectangle drawn the way the shape tool creates it (a [ShapeStroke], not a
+/// legacy [RectangleStroke]), used by the carve coverage tests.
+ShapeStroke testRectShape({
+  Rect bounds = const Rect.fromLTRB(60, 40, 140, 120),
+  bool fill = false,
+}) {
+  final verts = <Offset>[
+    bounds.topLeft,
+    bounds.topRight,
+    bounds.bottomRight,
+    bounds.bottomLeft,
+  ];
+  final config = ShapeGeometry.withControlPoints(
+    ShapeConfig(
+      kind: ShapeKind.rectangle,
+      bounds: ShapeGeometry.boundsOf(verts),
+      data: const {'equilateral': false},
+    ),
+    verts,
+  );
+  return ShapeStroke(
+    color: Colors.black,
+    pressureEnabled: false,
+    options: ShapeStroke.defaultOptions.copyWith(isComplete: true),
+    pageIndex: 0,
+    page: testPageSize(),
+    toolId: ToolId.shapeTool,
+    config: config,
+    fill: fill,
+    fillColor: Colors.black,
+  );
 }
 
 void main() {
@@ -663,6 +699,155 @@ void main() {
       expect(result.removed, isEmpty);
       expect(result.added, isEmpty);
       expect(result.areaWorkRemaining, isFalse);
+    });
+  });
+
+  group('Carve full coverage', () {
+    /// Applies one eraser move per point; every move sweeps from the previous
+    /// point, so the calls together form a single drag.
+    void drag(Eraser eraser, List<Stroke> strokes, List<Offset> path) {
+      for (final p in path) {
+        applyEraserDelta(strokes, eraser.apply(p, strokes));
+      }
+    }
+
+    test('a fully bitten freehand stroke is removed mid-drag', () {
+      final stroke = testPolylineStroke(toolId: ToolId.ballpointPen);
+      final strokes = <Stroke>[stroke];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      // Dot first, then one sweep along the whole line.
+      drag(eraser, strokes, const [Offset(0, 100), Offset(200, 100)]);
+
+      expect(strokes, isEmpty);
+      final (erased, added, toDispose) = eraser.onDragEnd();
+      expect(erased, [stroke], reason: 'undo must restore the original');
+      expect(added, isEmpty);
+    });
+
+    test('a fully bitten shape is removed mid-drag', () {
+      final shape = testRectShape();
+      final strokes = <Stroke>[shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      // One lap around the rectangle, inside bite reach of every edge.
+      drag(eraser, strokes, const [
+        Offset(40, 40),
+        Offset(160, 40),
+        Offset(160, 120),
+        Offset(40, 120),
+        Offset(40, 40),
+      ]);
+
+      expect(strokes, isEmpty);
+      final (erased, added, toDispose) = eraser.onDragEnd();
+      expect(erased, [shape], reason: 'undo must restore the original');
+      expect(added, isEmpty);
+      expect(toDispose, hasLength(1), reason: 'the masked shell is dropped');
+    });
+
+    test('a partially bitten shape is replaced by a same-type carved copy', () {
+      final shape = testRectShape();
+      final strokes = <Stroke>[shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      drag(eraser, strokes, const [Offset(40, 40), Offset(160, 40)]);
+
+      expect(strokes, hasLength(1));
+      final carved = strokes.single;
+      expect(carved, isNot(same(shape)));
+      expect(carved, isA<ShapeStroke>(), reason: 'never flattened to freehand');
+      expect(carved.hasCarve, isTrue);
+      final (erased, added, toDispose) = eraser.onDragEnd();
+      expect(erased, [shape]);
+      expect(added, [carved]);
+      expect(toDispose, isEmpty);
+    });
+
+    test('a shape bitten whole on the first touch is removed at once', () {
+      final shape = testRectShape(bounds: const Rect.fromLTRB(95, 95, 105, 105));
+      final strokes = <Stroke>[shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      drag(eraser, strokes, const [Offset(100, 100)]);
+
+      expect(strokes, isEmpty);
+      final (erased, added, toDispose) = eraser.onDragEnd();
+      expect(erased, [shape]);
+      expect(added, isEmpty);
+      expect(toDispose, isEmpty, reason: 'the throwaway clone is disposed');
+    });
+
+    test('an outline-only bite keeps a filled shape alive', () {
+      final shape = testRectShape(fill: true);
+      final strokes = <Stroke>[shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      // Covers every outline sample but leaves the fill interior visible.
+      drag(eraser, strokes, const [
+        Offset(40, 40),
+        Offset(160, 40),
+        Offset(160, 120),
+        Offset(40, 120),
+        Offset(40, 40),
+      ]);
+
+      expect(
+        strokes,
+        hasLength(1),
+        reason: 'the fill interior is still visible: must not be deleted',
+      );
+      expect(strokes.single.hasCarve, isTrue);
+    });
+
+    test('a fully bitten filled shape is removed', () {
+      final shape = testRectShape(fill: true);
+      final strokes = <Stroke>[shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      // Boustrophedon over the whole rectangle: outline and fill interior.
+      drag(eraser, strokes, const [
+        Offset(40, 40),
+        Offset(160, 40),
+        Offset(160, 60),
+        Offset(40, 60),
+        Offset(40, 80),
+        Offset(160, 80),
+        Offset(160, 100),
+        Offset(40, 100),
+        Offset(40, 120),
+        Offset(160, 120),
+      ]);
+
+      expect(strokes, isEmpty);
+    });
+
+    test('deleting one stroke keeps contentMutated for another', () {
+      final stroke = testPolylineStroke(toolId: ToolId.ballpointPen);
+      final shape = testRectShape(bounds: const Rect.fromLTRB(60, 120, 140, 200));
+      final strokes = <Stroke>[stroke, shape];
+      final eraser = Eraser(mode: EraserMode.carve, size: 25);
+      eraser.clearState();
+
+      // Bite the shape and the freehand separately so both are live carved
+      // copies before the final sweep.
+      drag(eraser, strokes, const [Offset(100, 195)]);
+      drag(eraser, strokes, const [Offset(0, 100)]);
+      expect(strokes, hasLength(2));
+
+      // Completes the freehand (deleted) and bites the shape again in place.
+      final result = eraser.apply(const Offset(200, 100), strokes);
+      applyEraserDelta(strokes, result);
+      expect(result.removed, hasLength(1));
+      expect(result.contentMutated, isTrue);
+      expect(strokes, hasLength(1));
+      expect(strokes.single.hasCarve, isTrue);
     });
   });
 

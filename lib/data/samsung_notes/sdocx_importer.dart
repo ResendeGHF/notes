@@ -117,12 +117,23 @@ class SamsungNotesImporter {
         coreInfo.pages.removeWhere(_isContentEmpty);
         if (coreInfo.pages.isEmpty) {
           final fallback = doc.pages.first;
-          coreInfo.pages.add(
-            EditorPage(
-              width: _sanePageDim(fallback.width, EditorPage.defaultWidth),
-              height: _sanePageDim(fallback.height, EditorPage.defaultHeight),
-            ),
-          );
+          final pageW = _sanePageDim(fallback.width, EditorPage.defaultWidth);
+          final pageH = _sanePageDim(fallback.height, EditorPage.defaultHeight);
+          
+          coreInfo.ensureDocumentDefaultsFromGlobal();
+          final page = coreInfo.createPageWithDefaults(size: Size(pageW, pageH));
+          
+          final scale = pageW / EditorPage.defaultWidth;
+          page.lineHeight = (page.lineHeight * scale).round();
+          page.lineThickness *= scale;
+          if (page.hasLocalMargins) {
+            page.marginLeft *= scale;
+            page.marginRight *= scale;
+            page.marginTop *= scale;
+            page.marginBottom *= scale;
+          }
+          
+          coreInfo.pages.add(page);
         }
         // Re-index strokes/images after filtering.
         for (var i = 0; i < coreInfo.pages.length; i++) {
@@ -244,7 +255,19 @@ class SamsungNotesImporter {
         final natural = Size(pdfPage.width, pdfPage.height);
         onPdf?.call(pdfDoc, pdfFile.path);
 
-        final page = EditorPage(width: pageW, height: pageH);
+        coreInfo.ensureDocumentDefaultsFromGlobal();
+        final page = coreInfo.createPageWithDefaults(size: Size(pageW, pageH));
+        
+        final scale = pageW / EditorPage.defaultWidth;
+        page.lineHeight = (page.lineHeight * scale).round();
+        page.lineThickness *= scale;
+        if (page.hasLocalMargins) {
+          page.marginLeft *= scale;
+          page.marginRight *= scale;
+          page.marginTop *= scale;
+          page.marginBottom *= scale;
+        }
+
         final idx = nextPageIndex();
         page.backgroundImage = PdfEditorImage(
           id: coreInfo.nextImageId++,
@@ -337,6 +360,22 @@ class SamsungNotesImporter {
       );
       page.hasLocalPattern = true;
     }
+
+    // Scale patterns and margins to fit the imported page dimensions uniformly
+    final scale = pageW / EditorPage.defaultWidth;
+    coreInfo.ensureDocumentDefaultsFromGlobal();
+
+    page.lineHeight = ((coreInfo.noteDefaultLineHeight ?? coreInfo.lineHeight) * scale).round();
+    page.lineThickness = (coreInfo.noteDefaultLineThickness ?? coreInfo.lineThickness) * scale;
+    page.hasLocalLineHeight = true;
+    page.hasLocalLineThickness = true;
+
+    page.marginLeft = (coreInfo.noteDefaultMarginLeft ?? 0) * scale;
+    page.marginRight = (coreInfo.noteDefaultMarginRight ?? 0) * scale;
+    page.marginTop = (coreInfo.noteDefaultMarginTop ?? 0) * scale;
+    page.marginBottom = (coreInfo.noteDefaultMarginBottom ?? 0) * scale;
+    page.hasLocalMargins = page.marginLeft > 0 || page.marginRight > 0 || page.marginTop > 0 || page.marginBottom > 0;
+
     await _addStrokesAndImages(doc, spage, coreInfo, page, idx);
     // Same as the editor's own onSetPagePattern path: plain field writes
     // above don't bump the revision, so mark explicitly. Fresh coreInfos
