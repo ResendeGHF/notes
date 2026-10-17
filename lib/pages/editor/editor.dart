@@ -1321,12 +1321,8 @@ class EditorState extends State<Editor>
 
     for (var i = from; i <= to; i++) {
       if (coreInfo.isLazyShellPage(i)) {
-        coreInfo.hydratePageAtIndexAsync(i).then((_) {
-          if (mounted) {
-            _wirePageImageCallbacks(i);
-            setState(() {});
-          }
-        });
+        coreInfo.ensurePageHydrated(i);
+        _wirePageImageCallbacks(i);
       } else {
         _wirePageImageCallbacks(i);
       }

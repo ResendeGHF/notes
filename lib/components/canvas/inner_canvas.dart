@@ -292,9 +292,9 @@ class InnerCanvasState extends State<InnerCanvas> {
   ui.Image? _selectionRasterImage;
   Rect? _selectionRasterBounds;
   SelectResult? _selectionRasterFor;
-  int _selectionRasterStrokeCount = -1;
-  double _selectionRasterScale = 1.0;
-  bool _selectionRasterInvert = false;
+  var _selectionRasterStrokeCount = -1;
+  var _selectionRasterScale = 1.0;
+  var _selectionRasterInvert = false;
 
   void _dropSelectionRaster() {
     _selectionRasterImage?.dispose();
@@ -371,12 +371,12 @@ class InnerCanvasState extends State<InnerCanvas> {
     _selectionRasterInvert = invert;
   }
 
-  int _lastStrokeCount = 0;
-  int _lastLayerOrderHash = 0;
-  int _lastLaserStrokeCount = 0;
-  int _lastObservedSaveBinaryRevision = -1;
+  var _lastStrokeCount = 0;
+  var _lastLayerOrderHash = 0;
+  var _lastLaserStrokeCount = 0;
+  var _lastObservedSaveBinaryRevision = -1;
   Rect? _eraserSessionDirty;
-  bool _eraserNeedsFullInvalidate = false;
+  var _eraserNeedsFullInvalidate = false;
   Offset? _eraserSweepFrom;
 
   TiledStrokePictureCache? _localStrokePictureCache;
@@ -426,9 +426,9 @@ class InnerCanvasState extends State<InnerCanvas> {
   /// content version changes (not on every frame while [currentStroke] updates).
   List<Stroke>? _cachedCommittedStrokesFlat;
   EditorPage? _cachedFlatStrokesPage;
-  int _cachedFlatSaveBinaryRevision = -1;
-  int _cachedFlatStrokeCount = -1;
-  int _cachedFlatLayerOrderHash = -1;
+  var _cachedFlatSaveBinaryRevision = -1;
+  var _cachedFlatStrokeCount = -1;
+  var _cachedFlatLayerOrderHash = -1;
   // Split views cached alongside the flat list so `_buildContent` stays O(1)
   // on frozen/live rebuilds instead of re-running two O(S) `where` scans per
   // build (the dense-page tax on every pan/zoom/live frame).
@@ -439,7 +439,7 @@ class InnerCanvasState extends State<InnerCanvas> {
   final Set<Stroke> _pendingInkSet = {};
   Timer? _pendingBakeTimer;
   final ValueNotifier<int> _pendingRepaint = ValueNotifier(0);
-  int _pendingGeneration = 0;
+  var _pendingGeneration = 0;
   List<Stroke> _tiledStrokesSnapshot = const [];
   List<Stroke> _pageStrokeSnapshot = const [];
   final _LiveStrokeList _liveTiledStrokes = _LiveStrokeList();
@@ -522,7 +522,7 @@ class InnerCanvasState extends State<InnerCanvas> {
     cache?.recordGeneration.removeListener(_onTileRecordedForWetInk);
   }
 
-  bool _wetInkListening = false;
+  var _wetInkListening = false;
   TiledStrokePictureCache? _wetInkCache;
 
   void _clearPendingInk() {
@@ -695,7 +695,7 @@ class InnerCanvasState extends State<InnerCanvas> {
 
   Timer? _shapePreviewTicker;
   final ValueNotifier<int> _shapePreviewRepaint = ValueNotifier(0);
-  int _shapePreviewTick = 0;
+  var _shapePreviewTick = 0;
   late final ScrollController _quillScrollController;
 
   List<PdfLink>? _pagePdfLinks;
@@ -743,14 +743,14 @@ class InnerCanvasState extends State<InnerCanvas> {
     }
   }
 
-  bool _isCapturingThumbnail = false;
+  var _isCapturingThumbnail = false;
   final GlobalKey _thumbnailCaptureKey = GlobalKey();
 
   /// True once a PDF page background has its texture. While false the
   /// page-number indicator stays hidden so a loading page never shows the
   /// half-rendered dark-page artifact. Pages without a PDF background are
   /// always ready.
-  bool _pdfBgReady = true;
+  var _pdfBgReady = true;
   EditorImage? _pdfBgObserved;
   ValueNotifier<PdfDocument?>? _pdfBgNotifier;
   VoidCallback? _pdfBgReadyListener;
@@ -847,7 +847,7 @@ class InnerCanvasState extends State<InnerCanvas> {
   }
 
   int _totalStrokesAcrossLayers(EditorPage page) {
-    int n = 0;
+    var n = 0;
     for (var i = 0; i < page.layerCount; i++) {
       n += page.layerAt(i).strokes.length;
     }
@@ -949,9 +949,8 @@ class InnerCanvasState extends State<InnerCanvas> {
     oldWidget.eraserPosition != null && widget.eraserPosition == null;
 
     final bool selectionCleared =
-    (oldWidget.currentSelection != null &&
-    !oldWidget.currentSelection!.isEmpty) &&
-    (widget.currentSelection == null || widget.currentSelection!.isEmpty);
+    (oldWidget.currentSelection?.isEmpty == false) &&
+    (widget.currentSelection?.isEmpty ?? true);
 
     final bool invertChanged = oldWidget.overrideInvert != widget.overrideInvert;
 
@@ -1373,10 +1372,6 @@ class InnerCanvasState extends State<InnerCanvas> {
     final tiledStrokes = _reuseTiledSnapshot(committedInkStrokes);
     _liveTiledStrokes.strokes = tiledStrokes;
 
-    final useCachedStrokeLayer =
-    !widget.isPrint &&
-    (widget.currentSelection == null || widget.currentSelection!.isEmpty);
-
     final usePageRasterCacheBg =
     widget.pageRasterCache != null &&
     !widget.isPreview &&
@@ -1393,7 +1388,6 @@ class InnerCanvasState extends State<InnerCanvas> {
 
     final pageRasterRepaint = _pageRasterRepaintListenable;
     final devicePixelRatio = _canvasDevicePixelRatio();
-    final isMoving = PageRasterCacheManager.viewportMoving;
 
     final paintQuadTree = page.strokeSpatialIndex;
 
@@ -2284,24 +2278,6 @@ abstract final class RasterLodTuning {
   }
 }
 
-/// One draw call of the cheap spine fallback: many strokes merged into a
-/// single path, sharing color and width. Built once per content revision and
-/// blitted on every paint until HQ tiles take over, so scrolling a cold page
-/// costs a handful of drawPath calls instead of per-stroke tessellation.
-class _FallbackBatch {
-  _FallbackBatch({
-    required this.color,
-    required this.width,
-    required this.path,
-    required this.fill,
-  });
-
-  final Color color;
-  final double width;
-  final Path path;
-  final bool fill;
-}
-
 class TiledStrokePictureCache {
   static const tileSize = 512.0;
   static const _cullPadding = 128.0;
@@ -2343,6 +2319,7 @@ class TiledStrokePictureCache {
 
   /// Test-only override for [PageRasterCacheManager.viewportSlowMotion].
   static void debugSetViewportSlowMotion(bool value) {
+    // ignore: invalid_use_of_visible_for_testing_member
     PageRasterCacheManager.debugSetViewportSlowMotion(value);
   }
 
@@ -2431,32 +2408,26 @@ class TiledStrokePictureCache {
   final Set<int> _pathOnlyKeys = {};
   final Set<int> _fineInkKeys = {};
   final Set<int> _bakingKeys = {};
-  int _rasterBakeEpoch = 0;
+  var _rasterBakeEpoch = 0;
   final Map<int, _PendingRasterJob> _pendingRasterJobs = {};
   final List<int> _pendingRasterOrder = [];
-  bool _bakeScheduled = false;
+  var _bakeScheduled = false;
   SpatialGrid? _grid;
-  bool _gridDirty = true;
-  int _indexedStrokeCount = -1;
-  int _indexedContentRevision = -1;
-  int _visualSignature = 0;
-  bool _disposed = false;
-  bool _moreTilesScheduled = false;
-  bool _eagerRefillVisibleTiles = false;
+  var _gridDirty = true;
+  var _indexedStrokeCount = -1;
+  var _indexedContentRevision = -1;
+  var _visualSignature = 0;
+  var _disposed = false;
+  var _moreTilesScheduled = false;
+  var _eagerRefillVisibleTiles = false;
   // Union of the dirty rects behind [_eagerRefillVisibleTiles], or null for
   // whole-page scope (full invalidate). Narrows the eager bypass so erase
   // refills only its own block while cold tiles stay blit-only mid-motion.
   Rect? _eagerDirtyRect;
-  bool _visibleTilesCaughtUp = false;
-  int _livePaintedTileCount = 0;
-  int _fallbackPaintedTileCount = 0;
-  int _visibleStrokeCount = RasterLodTuning.mediumStrokeCount;
-
-  /// Cheap spine fallback batches (see [_ensureFallbackBatches]). Merged
-  /// paths over all committed strokes, rebuilt only when the content
-  /// revision or visual signature changes.
-  List<_FallbackBatch>? _fallbackBatches;
-  int _fallbackCacheKey = 0;
+  var _visibleTilesCaughtUp = false;
+  var _livePaintedTileCount = 0;
+  var _fallbackPaintedTileCount = 0;
+  var _visibleStrokeCount = RasterLodTuning.mediumStrokeCount;
 
   /// Bumped when a paint left unrecorded visible tiles so the next frame
   /// can record one more without blocking the current frame.
@@ -2514,8 +2485,6 @@ class TiledStrokePictureCache {
     _bakingKeys.clear();
     _pathOnlyKeys.clear();
     _fineInkKeys.clear();
-    _fallbackBatches = null;
-    _fallbackCacheKey = 0;
     _visibleTilesCaughtUp = false;
     recordGeneration.dispose();
   }
@@ -2535,8 +2504,6 @@ class TiledStrokePictureCache {
     _disposeAllRasters();
     _pathOnlyKeys.clear();
     _fineInkKeys.clear();
-    _fallbackBatches = null;
-    _fallbackCacheKey = 0;
     _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
@@ -2573,10 +2540,6 @@ class TiledStrokePictureCache {
     _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
-    // Fallback batches are page-level; any committed change rebuilds them
-    // lazily on the next paint that needs them.
-    _fallbackBatches = null;
-    _fallbackCacheKey = 0;
   }
 
   void _discardTile(int key) {
@@ -2972,8 +2935,39 @@ final pathOnly = needsMesh;
     }
     if (fallbackRects.isNotEmpty && !forbidRecord) {
       _fallbackPaintedTileCount += fallbackTiles;
-      _ensureFallbackBatches(strokes: strokes, page: page, invert: invert);
-      _paintFallbackBatches(canvas, fallbackRects);
+      
+      canvas.save();
+      if (fallbackRects.length == 1) {
+        canvas.clipRect(fallbackRects.first);
+      } else {
+        final union = Path();
+        for (final r in fallbackRects) {
+          union.addRect(r);
+        }
+        canvas.clipPath(union);
+      }
+
+      CanvasPainter(
+        invert: invert,
+        strokes: strokes,
+        laserStrokes: const [],
+        currentStroke: null,
+        currentSelection: null,
+        primaryColor: primaryColor,
+        page: page,
+        showPageIndicator: false,
+        pageIndex: pageIndex,
+        totalPages: totalPages,
+        currentScale: currentScale,
+        defaultTextStyle: defaultTextStyle,
+        lineHeight: lineHeight,
+        lineThickness: lineThickness?.toDouble(),
+        lineColor: lineColor,
+        doneSelecting: true,
+        preferPathFill: false,
+      ).paint(canvas, size);
+
+      canvas.restore();
     }
     _evictOffscreenRasters(visibleKeys);
     if (missingTiles) {
@@ -3003,147 +2997,6 @@ final pathOnly = needsMesh;
       !debugForceSyncRaster) {
       _scheduleBackgroundBake();
       }
-  }
-
-  /// Builds (once per content revision) the cheap spine fallback batches used
-  /// to cover tiles this frame could not record. Generic ink is merged into a
-  /// few decimated centerline paths per color/width (no outline tessellation,
-  /// no meshes); shapes use their cached outline paths. HQ tiles replace this
-  /// transient layer as recording converges.
-  void _ensureFallbackBatches({
-    required List<Stroke> strokes,
-    required EditorPage page,
-    required bool invert,
-  }) {
-    final key = Object.hash(
-      _visualSignature,
-      page.saveBinaryRevision,
-      strokes.length,
-    );
-    if (_fallbackBatches != null && _fallbackCacheKey == key) return;
-    
-    final batches = <_FallbackBatch>[];
-    
-    Color? curColor;
-    double? curWidth;
-    bool? curFill;
-    Path? curPath;
-
-    void flush() {
-      if (curPath != null && curColor != null && curWidth != null && curFill != null) {
-        batches.add(_FallbackBatch(
-          color: curColor!,
-          width: curWidth!,
-          path: curPath!,
-          fill: curFill!,
-        ));
-      }
-      curPath = null;
-    }
-
-    Path getPathFor(Color color, double width, bool fill) {
-      if (curColor != color || curWidth != width || curFill != fill || curPath == null) {
-        flush();
-        curColor = color;
-        curWidth = width;
-        curFill = fill;
-        curPath = Path();
-        if (fill) curPath!.fillType = PathFillType.nonZero;
-      }
-      return curPath!;
-    }
-
-    for (final s in strokes) {
-      final color = s.color.withInversion(invert);
-      if (s.toolId == ToolId.highlighter) {
-        final pts = s.pointsForEraser;
-        if (pts.length >= 2) {
-          final path = getPathFor(color, s.options.size, false);
-          path.moveTo(pts.first.x, pts.first.y);
-          final stride = pts.length > 24 ? (pts.length / 24).ceil() : 1;
-          for (var i = stride; i < pts.length; i += stride) {
-            path.lineTo(pts[i].x, pts[i].y);
-          }
-          path.lineTo(pts.last.x, pts.last.y);
-        }
-        continue;
-      }
-      if (s is ShapeStroke) {
-        if (s.fill) {
-          final fc = s.fillColor.withInversion(invert);
-          getPathFor(fc, 0, true).addPath(s.shapePath, Offset.zero);
-        }
-        getPathFor(color, s.options.size, false).addPath(s.strokeDrawPath, Offset.zero);
-        continue;
-      }
-      if (s is CircleStroke) {
-        getPathFor(color, s.options.size, false).addOval(
-          Rect.fromCircle(center: s.center, radius: s.radius),
-        );
-        continue;
-      }
-      if (s is RectangleStroke) {
-        getPathFor(color, s.options.size, false).addRect(s.rect);
-        continue;
-      }
-      final pts = s.pointsForEraser;
-      if (pts.isEmpty) continue;
-      final w = s.options.size;
-      final path = getPathFor(color, w, false);
-      if (pts.length == 1) {
-        final r = (w / 2).clamp(0.5, 999.0);
-        path.addOval(
-          Rect.fromCircle(
-            center: Offset(pts.first.x, pts.first.y),
-            radius: r,
-          ),
-        );
-        continue;
-      }
-      // Decimated spine: every stroke stays visible, dense ones cost at most
-      // ~33 segments. Fidelity returns with the HQ tiles.
-      final stride = pts.length > 32 ? (pts.length / 32).ceil() : 1;
-      path.moveTo(pts.first.x, pts.first.y);
-      for (var i = stride; i < pts.length; i += stride) {
-        path.lineTo(pts[i].x, pts[i].y);
-      }
-      path.lineTo(pts.last.x, pts.last.y);
-    }
-    flush();
-
-    _fallbackBatches = batches;
-    _fallbackCacheKey = key;
-  }
-
-  /// Draws the cached fallback batches clipped to the union of [clipRects].
-  /// A handful of drawPath calls no matter how dense the page is.
-  void _paintFallbackBatches(Canvas canvas, List<Rect> clipRects) {
-    final batches = _fallbackBatches;
-    if (batches == null || batches.isEmpty || clipRects.isEmpty) return;
-    canvas.save();
-    if (clipRects.length == 1) {
-      canvas.clipRect(clipRects.first);
-    } else {
-      final union = Path();
-      for (final r in clipRects) {
-        union.addRect(r);
-      }
-      canvas.clipPath(union);
-    }
-    for (final b in batches) {
-      final paint = Paint()
-        ..color = b.color
-        ..style = b.fill ? PaintingStyle.fill : PaintingStyle.stroke
-        ..isAntiAlias = true;
-      if (!b.fill) {
-        paint
-          ..strokeWidth = b.width
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round;
-      }
-      canvas.drawPath(b.path, paint);
-    }
-    canvas.restore();
   }
 
   /// Records the tile Pictures covering [targetRect] without an on-screen
@@ -4058,7 +3911,7 @@ class _LinksCard extends StatelessWidget {
     required this.colorScheme,
   });
 
-  static const _width = 280.0;
+  static const double _width = 280.0;
 
   final EditorCoreInfo coreInfo;
   final int pageIndex;
