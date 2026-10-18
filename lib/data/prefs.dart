@@ -322,6 +322,14 @@ class Stows {
     volatile: !_isOnMainIsolate,
   );
 
+  /// Index into `NotePageFormat.values` (persisted by name-agnostic index, so
+  /// keep `a4` first in the enum). Default: 0 = A4.
+  final defaultNotePageFormatIndex = PlainStow(
+    'defaultNotePageFormat',
+    0,
+    volatile: !_isOnMainIsolate,
+  );
+
   final penSizePresetCount = PlainStow(
     'penSizePresetCount',
     5,

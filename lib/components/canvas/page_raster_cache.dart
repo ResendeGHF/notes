@@ -1264,6 +1264,9 @@ final class PageRasterCacheManager {
   int get debugBgCacheCount => _bgCaches.length;
 
   @visibleForTesting
+  PageCacheEntry? debugBgEntry(int pageIndex) => _bgCaches[pageIndex];
+
+  @visibleForTesting
   bool get debugHasPendingInk => _pendingInk.isNotEmpty;
 
   @visibleForTesting

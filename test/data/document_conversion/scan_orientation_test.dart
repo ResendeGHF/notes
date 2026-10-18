@@ -17,6 +17,7 @@ ScanInkGrid textGrid({
   int cols = 90,
   int lines = 12,
   double leftMargin = 0.12,
+  double barValue = 1,
 }) {
   final values = Float32List(rows * cols);
   final margin = (cols * leftMargin).round();
@@ -29,7 +30,7 @@ ScanInkGrid textGrid({
     final length = margin + ((cols - margin) * (0.95 - 0.5 * i / lines)).round();
     for (var y = y0; y < y0 + bar && y < rows; y++) {
       for (var x = 0; x < length && x < cols; x++) {
-        values[y * cols + x] = 1;
+        values[y * cols + x] = barValue;
       }
     }
   }
@@ -153,6 +154,25 @@ void main() {
       );
     });
 
+    test('faint text still reads when the projection is clean', () {
+      // Light ink on grey-tinged paper: real scans land around 0.1 contrast,
+      // well below a pristine page but far above paper noise.
+      final faint = textGrid(barValue: 0.1);
+      final score = scoreScanOrientationDetailed(faint);
+      expect(score.contrast, greaterThanOrEqualTo(kScanMinContrast));
+      expect(score.contrast, lessThan(0.15));
+      expect(score.orientation, ScanOrientation.upright);
+      expect(score.isInconclusive, isFalse);
+    });
+
+    test('a page below the contrast gate has no verdict', () {
+      final nearlyBlank = textGrid(barValue: 0.02);
+      expect(
+        scoreScanOrientation(nearlyBlank),
+        ScanOrientation.unknown,
+      );
+    });
+
     test('a blank page has no verdict', () {
       final blank = ScanInkGrid(60, 40, Float32List(60 * 40));
       final score = scoreScanOrientationDetailed(blank);
@@ -201,7 +221,7 @@ void main() {
     });
 
     test('swaps dimensions for rotated pages', () {
-      final clockwise = ScanOrientation.rotateClockwise;
+      const clockwise = ScanOrientation.rotateClockwise;
       expect(scanCorrectedIsLandscape(500, 700, clockwise), isTrue);
       expect(scanCorrectedIsLandscape(700, 500, clockwise), isFalse);
       expect(

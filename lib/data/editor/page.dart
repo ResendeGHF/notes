@@ -19,6 +19,7 @@ import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/data/editor/note_layer.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/tools/laser_pointer.dart';
 
 typedef CanvasKey = GlobalKey<State<InnerCanvas>>;
@@ -161,14 +162,13 @@ class _SaveDirtyDelegatingList<E> extends DelegatingList<E> {
 
 enum PageOrientation { portrait, landscape }
 
-extension PageOrientationExtension on PageOrientation {
-  Size get defaultSize => switch (this) {
-    PageOrientation.portrait => EditorPage.defaultSize,
-    PageOrientation.landscape => Size(
-      EditorPage.defaultHeight,
-      EditorPage.defaultWidth,
-    ),
-  };
+extension NotePageFormatOrientationExtension on NotePageFormat {
+  /// Size in page units for [orientation].
+  ///
+  /// Replaces the old fixed `PageOrientation.defaultSize`: new pages follow
+  /// the note's format (`EditorCoreInfo.notePageFormat`).
+  Size sizeForOrientation(PageOrientation orientation) =>
+      sizeFor(landscape: orientation == PageOrientation.landscape);
 }
 
 class HasSize {

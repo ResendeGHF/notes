@@ -214,7 +214,9 @@ class EditorRecoveryJournal {
 
   void _ensurePage(EditorCoreInfo coreInfo, int pageIndex) {
     while (coreInfo.pages.length <= pageIndex) {
-      final size = coreInfo.notePageOrientation.defaultSize;
+      final size = coreInfo.notePageFormat.sizeForOrientation(
+        coreInfo.notePageOrientation,
+      );
       coreInfo.pages.add(EditorPage(width: size.width, height: size.height));
     }
   }

@@ -222,6 +222,7 @@ class StrokeCarveMask {
 
   final List<double> _radii = [];
   final List<Float32List> _xy = [];
+  final List<Float32List> _bounds = [];
 
   bool get isEmpty => _radii.isEmpty;
   int get runCount => _radii.length;
@@ -252,13 +253,12 @@ class StrokeCarveMask {
     for (final run in _xy) {
       copy._xy.add(Float32List.fromList(run));
     }
+    for (final b in _bounds) {
+      copy._bounds.add(Float32List.fromList(b));
+    }
     return copy;
   }
 
-  /// Appends one continuous eraser contact.
-  ///
-  /// A new contact never joins the previous run: that chord is the straight
-  /// "deletion line" between the end of one gesture and the start of the next.
   void addSweep(Offset from, Offset to, double radius) {
     if (radius <= 0 || !from.dx.isFinite || !to.dx.isFinite) return;
     if (_continuesLast(from, radius)) {
@@ -268,6 +268,7 @@ class StrokeCarveMask {
     if ((from - to).distance < 0.4) {
       _radii.add(radius);
       _xy.add(Float32List.fromList([from.dx, from.dy]));
+      _bounds.add(Float32List.fromList([from.dx, from.dy, from.dx, from.dy]));
       return;
     }
     final run = Float32List(4);
@@ -277,9 +278,15 @@ class StrokeCarveMask {
     run[3] = to.dy;
     _radii.add(radius);
     _xy.add(run);
+    
+    final b = Float32List(4);
+    b[0] = math.min(from.dx, to.dx);
+    b[1] = math.min(from.dy, to.dy);
+    b[2] = math.max(from.dx, to.dx);
+    b[3] = math.max(from.dy, to.dy);
+    _bounds.add(b);
   }
 
-  /// True only when [from] is the end of the current run (same contact).
   bool _continuesLast(Offset from, double radius) {
     if (_radii.isEmpty || (_radii.last - radius).abs() > 0.05) return false;
     final run = _xy.last;
@@ -304,6 +311,12 @@ class StrokeCarveMask {
     next[run.length] = p.dx;
     next[run.length + 1] = p.dy;
     _xy[runIndex] = next;
+    
+    final b = _bounds[runIndex];
+    if (p.dx < b[0]) b[0] = p.dx;
+    if (p.dy < b[1]) b[1] = p.dy;
+    if (p.dx > b[2]) b[2] = p.dx;
+    if (p.dy > b[3]) b[3] = p.dy;
   }
 
   void translate(Offset delta) {
@@ -314,19 +327,33 @@ class StrokeCarveMask {
         run[i + 1] += delta.dy;
       }
     }
+    for (final b in _bounds) {
+      b[0] += delta.dx;
+      b[1] += delta.dy;
+      b[2] += delta.dx;
+      b[3] += delta.dy;
+    }
   }
 
   void rotate(double angleRad, Offset center) {
     if (angleRad == 0) return;
     final cos = math.cos(angleRad);
     final sin = math.sin(angleRad);
-    for (final run in _xy) {
+    for (int r = 0; r < _xy.length; r++) {
+      final run = _xy[r];
+      double minX = double.infinity, minY = double.infinity, maxX = double.negativeInfinity, maxY = double.negativeInfinity;
       for (var i = 0; i < run.length; i += 2) {
         final dx = run[i] - center.dx;
         final dy = run[i + 1] - center.dy;
         run[i] = center.dx + dx * cos - dy * sin;
         run[i + 1] = center.dy + dx * sin + dy * cos;
+        if (run[i] < minX) minX = run[i];
+        if (run[i] > maxX) maxX = run[i];
+        if (run[i+1] < minY) minY = run[i+1];
+        if (run[i+1] > maxY) maxY = run[i+1];
       }
+      final b = _bounds[r];
+      b[0] = minX; b[1] = minY; b[2] = maxX; b[3] = maxY;
     }
   }
 
@@ -335,19 +362,34 @@ class StrokeCarveMask {
     for (var r = 0; r < _radii.length; r++) {
       _radii[r] *= factor;
     }
-    for (final run in _xy) {
+    for (int r = 0; r < _xy.length; r++) {
+      final run = _xy[r];
+      double minX = double.infinity, minY = double.infinity, maxX = double.negativeInfinity, maxY = double.negativeInfinity;
       for (var i = 0; i < run.length; i += 2) {
         run[i] = center.dx + (run[i] - center.dx) * factor;
         run[i + 1] = center.dy + (run[i + 1] - center.dy) * factor;
+        if (run[i] < minX) minX = run[i];
+        if (run[i] > maxX) maxX = run[i];
+        if (run[i+1] < minY) minY = run[i+1];
+        if (run[i+1] > maxY) maxY = run[i+1];
       }
+      final b = _bounds[r];
+      b[0] = minX; b[1] = minY; b[2] = maxX; b[3] = maxY;
     }
   }
 
-  /// Squared distance from a page point to the nearest carve sample/segment.
   double distanceSq(double x, double y) {
     var best = double.infinity;
-    for (final run in _xy) {
+    for (int r = 0; r < _xy.length; r++) {
+      final run = _xy[r];
       if (run.length < 2) continue;
+      
+      final b = _bounds[r];
+      final margin = _radii[r];
+      if (x < b[0] - margin || x > b[2] + margin || y < b[1] - margin || y > b[3] + margin) {
+        continue;
+      }
+
       if (run.length == 2) {
         final dx = x - run[0];
         final dy = y - run[1];
@@ -362,7 +404,7 @@ class StrokeCarveMask {
     }
     return best;
   }
-
+  
   static double _distSqToSeg(
     double px,
     double py,
@@ -387,8 +429,6 @@ class StrokeCarveMask {
     return dx * dx + dy * dy;
   }
 
-  /// Clears the bitten pixels. Call inside a saveLayer that already holds
-  /// this stroke's ink so only that ink is removed.
   void punch(Canvas canvas) {
     final clear = Paint()
       ..blendMode = BlendMode.clear
@@ -437,12 +477,21 @@ class StrokeCarveMask {
       final radius = reader.readScaledFloat();
       final n = reader.readIntNoKey().clamp(0, 8000);
       final run = Float32List(n * 2);
+      double minX = double.infinity, minY = double.infinity, maxX = double.negativeInfinity, maxY = double.negativeInfinity;
       for (var k = 0; k < run.length; k++) {
         run[k] = reader.readScaledFloat();
+        if (k % 2 == 0) {
+          if (run[k] < minX) minX = run[k];
+          if (run[k] > maxX) maxX = run[k];
+        } else {
+          if (run[k] < minY) minY = run[k];
+          if (run[k] > maxY) maxY = run[k];
+        }
       }
       if (radius > 0 && n > 0) {
         mask._radii.add(radius);
         mask._xy.add(run);
+        mask._bounds.add(Float32List.fromList([minX, minY, maxX, maxY]));
       }
     }
     return mask;
@@ -470,11 +519,20 @@ class StrokeCarveMask {
       final n = (row.length - 1) ~/ 2;
       if (radius <= 0 || n <= 0) continue;
       final run = Float32List(n * 2);
+      double minX = double.infinity, minY = double.infinity, maxX = double.negativeInfinity, maxY = double.negativeInfinity;
       for (var k = 0; k < run.length; k++) {
         run[k] = (row[k + 1] as num).toDouble();
+        if (k % 2 == 0) {
+          if (run[k] < minX) minX = run[k];
+          if (run[k] > maxX) maxX = run[k];
+        } else {
+          if (run[k] < minY) minY = run[k];
+          if (run[k] > maxY) maxY = run[k];
+        }
       }
       mask._radii.add(radius);
       mask._xy.add(run);
+      mask._bounds.add(Float32List.fromList([minX, minY, maxX, maxY]));
     }
     return mask.isEmpty ? null : mask;
   }
@@ -1442,6 +1500,100 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return false;
   }
 
+  bool isHitByCapsule(Offset from, Offset to, double radius) {
+    if (isEmpty) return false;
+
+    final effectiveRadius = radius + (options.size / 2);
+    final effectiveRadiusSq = effectiveRadius * effectiveRadius;
+
+    final rect = Rect.fromLTRB(
+      math.min(from.dx, to.dx) - effectiveRadius,
+      math.min(from.dy, to.dy) - effectiveRadius,
+      math.max(from.dx, to.dx) + effectiveRadius,
+      math.max(from.dy, to.dy) + effectiveRadius,
+    );
+
+    if (!bounds.overlaps(rect)) return false;
+
+    final points = this.points;
+    final int len = points.length;
+    if (len < 2) {
+      if (len == 1) {
+        final p = points.first;
+        return _distToSegmentSq(Offset(p.x, p.y), from, to) <= effectiveRadiusSq;
+      }
+      return false;
+    }
+
+    final eraserLeft = rect.left;
+    final eraserRight = rect.right;
+    final eraserTop = rect.top;
+    final eraserBottom = rect.bottom;
+
+    for (int i = 0; i < len - 1; i++) {
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      
+      final minX = p1.x < p2.x ? p1.x : p2.x;
+      final maxX = p1.x > p2.x ? p1.x : p2.x;
+      if (minX > eraserRight || maxX < eraserLeft) continue;
+      
+      final minY = p1.y < p2.y ? p1.y : p2.y;
+      final maxY = p1.y > p2.y ? p1.y : p2.y;
+      if (minY > eraserBottom || maxY < eraserTop) continue;
+
+      if (_segmentIntersectsCapsuleSq(Offset(p1.x, p1.y), Offset(p2.x, p2.y), from, to) <= effectiveRadiusSq) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static double _segmentIntersectsCapsuleSq(Offset a, Offset b, Offset c, Offset d) {
+    final ux = b.dx - a.dx;
+    final uy = b.dy - a.dy;
+    final vx = d.dx - c.dx;
+    final vy = d.dy - c.dy;
+    final wx = a.dx - c.dx;
+    final wy = a.dy - c.dy;
+
+    final a00 = ux * ux + uy * uy;
+    final a01 = -(ux * vx + uy * vy);
+    final a11 = vx * vx + vy * vy;
+    final b0 = ux * wx + uy * wy;
+    final b1 = -(vx * wx + vy * wy);
+
+    final det = a00 * a11 - a01 * a01;
+    double s = 0.0, t = 0.0;
+
+    if (det > 1e-6) {
+      s = (a01 * b1 - a11 * b0) / det;
+      t = (a01 * b0 - a00 * b1) / det;
+    } else {
+      s = 0.0;
+      t = (a01 > 0 ? -b0 / a01 : 0.0);
+    }
+
+    if (s < 0.0) s = 0.0; else if (s > 1.0) s = 1.0;
+    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+
+    double bestDistSq = double.infinity;
+    if (s > 0.0 && s < 1.0 && t > 0.0 && t < 1.0) {
+      final px = a.dx + ux * s;
+      final py = a.dy + uy * s;
+      final qx = c.dx + vx * t;
+      final qy = c.dy + vy * t;
+      return (px - qx) * (px - qx) + (py - qy) * (py - qy);
+    }
+
+    bestDistSq = math.min(bestDistSq, _distToSegmentSq(a, c, d));
+    bestDistSq = math.min(bestDistSq, _distToSegmentSq(b, c, d));
+    bestDistSq = math.min(bestDistSq, _distToSegmentSq(c, a, b));
+    bestDistSq = math.min(bestDistSq, _distToSegmentSq(d, a, b));
+
+    return bestDistSq;
+  }
+
   static double _distToSegmentSq(Offset p, Offset v, Offset w) {
     final dx = w.dx - v.dx;
     final dy = w.dy - v.dy;
@@ -2091,40 +2243,155 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       toolId == ToolId.advancedPen ||
       toolId == ToolId.pencil;
 
-  void addPoint(Offset point, [double? pressure, Duration? timestamp]) {
-    // Advanced pen with the modeled builder runs its own smoothing pipeline
-    // (wobble + spring-mass + upsampling, ported from
-    // ink-stroke-modeler-rs). Saber's 1€ stabilization and Kalman tip
-    // prediction stay off so the two smoothers never fight.
-    if (toolId == ToolId.advancedPen &&
-        brushOptions.builderType == AdvancedPenBuilderType.modeled) {
-      _addBrushModeledPoint(point, pressure, timestamp);
-      return;
+  /// Aplica a física de superfície, inércia de cerdas e sangramento em O(1)
+  /// por amostra de entrada, garantindo que o preview em tempo real (Mesh)
+  /// e o traço finalizado (Polygon Outline) recebam os exatos mesmos dados.
+  (Offset, double) _stepAdvancedInputPhysics(
+    Offset pt,
+    double rawPressure,
+    double eventTimeSec,
+  ) {
+    final dt = _lastPhysicsTimeSec == null
+        ? (1.0 / 120.0)
+        : (eventTimeSec - _lastPhysicsTimeSec!).clamp(0.001, 0.25);
+    _lastPhysicsTimeSec = eventTimeSec;
+
+    final dist = _lastPhysicsPoint == null
+        ? 0.0
+        : (pt - _lastPhysicsPoint!).distance;
+    _lastPhysicsPoint = pt;
+    _physicsTravelDist += dist;
+
+    // Velocidade instantânea suavizada por EMA (px/segundo)
+    final instSpeed = dist / dt;
+    _smoothedSpeedPxPerSec = _smoothedSpeedPxPerSec * 0.65 + instSpeed * 0.35;
+
+    // 1. Bristle Stiffness (Inércia de Pressão: assimétrica como cerdas reais —
+    // responde rápido ao pressionar, mas resiste/demora a voltar quando solta)
+    double p = rawPressure.clamp(0.0, 1.0);
+    if (brushOptions.pressureInertia > 0.0) {
+      final prevP = _lastInertPressure ?? p;
+      final isReleasing = p < prevP;
+      final inertia = isReleasing
+          ? brushOptions.pressureInertia
+          : brushOptions.pressureInertia * 0.45;
+      // Constante de tempo tau até ~180ms em rigidez máxima
+      final tau = 0.005 + inertia * 0.175;
+      final alpha = dt / (tau + dt);
+      p = prevP + (p - prevP) * alpha;
+      _lastInertPressure = p;
+    } else {
+      _lastInertPressure = p;
     }
-    // Truth anchor for the live tip connector (see [_liveRawTipPoint]):
-    // recorded pre-stabilization so deceleration/stop lag stays visible even
-    // though committed samples trail the filter. Guarded by event clock (see
-    // [noteRawLiveTip]) so arena focal points never regress fresher raw.
+
+    // 2. Ink Pooling (Sangramento por Repouso baseado em tempo real dt):
+    // Quando a velocidade cai abaixo de ~90 px/s e há pressão, a poça acumula
+    // continuamente no tempo. Quando volta a mover, escoa suavemente.
+    if (brushOptions.inkPooling > 0.0) {
+      const restThresholdPxPerSec = 95.0;
+      final restFactor =
+          (1.0 - (_smoothedSpeedPxPerSec / restThresholdPxPerSec)).clamp(0.0, 1.0);
+      if (restFactor > 0.0 && p > 0.02) {
+        final bleedRate =
+            brushOptions.inkPooling * restFactor * restFactor * (0.4 + 0.6 * p);
+        _inkPoolAccum = (_inkPoolAccum + bleedRate * dt * 2.2)
+            .clamp(0.0, brushOptions.inkPooling * 1.35);
+      } else {
+        // Escoamento exponencial suave ao retomar movimento (sem degraus <-<-<)
+        final drain = math.exp(-dt * (6.0 + _smoothedSpeedPxPerSec * 0.04));
+        _inkPoolAccum *= drain;
+      }
+      p = (p + _inkPoolAccum).clamp(0.0, 2.5);
+    }
+
+    // 3. Surface Friction (Speed Jitter): vibração transversal de alta frequência
+    // proporcional à velocidade, simulando a textura áspera do papel.
+    Offset outPt = pt;
+    if (brushOptions.surfaceFriction > 0.0 && dist > 0.05) {
+      final speedFactor = (_smoothedSpeedPxPerSec / 550.0).clamp(0.0, 1.25);
+      // Hash trigonométrico de alta frequência sobre a distância acumulada
+      final phase = _physicsTravelDist * 2.3;
+      final hfNoise =
+          math.sin(phase) * 0.65 + math.cos(phase * 2.71828 + 1.3) * 0.35;
+      final amp =
+          brushOptions.surfaceFriction * speedFactor * options.size * 0.28;
+      // Aplica o jitter perpendicularmente à direção do movimento
+      final invDist = 1.0 / dist;
+      final last = points.isNotEmpty
+          ? Offset(points.last.x, points.last.y)
+          : pt;
+      final moveDelta = pt - last;
+      final moveLen = moveDelta.distance;
+      final nx = moveLen > 1e-4 ? -moveDelta.dy / moveLen : -invDist;
+      final ny = moveLen > 1e-4 ? moveDelta.dx / moveLen : invDist;
+      outPt = Offset(pt.dx + nx * hfNoise * amp, pt.dy + ny * hfNoise * amp);
+    }
+
+    return (outPt, p);
+  }
+
+  void addPoint(Offset point, [double? pressure, Duration? timestamp]) {
+    final double eventTimeSec = timestamp != null
+        ? timestamp.inMicroseconds / 1e6
+        : (_drawSampleTimeSec ?? 0.0) + 1.0 / 60.0;
+
+    Offset effectivePoint = point;
+
+    if (toolId == ToolId.advancedPen && brushOptions.ropePull > 0.0) {
+      if (_ropeAnchor == null) {
+        _ropeAnchor = effectivePoint;
+      } else {
+        final dist = (effectivePoint - _ropeAnchor!).distance;
+        if (dist > brushOptions.ropePull) {
+          final dir = (effectivePoint - _ropeAnchor!) / dist;
+          _ropeAnchor = effectivePoint - dir * brushOptions.ropePull;
+        } else if (points.isNotEmpty && brushOptions.inkPooling <= 0.0) {
+          // Mantém a ponta ancorada enquanto o cursor está dentro do raio morto.
+          if (!options.isComplete) {
+            noteRawLiveTip(
+              _ropeAnchor!,
+              _lastInertPressure ?? (pressureEnabled ? pressure : null),
+              timestamp,
+            );
+          }
+          return;
+        }
+      }
+      effectivePoint = _ropeAnchor!;
+    }
+
+    double p = pressureEnabled ? (pressure ?? 0.5) : 0.5;
+    if (toolId == ToolId.advancedPen) {
+      final stepped = _stepAdvancedInputPhysics(effectivePoint, p, eventTimeSec);
+      effectivePoint = stepped.$1;
+      p = stepped.$2;
+    }
+
     if (!options.isComplete) {
       noteRawLiveTip(
-        point,
-        pressureEnabled ? pressure : null,
+        effectivePoint,
+        pressureEnabled ? p : null,
         timestamp,
       );
     }
+
+    // Advanced pen with the modeled builder runs its own smoothing pipeline
+    if (toolId == ToolId.advancedPen &&
+        brushOptions.builderType == AdvancedPenBuilderType.modeled) {
+      _addBrushModeledPoint(effectivePoint, p, timestamp, eventTimeSec);
+      return;
+    }
+
     if (!pressureEnabled) {
       pressure = null;
-    } else if (pressure != null) {
+    } else {
+      pressure = p;
       options.simulatePressure = false;
     }
 
     final Offset samplePoint = _allowsStrokeStabilizationAndPrediction
-        ? _applyStabilization(point, timestamp)
-        : point;
-
-    final double eventTimeSec = timestamp != null
-        ? timestamp.inMicroseconds / 1e6
-        : (_drawSampleTimeSec ?? 0.0) + 1.0 / 60.0;
+        ? _applyStabilization(effectivePoint, timestamp)
+        : effectivePoint;
 
     if (toolId == ToolId.highlighter && Highlighter.straightLine.value) {
       if (points.isEmpty) {
@@ -2162,34 +2429,44 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   void _addBrushModeledPoint(
     Offset point,
     double? pressure,
-    Duration? timestamp,
-  ) {
-    // Truth anchor for the live tip connector (unused by the modeled brush
-    // itself, which predicts via its own buffer, but kept fresh so curved
-    // builders behave like other pens).
-    if (!options.isComplete) {
-      noteRawLiveTip(
-        point,
-        pressureEnabled ? pressure : null,
-        timestamp,
-      );
-    }
-    final double p = pressureEnabled ? (pressure ?? 0.5).clamp(0.0, 1.0) : 0.5;
-    final double nowSec = timestamp != null
-        ? timestamp.inMicroseconds / 1e6
-        : (_brushLastTimeSec ?? 0.0) + 1.0 / 60.0;
+    Duration? timestamp, [
+    double? precomputedNowSec,
+  ]) {
+    final double effectiveP = pressureEnabled ? (pressure ?? 0.5) : 0.5;
+    final double modelerP = effectiveP.clamp(0.0, 1.0);
+    // Sobrepressão de Ink Pooling (> 1.0) preservada para engordar a poça
+    final double poolBoost = math.max(0.0, effectiveP - modelerP);
+
+    final double nowSec = precomputedNowSec ??
+        (timestamp != null
+            ? timestamp.inMicroseconds / 1e6
+            : (_brushLastTimeSec ?? 0.0) + 1.0 / 60.0);
     _brushStartTimeSec ??= nowSec;
     final double t = math.max(0.0, nowSec - _brushStartTimeSec!);
 
     _brushModeler ??= AdvancedPenStrokeModeler(brushOptions.modeler);
     final modeler = _brushModeler!;
-    // Remember the raw sample for the Up event (committed stroke must end
-    // at the lift position).
     _brushRawX = point.dx;
     _brushRawY = point.dy;
-    _brushRawP = p;
+    _brushRawP = effectiveP;
     _brushRawT = t;
     _brushHasRaw = true;
+
+    // Se o usuário está segurando a caneta parada com Ink Pooling ativo,
+    // atualiza a pressão dos pontos finais de repouso in-place para a poça crescer suavemente!
+    if (_inkPoolAccum > 0.01 && points.isNotEmpty) {
+      final last = points.last;
+      final dSq = (point.dx - last.x) * (point.dx - last.x) +
+          (point.dy - last.y) * (point.dy - last.y);
+      if (dSq < 4.0) {
+        points[points.length - 1] = PointVector(
+          last.x,
+          last.y,
+          math.max(last.pressure ?? 0.5, effectiveP),
+        );
+      }
+    }
+
     try {
       final List<AdvancedPenModelerResult> results;
       if (!_brushHasOpenStroke) {
@@ -2199,14 +2476,11 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             x: point.dx,
             y: point.dy,
             time: t,
-            pressure: p,
+            pressure: modelerP,
           ),
         );
         _brushHasOpenStroke = true;
       } else {
-        // Guard against duplicate / rewound timestamps (can happen when
-        // the platform replays the down event): nudge forward instead of
-        // throwing and dropping ink.
         var tt = t;
         if (tt <= (_brushLastTimeSec ?? -1.0)) {
           tt = _brushLastTimeSec! + 1e-4;
@@ -2217,13 +2491,35 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             x: point.dx,
             y: point.dy,
             time: tt,
-            pressure: p,
+            pressure: modelerP,
           ),
         );
       }
       _brushLastTimeSec = t;
       for (final r in results) {
-        points.add(PointVector(r.x, r.y, r.pressure.clamp(0.0, 1.0)));
+        double rx = r.x;
+        double ry = r.y;
+        // Aplica Surface Friction (Speed Jitter) também nas amostras geradas pelo modeler
+        if (brushOptions.surfaceFriction > 0.0 && points.isNotEmpty) {
+          final prev = points.last;
+          final sdx = rx - prev.x;
+          final sdy = ry - prev.y;
+          final sLen = math.sqrt(sdx * sdx + sdy * sdy);
+          if (sLen > 0.05) {
+            final speedFactor = (_smoothedSpeedPxPerSec / 550.0).clamp(0.0, 1.25);
+            final phase = (rx * 0.73 + ry * 1.17) * 1.9;
+            final hf = math.sin(phase) * 0.65 + math.cos(phase * 2.3) * 0.35;
+            final amp =
+                brushOptions.surfaceFriction * speedFactor * options.size * 0.25;
+            rx += (-sdy / sLen) * hf * amp;
+            ry += (sdx / sLen) * hf * amp;
+          }
+        }
+        // Usa effectiveP (que já tem Bristle Stiffness + Ink Pooling)
+        final outP = brushOptions.pressureInertia > 0.0 || poolBoost > 0.0
+            ? effectiveP
+            : (r.pressure.clamp(0.0, 1.0) + poolBoost);
+        points.add(PointVector(rx, ry, outP));
       }
       _drawSampleTimeSec = nowSec;
       _packedPoints = null;
@@ -2232,8 +2528,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       _enforceSampleBudget();
       _extendLiveStaging();
     } catch (_) {
-      // Modeler rejected the sample (e.g. a huge time gap after resume):
-      // restart the modeler at this sample and keep the raw point.
       _brushModeler = AdvancedPenStrokeModeler(brushOptions.modeler);
       _brushStartTimeSec = nowSec;
       _brushLastTimeSec = 0.0;
@@ -2245,15 +2539,15 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             x: point.dx,
             y: point.dy,
             time: 0.0,
-            pressure: p,
+            pressure: modelerP,
           ),
         );
         _brushHasOpenStroke = true;
         for (final r in results) {
-          points.add(PointVector(r.x, r.y, r.pressure.clamp(0.0, 1.0)));
+          points.add(PointVector(r.x, r.y, effectiveP));
         }
       } catch (_) {
-        points.add(PointVector(point.dx, point.dy, p));
+        points.add(PointVector(point.dx, point.dy, effectiveP));
       }
       _drawSampleTimeSec = nowSec;
       _packedPoints = null;
@@ -2335,9 +2629,18 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     try {
       final results = modeler.predict();
       if (results.isEmpty) return const [];
+      final inertP = _lastInertPressure;
+      final useInert = inertP != null &&
+          (brushOptions.pressureInertia > 0.0 || _inkPoolAccum > 0.0);
       return [
         for (final r in results)
-          PointVector(r.x, r.y, r.pressure.clamp(0.0, 1.0)),
+          PointVector(
+            r.x,
+            r.y,
+            useInert
+                ? (inertP + _inkPoolAccum).clamp(0.0, 2.5)
+                : r.pressure.clamp(0.0, 1.0),
+          ),
       ];
     } catch (_) {
       return const [];
@@ -2378,16 +2681,21 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final last = points.last;
     final dx = samplePoint.dx - last.x;
     final dy = samplePoint.dy - last.y;
-    if (dx * dx + dy * dy >=
-        kLiveMinSampleDistPx * kLiveMinSampleDistPx) {
-      return false;
-    }
     final double lastPressure = last.pressure ?? 0.5;
     final double newPressure = pressure ?? lastPressure;
-    if ((newPressure - lastPressure).abs() >= kLiveMinPressureDelta) {
-      return false;
+    // Se a caneta está parada mas o Ink Pooling está expandindo a poça,
+    // atualiza a pressão do último ponto in-place sem criar vértices duplicados!
+    if (dx * dx + dy * dy < kLiveMinSampleDistPx * kLiveMinSampleDistPx) {
+      if (toolId == ToolId.advancedPen &&
+          brushOptions.inkPooling > 0.0 &&
+          newPressure > lastPressure + 0.005) {
+        points[points.length - 1] = PointVector(last.x, last.y, newPressure);
+        _packedPoints = null;
+        _markLiveTailAppended();
+      }
+      return (newPressure - lastPressure).abs() < kLiveMinPressureDelta;
     }
-    return true;
+    return false;
   }
 
   /// Enforces [kMaxStrokeSamples]: thins intermediate samples with a tight
@@ -2519,13 +2827,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   int get _liveStageMinFreeze => kLiveStageMinFreeze;
   int get _liveStageTailOverrun => kLiveStageTailOverrun;
 
-  /// Overlap (in raw points) between adjacent Advanced live chunks. Only for
-  /// opaque ink (alpha 1): translucent overdraw would double-darken the band.
-  /// Mesh-family/highlighter/pencil chunks keep exact adjacency (meshes share
-  /// exact edges; highlighter blending is not idempotent).
+  /// Overlap (in raw points) between adjacent live chunks. Only for opaque
+  /// ink (alpha 255): translucent overdraw would double-darken the band.
+  /// Extends the mesh and path boundaries so consecutive chunks physically
+  /// overlap, sealing the hairline cracks caused by GPU antialiasing.
   static const int _liveStageOverlap = 8;
 
-  bool get _liveStageOverlaps => false;
+  bool get _liveStageOverlaps {
+    if (toolId == ToolId.highlighter) return false;
+    return color.alpha == 255 && paint.isSolid;
+  }
 
   /// Freeze another prefix chunk once the tail outgrows its window.
   void _extendLiveStaging() {
@@ -2631,7 +2942,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     Rect? bounds;
 
     double chunkDashOffset = 0.0;
-    if (toolId == ToolId.advancedPen && (brushOptions.dashLength > 0 || brushOptions.dashGap > 0)) {
+    if (toolId == ToolId.advancedPen) {
        for (int i = 1; i <= start; i++) {
            double dx = points[i].x - points[i-1].x;
            double dy = points[i].y - points[i-1].y;
@@ -2641,7 +2952,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     if (isMeshFamily || isPencil || isNeon) {
       final arrays = _buildMeshRange(
-        sub,
+        geoSub, // Usa a array com a sobreposição de segurança (overlap)
         openStart: !startIsTrue,
         openEnd: !isTip,
         withPrediction: isTip,
@@ -3183,6 +3494,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return _filteredPoint!;
   }
 
+  Offset? _ropeAnchor;
+  double? _lastInertPressure;
+  double? _lastPhysicsTimeSec;
+  Offset? _lastPhysicsPoint;
+  double _smoothedSpeedPxPerSec = 0.0;
+  double _inkPoolAccum = 0.0;
+  double _physicsTravelDist = 0.0;
+
   void resetStabilization() {
     _filteredPoint = null;
     _filteredVelocity = null;
@@ -3199,6 +3518,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _brushLastTimeSec = null;
     _brushHasOpenStroke = false;
     _brushHasRaw = false;
+    _ropeAnchor = null;
+    _lastInertPressure = null;
+    _lastPhysicsTimeSec = null;
+    _lastPhysicsPoint = null;
+    _smoothedSpeedPxPerSec = 0.0;
+    _inkPoolAccum = 0.0;
+    _physicsTravelDist = 0.0;
   }
 
   void clearLivePrediction() {
@@ -5228,34 +5554,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     required bool pressureMapsToCoverage,
     required bool pressureEnabled,
     required double targetScale,
-    // Open ribbon ends for staged chunks: no cap hemispheres, no endpoint
-    // pressure stabilization at open ends. Interior chunk ends stay butt-cut
-    // so consecutive chunks join invisibly; tapers are controlled separately
-    // via [startTaper]/[endTaper] (pass false for interior).
     bool openStart = false,
     bool openEnd = false,
     AdvancedPenOptions? brushOptions,
     double pathLengthOffset = 0.0,
   }) {
     final double scale = targetScale;
-    // Mild overview LOD for hemisphere tessellation only — writing zoom unchanged.
     final int targetCapSegments = scale < 0.35
         ? math.max(4, (_capSegments * 0.6).round())
         : _capSegments;
 
-    double toleranceMultiplier = 1.0;
-
-    // Same spine simplification live and committed — divergent tolerances popped
-    // the mesh (especially caps / tips) between preview and finalized ink.
-    // Optimize tolerance during live drawing to reduce mesh complexity
-    final double effectiveTolerance = toleranceMultiplier;
+    const double toleranceMultiplier = 1.0;
+    const double effectiveTolerance = toleranceMultiplier;
     final double splineErrorSq =
         (0.22 * effectiveTolerance / scale) *
         (0.22 * effectiveTolerance / scale);
 
-    // Packed samples stay prediction-free so commit can rebuild without a
-    // phantom tail. Live cheap-pen mesh appends the tip so the cap tracks
-    // the stylus (path tools already did this in getPolygon).
     Float32List packed = packedBase;
     final bool liveCheapSpineMesh =
         !isComplete &&
@@ -5271,7 +5585,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       packed.setAll(src.length, predictedTail);
     }
 
-    Float32List rawSmooth = _getAdaptiveSpineFast(
+    final Float32List rawSmooth = _getAdaptiveSpineFast(
       packed,
       splineErrorSq,
       flattenTipSegments: false,
@@ -5283,8 +5597,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (rawCount < 2) return null;
 
     final bool isHighlighter = toolId == ToolId.highlighter;
-    // Pencil reuses the exact same constant-width rounded-cap geometry as
-    // Ballpoint Pen (while modulating vertex alpha via [useCoverage]).
     final bool isBallpoint =
         toolId == ToolId.ballpointPen || toolId == ToolId.pencil;
     final bool isCalligraphy = toolId == ToolId.calligraphyPen;
@@ -5309,9 +5621,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final double dx = x - lastX, dy = y - lastY;
       final double d2 = dx * dx + dy * dy;
       if (i == rawCount - 1) {
-        // If the penultimate point is closer than minTipDist to the final tip
-        // (e.g. a sub-pixel lift-off sample), overwrite it with the true tip so
-        // the closing segment never twists the end cap.
         if (d2 < minTipDistSq && dedupe._count >= 6) {
           dedupe._buffer[dedupe._count - 3] = x;
           dedupe._buffer[dedupe._count - 2] = y;
@@ -5328,10 +5637,6 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     Float32List smoothPoints = dedupe.finish();
     int count = smoothPoints.length ~/ 3;
 
-    // Bound tessellation input: files may hold pre-existing huge strokes and
-    // the spline upsampler multiplies samples. Stride-sample (endpoints kept
-    // so caps stay put) so vertex/index buffers — and the Uint16 index range
-    // below — stay bounded no matter the input.
     if (count > kMaxMeshSpinePoints) {
       final int stride = (count / kMaxMeshSpinePoints).ceil();
       final kept = _Float32Builder(estimatedSize: kMaxMeshSpinePoints * 3 + 3);
@@ -5357,29 +5662,42 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final bool canTaper = !isCalligraphy && !isBallpoint;
     final bool highlighterWantsCaps = isHighlighter && !flatEdge;
 
-    double advVelThinning = isAdvanced && brushOptions != null ? brushOptions.velocityThinning : 0.0;
-    double advTipAngle = isAdvanced && brushOptions != null ? brushOptions.tipAngle : 0.0;
-    double advTipRatio = isAdvanced && brushOptions != null ? brushOptions.tipRatio : 1.0;
-    bool advUseTilt = isAdvanced && brushOptions != null ? brushOptions.useTilt : false;
-    double advDashLength = isAdvanced && brushOptions != null ? brushOptions.dashLength : 0.0;
-    double advDashGap = isAdvanced && brushOptions != null ? brushOptions.dashGap : 0.0;
+    final double advVelThinning =
+        isAdvanced && brushOptions != null ? brushOptions.velocityThinning : 0.0;
+    final double advTipAngle =
+        isAdvanced && brushOptions != null ? brushOptions.tipAngle : 0.0;
+    final double advTipRatio =
+        isAdvanced && brushOptions != null ? brushOptions.tipRatio : 1.0;
+    final bool advUseTilt =
+        isAdvanced && brushOptions != null ? brushOptions.useTilt : false;
+    final double advDashLength =
+        isAdvanced && brushOptions != null ? brushOptions.dashLength : 0.0;
+    final double advDashGap =
+        isAdvanced && brushOptions != null ? brushOptions.dashGap : 0.0;
+    final double advAngleLag =
+        isAdvanced && brushOptions != null ? brushOptions.angleLag : 0.0;
+    final double advInkPooling =
+        isAdvanced && brushOptions != null ? brushOptions.inkPooling : 0.0;
+    final double advSurfaceFriction =
+        isAdvanced && brushOptions != null ? brushOptions.surfaceFriction : 0.0;
 
-    final bool hasEllipticalTip = isCalligraphy || (isAdvanced && advTipRatio < 1.0);
+    final bool hasEllipticalTip =
+        isCalligraphy || (isAdvanced && advTipRatio < 1.0);
 
     final bool advancedWantsRounded = isAdvanced &&
         brushOptions != null &&
         brushOptions.lineCap == AdvancedPenLineCap.rounded;
 
-    /// Round mesh caps: ballpoint & pencil always; fountain when [cap] is on.
-    final bool roundCapOverridesTaper = isFountain || isBallpoint || advancedWantsRounded;
+    final bool roundCapOverridesTaper =
+        isFountain || isBallpoint || advancedWantsRounded;
 
-    var generateStartCap =
+    final bool generateStartCap =
         !openStart &&
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : isAdvanced 
-                ? advancedWantsRounded 
+            : isAdvanced
+                ? advancedWantsRounded
                 : (startCap || isBallpoint || isCalligraphy || isFountain)) &&
         (!startTaper || !canTaper || roundCapOverridesTaper);
 
@@ -5388,17 +5706,13 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         targetCapSegments > 0 &&
         (isHighlighter
             ? highlighterWantsCaps
-            : isAdvanced 
-                ? advancedWantsRounded 
+            : isAdvanced
+                ? advancedWantsRounded
                 : (endCap || isBallpoint || isCalligraphy || isFountain)) &&
         (!endTaper || !canTaper || roundCapOverridesTaper);
 
     final bool useCoverage = toolId == ToolId.pencil && pressureMapsToCoverage;
 
-    // Spine points emit ~1 pair each; cap hemispheres and miter
-    // subdivisions draw from this same budget (joints are clamped below), so
-    // pathological input degrades a joint instead of overrunning the buffers.
-    // Sized so emitted vertices always fit Uint16 indices (< 65535).
     final int maxPairs = count * 2 + targetCapSegments * 8 + 64;
     final Float32List positions = Float32List(maxPairs * 4);
     final Uint16List indices = Uint16List(maxPairs * 6);
@@ -5406,53 +5720,91 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     int vIndex = 0, iIndex = 0, pairCount = 0;
 
-    (double, double) transformTip(double dx, double dy, double tx, double ty) {
+    final Float32List smoothedAngles = Float32List(count);
+    double currentAngle = advTipAngle;
+    if (isAdvanced && advUseTilt && count > 0) {
+      for (int i = 0; i < count; i++) {
+        double tdx = 0, tdy = 0;
+        if (i < count - 1) {
+          tdx = smoothPoints[i * 3 + 3] - smoothPoints[i * 3];
+          tdy = smoothPoints[i * 3 + 4] - smoothPoints[i * 3 + 1];
+        } else if (i > 0) {
+          tdx = smoothPoints[i * 3] - smoothPoints[i * 3 - 3];
+          tdy = smoothPoints[i * 3 + 1] - smoothPoints[i * 3 - 2];
+        }
+        double targetAngle = currentAngle;
+        if (tdx * tdx + tdy * tdy > 1e-6) {
+          targetAngle = math.atan2(tdy, tdx);
+        }
+        if (i == 0) currentAngle = targetAngle;
+
+        if (advAngleLag > 0.0) {
+          double diff = targetAngle - currentAngle;
+          while (diff > math.pi) diff -= 2 * math.pi;
+          while (diff < -math.pi) diff += 2 * math.pi;
+          final double lerpFactor = (1.0 - advAngleLag * 0.9).clamp(0.01, 1.0);
+          currentAngle += diff * lerpFactor;
+        } else {
+          currentAngle = targetAngle;
+        }
+        smoothedAngles[i] = currentAngle;
+      }
+    } else {
+      for (int i = 0; i < count; i++) {
+        smoothedAngles[i] = advTipAngle;
+      }
+    }
+
+    (double, double) transformTip(double dx, double dy, double angle) {
       if (!hasEllipticalTip) return (dx, dy);
-      double rxNorm = 1.0;
-      double ryNorm = 1.0;
-      double cosA = 1.0;
-      double sinA = 0.0;
+      double rxNorm = 1.0, ryNorm = 1.0, cosA = 1.0, sinA = 0.0;
 
       if (isCalligraphy) {
-        rxNorm = 1.1; ryNorm = 0.5;
+        rxNorm = 1.1;
+        ryNorm = 0.5;
         cosA = math.cos(-40 * math.pi / 180);
         sinA = math.sin(-40 * math.pi / 180);
       } else {
-        rxNorm = 1.0; ryNorm = advTipRatio.clamp(0.01, 1.0);
-        if (advUseTilt) {
-          double tLen = math.sqrt(tx * tx + ty * ty);
-          if (tLen > 1e-6) {
-            cosA = tx / tLen;
-            sinA = ty / tLen;
-          }
-        } else {
-          cosA = math.cos(advTipAngle);
-          sinA = math.sin(advTipAngle);
-        }
+        rxNorm = 1.0;
+        ryNorm = advTipRatio.clamp(0.01, 1.0);
+        cosA = math.cos(angle);
+        sinA = math.sin(angle);
       }
 
-      double len = math.sqrt(dx * dx + dy * dy);
+      final double len = math.sqrt(dx * dx + dy * dy);
       if (len < 0.0001) return (0.0, 0.0);
-      double dirX = dx / len, dirY = dy / len;
-      double localNx = dirX * cosA + dirY * sinA;
-      double localNy = -dirX * sinA + dirY * cosA;
-      double scl = 1.0 / math.sqrt(rxNorm * rxNorm * localNx * localNx + ryNorm * ryNorm * localNy * localNy);
-      double localVx = rxNorm * rxNorm * localNx * scl;
-      double localVy = ryNorm * ryNorm * localNy * scl;
+      final double dirX = dx / len, dirY = dy / len;
+      final double localNx = dirX * cosA + dirY * sinA;
+      final double localNy = -dirX * sinA + dirY * cosA;
+      final double scl = 1.0 /
+          math.sqrt(
+            rxNorm * rxNorm * localNx * localNx +
+                ryNorm * ryNorm * localNy * localNy,
+          );
+      final double localVx = rxNorm * rxNorm * localNx * scl;
+      final double localVy = ryNorm * ryNorm * localNy * scl;
       return (
         (localVx * cosA - localVy * sinA) * len,
-        (localVx * sinA + localVy * cosA) * len
+        (localVx * sinA + localVy * cosA) * len,
       );
     }
 
-    List<bool> pairActive = List.filled(maxPairs, true);
+    final List<bool> pairActive = List.filled(maxPairs, true);
     bool inDash = true;
 
-    void addVertexPair(double px, double py, double nx, double ny, double tx, double ty, double w, double pressure) {
+    void addVertexPair(
+      double px,
+      double py,
+      double nx,
+      double ny,
+      double w,
+      double pressure,
+      double angle,
+    ) {
       if (pairCount >= maxPairs) return;
       double vx = nx, vy = ny;
       if (hasEllipticalTip) {
-        final t = transformTip(nx, ny, tx, ty);
+        final t = transformTip(nx, ny, angle);
         vx = t.$1;
         vy = t.$2;
       }
@@ -5463,10 +5815,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       positions[vIndex++] = py + vy * w;
       positions[vIndex++] = px - vx * w;
       positions[vIndex++] = py - vy * w;
-      
+
       if (useCoverage) {
-        // Transição linear com piso base (0.25) para não perder os detalhes
-        // texturizados do shader/ruído em pinceladas muito leves.
         final double cov = 0.25 + 0.75 * pressure.clamp(0.0, 1.0);
         final int alpha = (cov * 255).clamp(0, 255).toInt();
         final int c = (alpha << 24) | 0x00FFFFFF;
@@ -5482,54 +5832,53 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         toolId != ToolId.ballpointPen &&
         toolId != ToolId.highlighter;
 
-    Float32List smoothedSpeeds = Float32List(count);
-    if (advVelThinning != 0.0) {
-       final rawSpeeds = Float32List(packed.length ~/ 3);
-       for (int i = 1; i < rawSpeeds.length; i++) {
-           double dx = packed[i*3] - packed[i*3-3];
-           double dy = packed[i*3+1] - packed[i*3-2];
-           rawSpeeds[i] = math.sqrt(dx*dx + dy*dy);
-       }
-       rawSpeeds[0] = rawSpeeds.length > 1 ? rawSpeeds[1] : 0.0;
+    final Float32List smoothedSpeeds = Float32List(count);
+    if (advVelThinning != 0.0 ||
+        advInkPooling > 0.0 ||
+        advSurfaceFriction > 0.0) {
+      final rawSpeeds = Float32List(packed.length ~/ 3);
+      for (int i = 1; i < rawSpeeds.length; i++) {
+        final double dx = packed[i * 3] - packed[i * 3 - 3];
+        final double dy = packed[i * 3 + 1] - packed[i * 3 - 2];
+        rawSpeeds[i] = math.sqrt(dx * dx + dy * dy);
+      }
+      rawSpeeds[0] = rawSpeeds.length > 1 ? rawSpeeds[1] : 0.0;
 
-       int rawIdx = 0;
-       for (int i = 0; i < count; i++) {
-           double px = smoothPoints[i*3];
-           double py = smoothPoints[i*3+1];
-           double bestD = double.infinity;
-           int bestIdx = rawIdx;
-           for (int j = rawIdx; j < math.min(rawIdx + 15, rawSpeeds.length); j++) {
-               double dx = px - packed[j*3];
-               double dy = py - packed[j*3+1];
-               double d = dx*dx + dy*dy;
-               if (d < bestD) {
-                   bestD = d;
-                   bestIdx = j;
-               }
-           }
-           rawIdx = bestIdx;
-           smoothedSpeeds[i] = math.min(1.0, rawSpeeds[rawIdx] / 12.0);
-       }
-       double s = smoothedSpeeds[0];
-       for (int i=0; i<count; i++) {
-          s = s * 0.7 + smoothedSpeeds[i] * 0.3;
-          smoothedSpeeds[i] = s;
-       }
+      int rawIdx = 0;
+      for (int i = 0; i < count; i++) {
+        final double px = smoothPoints[i * 3];
+        final double py = smoothPoints[i * 3 + 1];
+        double bestD = double.infinity;
+        int bestIdx = rawIdx;
+        for (int j = rawIdx; j < math.min(rawIdx + 15, rawSpeeds.length); j++) {
+          final double dx = px - packed[j * 3];
+          final double dy = py - packed[j * 3 + 1];
+          final double d = dx * dx + dy * dy;
+          if (d < bestD) {
+            bestD = d;
+            bestIdx = j;
+          }
+        }
+        rawIdx = bestIdx;
+        smoothedSpeeds[i] = math.min(1.0, rawSpeeds[rawIdx] / 12.0);
+      }
+      double s = smoothedSpeeds[0];
+      for (int i = 0; i < count; i++) {
+        s = s * 0.7 + smoothedSpeeds[i] * 0.3;
+        smoothedSpeeds[i] = s;
+      }
     }
 
     final Float32List smoothedPressures = Float32List(count);
     if (usePressure && count > 0) {
-      double p = smoothPoints[2];
-      for (int i = 0; i < count; i++) {
-        p = p * 0.75 + smoothPoints[i * 3 + 2] * 0.25;
-        smoothedPressures[i] = p;
+      smoothedPressures[0] = smoothPoints[2];
+      smoothedPressures[count - 1] = smoothPoints[(count - 1) * 3 + 2];
+      for (int i = 1; i < count - 1; i++) {
+        smoothedPressures[i] = smoothPoints[(i - 1) * 3 + 2] * 0.25 +
+            smoothPoints[i * 3 + 2] * 0.5 +
+            smoothPoints[(i + 1) * 3 + 2] * 0.25;
       }
-      p = smoothedPressures[count - 1];
-      for (int i = count - 1; i >= 0; i--) {
-        p = p * 0.75 + smoothedPressures[i] * 0.25;
-        smoothedPressures[i] = p;
-      }
-      if (usePressure) {
+      if (!isAdvanced) {
         _stabilizeMeshEndpointPressures(
           smoothedPressures,
           count,
@@ -5540,8 +5889,77 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    // Stable tip tangents for every mesh pen (including fountain) — same idea
-    // as the older backup: orient caps/tips from local edges, not raw jitter.
+    var taperLenStartMesh = startCustomTaper != null
+        ? math.max(1, (startCustomTaper / 1.25).round())
+        : 6;
+    var taperLenEndMesh = endCustomTaper != null
+        ? math.max(1, (endCustomTaper / 1.25).round())
+        : 6;
+    if (toolId == ToolId.fountainPen) {
+      taperLenStartMesh = 0;
+      taperLenEndMesh = 0;
+    }
+
+    final Float32List finalWidths = Float32List(count);
+
+    for (int i = 0; i < count; i++) {
+      final double px = smoothPoints[i * 3];
+      final double py = smoothPoints[i * 3 + 1];
+      final double pressure = usePressure ? smoothedPressures[i] : 0.5;
+      final double speedNorm = advVelThinning != 0.0 ||
+              advInkPooling > 0.0 ||
+              advSurfaceFriction > 0.0
+          ? smoothedSpeeds[i]
+          : 0.0;
+
+      final double clampedP = pressure.clamp(0.0, 1.0);
+      final double poolOverdrive = math.max(0.0, pressure - 1.0);
+
+      double w = baseSize;
+      if (isFountain) {
+        w = math.max(0.05, baseSize * (0.25 + 0.9 * clampedP * clampedP));
+      } else if (isAdvanced && brushOptions != null) {
+        w = math.max(
+          0.05,
+          brushOptions.pressureCurve.apply(baseSize * 2, clampedP) / 2,
+        );
+        if (poolOverdrive > 0.0) {
+          w *= 1.0 + poolOverdrive;
+        }
+      } else {
+        w = math.max(0.1, baseSize * (0.2 + 0.8 * clampedP * 2));
+      }
+
+      if (advVelThinning != 0.0) {
+        w *= (1.0 - advVelThinning * speedNorm).clamp(0.1, 4.0);
+      }
+
+      if (advInkPooling > 0.0 && poolOverdrive == 0.0 && isComplete) {
+        final double slowness = (1.0 - speedNorm * 3.5).clamp(0.0, 1.0);
+        w *= 1.0 + advInkPooling * slowness * slowness * 0.65;
+      }
+
+      if (advSurfaceFriction > 0.0) {
+        final double hf =
+            math.sin(px * 1.7 + py * 2.3) * math.cos(px * 2.9 - py * 1.3);
+        w *= (1.0 + hf * advSurfaceFriction * speedNorm * 0.35).clamp(0.25, 2.5);
+      }
+
+      if (canTaper) {
+        if (startTaper && i < taperLenStartMesh && !generateStartCap) {
+          final double t = i / taperLenStartMesh;
+          w *= (t * (2 - t));
+        } else if (endTaper &&
+            i > count - (taperLenEndMesh + 1) &&
+            !generateEndCap) {
+          final double t = (count - 1 - i) / taperLenEndMesh;
+          w *= (t * (2 - t));
+        }
+      }
+
+      finalWidths[i] = math.max(0.01, w);
+    }
+
     final computedStart = _localOpeningChordTangent(
       smoothPoints,
       count,
@@ -5560,45 +5978,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     if (generateStartCap) {
       final double p0x = smoothPoints[0], p0y = smoothPoints[1];
       final double p0p = usePressure ? smoothedPressures[0] : 0.5;
-      // Same hemisphere as the end tip: sample along outward = -travel, then
-      // emit tip→stem so the mesh strip opens at the bulb.
       final double outwardDx = -startTx;
       final double outwardDy = -startTy;
-      final nx = -startTy, ny = startTx;
+      final double nx = -startTy, ny = startTx;
 
-      // Taper+cap couldn't both be true historically; Advanced pens
-      // allow both — do not multiply pressure away or the hemisphere is ~minimal
-      // while the stem stays thick (strip blows up / gaps / pinhole lifts).
-      double hemisP0 = usePressure ? p0p : 0.5;
-      if (roundCapOverridesTaper && usePressure && count >= 4) {
-        double sum = 0;
-        var n = 0;
-        for (var k = 1; k <= math.min(count - 1, 6); k++) {
-          sum += smoothedPressures[k];
-          n++;
-        }
-        if (n > 0) {
-          hemisP0 = math.max(hemisP0, (sum / n) * 0.93);
-        }
-      }
+      final double width = finalWidths[0];
 
-      double width;
-      if (isBallpoint || isHighlighter || isCalligraphy) {
-        width = baseSize;
-      } else if (isFountain) {
-        final p = hemisP0.clamp(0.0, 1.0);
-        width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
-      } else if (isAdvanced && brushOptions != null) {
-        final p = hemisP0.clamp(0.0, 1.0);
-        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
-      } else {
-        width = math.max(0.1, baseSize * (0.2 + 0.8 * hemisP0 * 2));
-      }
-      
       double cOutX = outwardDx;
       double cOutY = outwardDy;
       if (hasEllipticalTip) {
-        final tOut = transformTip(outwardDx, outwardDy, startTx, startTy);
+        final tOut = transformTip(outwardDx, outwardDy, smoothedAngles[0]);
         cOutX = tOut.$1;
         cOutY = tOut.$2;
       } else if (isFountain) {
@@ -5606,45 +5995,33 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         cOutY *= 2.2;
       }
 
-      // Angle must stay in [0, π/2]: use phase = i/steps where i≤steps only.
-      // Ballpoint doubles `steps`; using i/targetCapSegments made angle reach π so
-      // cos(angle) flipped the rim and chipped the circular cap visually.
       final int steps = isBallpoint ? targetCapSegments * 2 : targetCapSegments;
       for (int i = steps; i > 0; i--) {
-        final double angle = (math.pi / 2) * (i / steps);
+        final double angleStep = (math.pi / 2) * (i / steps);
         addVertexPair(
-          p0x + cOutX * (math.sin(angle) * width),
-          p0y + cOutY * (math.sin(angle) * width),
+          p0x + cOutX * (math.sin(angleStep) * width),
+          p0y + cOutY * (math.sin(angleStep) * width),
           nx,
           ny,
-          startTx,
-          startTy,
-          math.cos(angle) * width,
-          hemisP0,
+          math.cos(angleStep) * width,
+          p0p,
+          smoothedAngles[0],
         );
       }
     }
 
-    var taperLenStartMesh = startCustomTaper != null ? math.max(1, (startCustomTaper / 1.25).round()) : 6;
-    var taperLenEndMesh = endCustomTaper != null ? math.max(1, (endCustomTaper / 1.25).round()) : 6;
-    if (toolId == ToolId.fountainPen) {
-      taperLenStartMesh = 0;
-      taperLenEndMesh = 0;
-    }
-
     double accumulatedDist = pathLengthOffset;
-
     for (int i = 0; i < count; i++) {
       if (i > 0) {
-         double dx = smoothPoints[i*3] - smoothPoints[i*3-3];
-         double dy = smoothPoints[i*3+1] - smoothPoints[i*3-2];
-         accumulatedDist += math.sqrt(dx*dx + dy*dy);
+        final double dx = smoothPoints[i * 3] - smoothPoints[i * 3 - 3];
+        final double dy = smoothPoints[i * 3 + 1] - smoothPoints[i * 3 - 2];
+        accumulatedDist += math.sqrt(dx * dx + dy * dy);
       }
       if (advDashLength > 0.0 || advDashGap > 0.0) {
-         double cycle = advDashLength + advDashGap;
-         if (cycle > 0) {
-            inDash = (accumulatedDist % cycle) <= advDashLength;
-         }
+        final double cycle = advDashLength + advDashGap;
+        if (cycle > 0) {
+          inDash = (accumulatedDist % cycle) <= advDashLength;
+        }
       }
       final int o = i * 3;
       final double px = smoothPoints[o], py = smoothPoints[o + 1];
@@ -5662,7 +6039,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
 
       if (i == 0) {
-        final segLen = math.sqrt(fdx * fdx + fdy * fdy);
+        final double segLen = math.sqrt(fdx * fdx + fdy * fdy);
         if (segLen > 1e-6) {
           bdx = startTx * segLen;
           bdy = startTy * segLen;
@@ -5673,7 +6050,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
           bdy = fdy;
         }
       } else if (i == count - 1) {
-        final segLen = math.sqrt(bdx * bdx + bdy * bdy);
+        final double segLen = math.sqrt(bdx * bdx + bdy * bdy);
         if (segLen > 1e-6) {
           fdx = endTx * segLen;
           fdy = endTy * segLen;
@@ -5713,8 +6090,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         fdy = bdy;
       }
 
-      final dx = fdx * 0.5 + bdx * 0.5, dy = fdy * 0.5 + bdy * 0.5;
-      final lenM = math.sqrt(dx * dx + dy * dy);
+      final double dx = fdx * 0.5 + bdx * 0.5, dy = fdy * 0.5 + bdy * 0.5;
+      final double lenM = math.sqrt(dx * dx + dy * dy);
       double nx = 0, ny = 0;
       if (lenM > 0.0001) {
         nx = -dy / lenM;
@@ -5724,37 +6101,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         ny = nBy;
       }
 
-      double pressure = usePressure ? pp : 0.5;
-      if (canTaper) {
-        if (startTaper &&
-            i < taperLenStartMesh &&
-            !generateStartCap) {
-          final double t = i / taperLenStartMesh;
-          pressure *= (t * (2 - t));
-        } else if (endTaper &&
-            i > count - (taperLenEndMesh + 1) &&
-            !generateEndCap) {
-          final double t = (count - 1 - i) / taperLenEndMesh;
-          pressure *= (t * (2 - t));
-        }
-      }
-      double width;
-      if (isBallpoint || isHighlighter || isCalligraphy || useCoverage) {
-        width = baseSize;
-      } else if (isFountain) {
-        final p = pressure.clamp(0.0, 1.0);
-        width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
-      } else if (isAdvanced && brushOptions != null) {
-        final p = pressure.clamp(0.0, 1.0);
-        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
-      } else {
-        width = math.max(0.1, baseSize * (0.2 + 0.8 * pressure * 2));
-      }
-
-      if (advVelThinning != 0.0) {
-        double speedNorm = smoothedSpeeds[i];
-        width *= (1.0 - advVelThinning * speedNorm).clamp(0.1, 4.0);
-      }
+      final double width = finalWidths[i];
 
       final double dotMiter = (lenB > 0.0001 && lenF > 0.0001)
           ? (bdx * fdx + bdy * fdy) / (lenB * lenF)
@@ -5777,23 +6124,47 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             : 1;
         final int remaining = maxPairs - pairCount - endReserve;
         if (remaining <= 1) {
-          addVertexPair(px, py, nx * miterLength, ny * miterLength, -ny, nx, width, pressure);
+          addVertexPair(
+            px,
+            py,
+            nx * miterLength,
+            ny * miterLength,
+            width,
+            pp,
+            smoothedAngles[i],
+          );
         } else {
           if (segments > remaining - 1) segments = remaining - 1;
-          double angleB = math.atan2(nBy, nBx);
-          double angleF = math.atan2(nFy, nFx);
+          final double angleB = math.atan2(nBy, nBx);
+          final double angleF = math.atan2(nFy, nFx);
           double diff = angleF - angleB;
           while (diff > math.pi) diff -= 2 * math.pi;
           while (diff < -math.pi) diff += 2 * math.pi;
 
           for (int step = 0; step <= segments; step++) {
-            double t = step / segments;
-            double a = angleB + diff * t;
-            addVertexPair(px, py, math.cos(a), math.sin(a), -math.sin(a), math.cos(a), width, pressure);
+            final double t = step / segments;
+            final double a = angleB + diff * t;
+            addVertexPair(
+              px,
+              py,
+              math.cos(a),
+              math.sin(a),
+              width,
+              pp,
+              smoothedAngles[i],
+            );
           }
         }
       } else {
-        addVertexPair(px, py, nx * miterLength, ny * miterLength, -ny, nx, width, pressure);
+        addVertexPair(
+          px,
+          py,
+          nx * miterLength,
+          ny * miterLength,
+          width,
+          pp,
+          smoothedAngles[i],
+        );
       }
     }
 
@@ -5803,38 +6174,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final double pLp = usePressure ? smoothedPressures[count - 1] : 0.5;
       final double endDx = endTx;
       final double endDy = endTy;
-      final nx = -endDy, ny = endDx;
+      final double nx = -endDy, ny = endDx;
 
-      double hemisP = usePressure ? pLp : 0.5;
-      if (roundCapOverridesTaper && usePressure && count >= 4) {
-        double sum = 0;
-        var n = 0;
-        for (var k = math.max(0, count - 6); k <= count - 2; k++) {
-          sum += smoothedPressures[k];
-          n++;
-        }
-        if (n > 0) {
-          hemisP = math.max(hemisP, (sum / n) * 0.93);
-        }
-      }
+      final double width = finalWidths[count - 1];
 
-      double width;
-      if (isBallpoint || isHighlighter || isCalligraphy) {
-        width = baseSize;
-      } else if (isFountain) {
-        final p = hemisP.clamp(0.0, 1.0);
-        width = math.max(0.05, baseSize * (0.25 + 0.9 * p * p));
-      } else if (isAdvanced && brushOptions != null) {
-        final p = hemisP.clamp(0.0, 1.0);
-        width = math.max(0.05, brushOptions.pressureCurve.apply(baseSize * 2, p) / 2);
-      } else {
-        width = math.max(0.1, baseSize * (0.2 + 0.8 * hemisP * 2));
-      }
-      
       double cEndX = endDx;
       double cEndY = endDy;
       if (hasEllipticalTip) {
-        final tEnd = transformTip(endDx, endDy, endTx, endTy);
+        final tEnd = transformTip(endDx, endDy, smoothedAngles[count - 1]);
         cEndX = tEnd.$1;
         cEndY = tEnd.$2;
       } else if (isFountain) {
@@ -5844,23 +6191,22 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
       final int steps = isBallpoint ? targetCapSegments * 2 : targetCapSegments;
       for (int i = 1; i <= steps; i++) {
-        final double angle = (math.pi / 2) * (i / steps);
+        final double angleStep = (math.pi / 2) * (i / steps);
         addVertexPair(
-          pLx + cEndX * (math.sin(angle) * width),
-          pLy + cEndY * (math.sin(angle) * width),
+          pLx + cEndX * (math.sin(angleStep) * width),
+          pLy + cEndY * (math.sin(angleStep) * width),
           nx,
           ny,
-          endTx,
-          endTy,
-          math.cos(angle) * width,
-          hemisP,
+          math.cos(angleStep) * width,
+          pLp,
+          smoothedAngles[count - 1],
         );
       }
     }
 
     for (int q = 0; q < pairCount - 1; q++) {
       if (pairActive[q] && pairActive[q + 1]) {
-        int A = q * 2, B = (q + 1) * 2;
+        final int A = q * 2, B = (q + 1) * 2;
         indices[iIndex++] = A + 0;
         indices[iIndex++] = A + 1;
         indices[iIndex++] = B + 0;
@@ -5870,18 +6216,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
 
-    final Float32List finalPositions = Float32List.sublistView(
+    final finalPositions = Float32List.sublistView(
       positions,
       0,
       vIndex,
     );
-    final Uint16List finalIndices = Uint16List.sublistView(indices, 0, iIndex);
-    // Uint16 index range, guaranteed by the input stride cap + strip budget.
+    final finalIndices = Uint16List.sublistView(indices, 0, iIndex);
     assert(
       pairCount * 2 <= kMaxMeshVertices,
       'mesh vertex overflow: ${pairCount * 2} > $kMaxMeshVertices',
     );
-    final Int32List? finalColors = useCoverage ? Int32List.sublistView(colorsArray!, 0, pairCount * 2) : null;
+    final Int32List? finalColors = useCoverage
+        ? Int32List.sublistView(colorsArray!, 0, pairCount * 2)
+        : null;
     return (
       positions: finalPositions,
       indices: finalIndices,

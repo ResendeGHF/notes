@@ -4,12 +4,15 @@
 // EPUB scan probe tests: encode a synthetic text-like page, run it through
 // the engine decoders the way the pre-pass does, and check the verdict.
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:saber/data/document_conversion/epub/epub_scan_probe.dart';
 import 'package:saber/data/document_conversion/scan_orientation.dart';
+
+import 'epub/epub_test_utils.dart';
 
 /// A synthetic scan page: left-aligned dark bars with a ragged right edge.
 img.Image textLikePage({int width = 260, int height = 200}) {
@@ -88,5 +91,50 @@ void main() {
   test('undecodable bytes yield no score', () async {
     final bytes = Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(await probeEncodedImageOrientation(bytes), isNull);
+  });
+
+  test('a dissenting turn aligns with the document majority', () async {
+    // A scan batch stores every page the same way. Five pages that read
+    // sideways overwhelmingly agree on clockwise; one page whose cue picked
+    // the other turn is noise, not a differently stored page.
+    final storedCounter = Uint8List.fromList(
+      img.encodeJpg(img.copyRotate(textLikePage(), angle: 270)),
+    );
+    final storedClockwise = Uint8List.fromList(
+      img.encodeJpg(img.copyRotate(textLikePage(), angle: 90)),
+    );
+    final directory = Directory.systemTemp.createTempSync('epub_scan_probe');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final epub = File('${directory.path}/scans.epub')
+      ..writeAsBytesSync(
+        buildScanEpub({
+          for (var i = 1; i <= 5; i++) 'OEBPS/scan$i.jpg': storedCounter,
+          'OEBPS/scan6.jpg': storedClockwise,
+        }),
+      );
+
+    final orientations = await detectEpubScanOrientations(epub.path);
+    expect(orientations, hasLength(6));
+    for (final orientation in orientations.values) {
+      expect(orientation, ScanOrientation.rotateClockwise);
+    }
+  });
+
+  test('a handful of pages keeps the direction each cue picked', () async {
+    // Below the four-rotated-page floor there is no majority to defer to.
+    final storedClockwise = Uint8List.fromList(
+      img.encodeJpg(img.copyRotate(textLikePage(), angle: 90)),
+    );
+    final directory = Directory.systemTemp.createTempSync('epub_scan_probe');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final epub = File('${directory.path}/scan.epub')
+      ..writeAsBytesSync(
+        buildScanEpub({'OEBPS/scan1.jpg': storedClockwise}),
+      );
+
+    final orientations = await detectEpubScanOrientations(epub.path);
+    expect(orientations, {
+      'OEBPS/scan1.jpg': ScanOrientation.rotateCounterClockwise,
+    });
   });
 }

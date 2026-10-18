@@ -190,6 +190,60 @@ void main() {
     expect(result.outline, isEmpty);
   });
 
+  test('renders an SVG cover whose raster is namespaced', () async {
+    // Scanned fixed-layout EPUBs carry the page raster in an SVG that only
+    // provides the page box, and the reference is `xlink:href` — a namespaced
+    // attribute that plain lookups on package:html miss.
+    final cover = img.Image(width: 40, height: 60);
+    img.fill(cover, color: img.ColorRgb8(255, 255, 255));
+    img.fillRect(
+      cover,
+      x1: 8,
+      y1: 10,
+      x2: 32,
+      y2: 20,
+      color: img.ColorRgb8(0, 0, 0),
+    );
+    final result = await convertEpubToPdf(
+      buildEpubZip(
+        {
+          'META-INF/container.xml':
+              '<?xml version="1.0"?><container version="1.0" '
+              'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+              '<rootfiles><rootfile full-path="EPUB/package.opf" '
+              'media-type="application/oebps-package+xml"/></rootfiles>'
+              '</container>',
+          'EPUB/package.opf':
+              '<?xml version="1.0"?><package '
+              'xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+              'unique-identifier="uid"><metadata '
+              'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+              '<dc:identifier id="uid">urn:uuid:cover</dc:identifier>'
+              '<dc:title>Cover</dc:title></metadata><manifest>'
+              '<item id="c1" href="cover.xhtml" '
+              'media-type="application/xhtml+xml"/>'
+              '<item id="img" href="cover.jpg" media-type="image/jpeg"/>'
+              '</manifest><spine><itemref idref="c1"/></spine></package>',
+          'EPUB/cover.xhtml':
+              '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+              '<title>Cover</title></head><body>'
+              '<svg xmlns="http://www.w3.org/2000/svg" '
+              'xmlns:xlink="http://www.w3.org/1999/xlink" '
+              'viewBox="0 0 40 60">'
+              '<image xlink:href="cover.jpg" width="40" height="60"/>'
+              '</svg></body></html>',
+        },
+        files: {'EPUB/cover.jpg': scanJpeg(cover)},
+      ),
+    );
+    expect(result.pageCount, 1);
+    expect(result.outline, isEmpty);
+    final images = pdfImages(parsePdf(result.pdf));
+    expect(images, hasLength(1));
+    expect(images.single['Width'], 40);
+    expect(images.single['Height'], 60);
+  });
+
   test('converts in an isolate', () async {
     final bytes = readEpubFixture('book.epub');
     final fonts = readEpubFonts();

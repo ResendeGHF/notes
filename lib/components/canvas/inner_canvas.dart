@@ -1021,7 +1021,7 @@ class InnerCanvasState extends State<InnerCanvas> {
               : _eraserSessionDirty!.expandToInclude(dirtyBounds);
           _invalidateCommittedStrokeCache(
             dirty: dirtyBounds,
-            eagerRefill: true,
+            eagerRefill: false, // <-- Desativa o gargalo de rasterização síncrona
             padding: 48,
           );
           _layer2Repaint.value++;
@@ -2061,7 +2061,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         !PageRasterCacheManager.viewportSettled ||
         !PageRasterCacheManager.zoomLodSettled;
 
-    final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
+    final isDrawing = pendingStrokes.isNotEmpty;
     bool useVectorFallback =
         isDrawing || entry == null || !inkBitmapCurrent;
 
@@ -2509,7 +2509,6 @@ class TiledStrokePictureCache {
     _disposeAllRasters();
     _pathOnlyKeys.clear();
     _fineInkKeys.clear();
-    _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
     // Whole-page scope (null) when eager; cleared otherwise.
@@ -2542,7 +2541,6 @@ class TiledStrokePictureCache {
         _eagerDirtyRect = _eagerDirtyRect!.expandToInclude(inflated);
       }
     }
-    _gridDirty = true;
     _visibleTilesCaughtUp = false;
     _eagerRefillVisibleTiles = eagerRefill;
   }
@@ -3071,14 +3069,7 @@ final pathOnly = needsMesh;
     final List<Stroke> strokeList =
         strokes is List<Stroke> ? strokes : strokes.toList(growable: false);
     if (strokeList.isEmpty) return 0;
-    if (_pictures.isEmpty &&
-        !_gridDirty &&
-        _grid != null &&
-        (_indexedStrokeCount != strokeList.length ||
-            _indexedContentRevision != page.saveBinaryRevision)) {
-      _gridDirty = true;
-    }
-    _ensureGrid(strokeList, page.saveBinaryRevision);
+    
     final pageRect = Offset.zero & size;
     final area = pageRect.intersect(targetRect);
     if (area.isEmpty) return 0;
@@ -3504,30 +3495,7 @@ final pathOnly = needsMesh;
           }
           }
 
-          void _ensureGrid(List<Stroke> strokes, int contentRevision) {
-            // Keyed on (revision, count): length alone goes stale on
-            // same-count reorder/transform (select-move, layer reorder),
-            // which used to paint strokes at stale positions until the next
-            // count change forced a rebuild (zoom "fixed" it by invalidating).
-            if (!_gridDirty &&
-                _indexedStrokeCount == strokes.length &&
-                _indexedContentRevision == contentRevision) {
-              return;
-            }
-            final grid = SpatialGrid(cellSize: tileSize / 2);
-            for (var i = 0; i < strokes.length; i++) {
-              final bounds = strokes[i].bounds;
-              if (bounds.isFinite && !bounds.isEmpty) {
-                grid.insert(i, bounds);
-              }
-            }
-            _grid = grid;
-            _indexedStrokeCount = strokes.length;
-            _indexedContentRevision = contentRevision;
-            _gridDirty = false;
-          }
-
-          void _ensureVisualSignature({
+  void _ensureVisualSignature({
     required Size size,
     required EditorPage page,
     required bool invert,
@@ -3676,45 +3644,46 @@ final pathOnly = needsMesh;
   }
 
   int _countVisibleStrokes(Rect visible, List<Stroke> strokes, EditorPage page) {
-            if (strokes.isEmpty) return 0;
-            final query = visible.inflate(_cullPadding);
-            _ensureGrid(strokes, page.saveBinaryRevision);
-            final grid = _grid;
-            if (grid == null) return strokes.length;
-            var n = 0;
-            for (final index in grid.query(query)) {
-              if (index >= 0 &&
-                index < strokes.length &&
-                strokes[index].bounds.overlaps(query)) {
-                n++;
-              }
-            }
-            return n;
-          }
+    if (strokes.isEmpty) return 0;
+    final query = visible.inflate(_cullPadding);
+    if (page.strokeSpatialIndex != null) {
+      final candidates = page.strokeSpatialIndex!.query(query);
+      if (candidates.isEmpty) return 0;
+      final candidateSet = candidates.toSet();
+      var n = 0;
+      for (final stroke in strokes) {
+        if (candidateSet.contains(stroke) && stroke.bounds.overlaps(query)) {
+          n++;
+        }
+      }
+      return n;
+    } else {
+      var n = 0;
+      for (final stroke in strokes) {
+        if (stroke.bounds.overlaps(query)) n++;
+      }
+      return n;
+    }
+  }
 
-          List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
-            final queryRect = tileRect.inflate(_cullPadding);
-            _ensureGrid(strokes, page.saveBinaryRevision);
-            final candidateIndices = _grid?.query(queryRect) ?? const <int>[];
-            // Temporal draw order: grid cells return arbitrary order, but
-            // tiles must replay strokes back-to-front (newest on top).
-            // Grid indices ARE draw-order ranks of the passed list, so sorting
-            // the small candidate set restores temporal order for merging and
-            // painting. Falls back to query order when ranks look stale.
-            final sorted = candidateIndices.toList(growable: false)
-              ..sort();
-            final tileStrokes = <Stroke>[];
-            for (final index in sorted) {
-              if (index >= 0 && index < strokes.length) {
-                final stroke = strokes[index];
-                if (stroke.bounds.overlaps(queryRect)) {
-                  tileStrokes.add(stroke);
-                }
-              }
-            }
-            return tileStrokes;
-          }
-
+  List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
+    final queryRect = tileRect.inflate(_cullPadding);
+    if (page.strokeSpatialIndex != null) {
+      final candidates = page.strokeSpatialIndex!.query(queryRect);
+      if (candidates.isEmpty) return const <Stroke>[];
+      final candidateSet = candidates.toSet();
+      final tileStrokes = <Stroke>[];
+      for (final stroke in strokes) {
+        if (candidateSet.contains(stroke) && stroke.bounds.overlaps(queryRect)) {
+          tileStrokes.add(stroke);
+        }
+      }
+      return tileStrokes;
+    } else {
+      return strokes.where((s) => s.bounds.overlaps(queryRect)).toList();
+    }
+  } 
+  
           static bool _tileNeedsMeshBuild(List<Stroke> tileStrokes) {
             for (final stroke in tileStrokes) {
               if (stroke.needsTileMeshWarmup) return true;

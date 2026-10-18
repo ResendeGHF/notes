@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:saber/components/theming/saber_theme.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/prefs.dart';
 
@@ -63,6 +64,7 @@ class EditorPageSettingsBody extends StatefulWidget {
   final ValueChanged<Color> onSetColor;
   final ValueChanged<Color> onSetLineColor;
   final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<NotePageFormat>? onSetPageFormat;
   final ValueChanged<bool> onToggleGlobalBackgroundInversion;
   final void Function(double left, double right, double top, double bottom)?
   onSetMargins;
@@ -81,6 +83,7 @@ class EditorPageSettingsBody extends StatefulWidget {
     required this.onSetColor,
     required this.onSetLineColor,
     this.onSetPageOrientation,
+    this.onSetPageFormat,
     required this.onToggleGlobalBackgroundInversion,
     this.onSetMargins,
     this.onSetBorderColor,
@@ -109,6 +112,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
   late Color _borderColor;
   late TextEditingController _hexBorderController;
   late PageOrientation _panelOrientation;
+  late NotePageFormat _panelFormat;
 
   @override
   void initState() {
@@ -142,6 +146,9 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
         widget.coreInfo.notePageOrientation) {
       _panelOrientation = widget.coreInfo.notePageOrientation;
     }
+    if (oldWidget.coreInfo.notePageFormat != widget.coreInfo.notePageFormat) {
+      _panelFormat = widget.coreInfo.notePageFormat;
+    }
   }
 
   void _syncFromMetadata() {
@@ -167,7 +174,10 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
           ? Color(stows.defaultMarginColor.value)
           : Colors.transparent;
       _panelOrientation = o;
-      _pageSize = o.defaultSize;
+      _panelFormat = NotePageFormat.values[stows.defaultNotePageFormatIndex
+          .value
+          .clamp(0, NotePageFormat.values.length - 1)];
+      _pageSize = _panelFormat.sizeForOrientation(o);
       _invertInDarkMode = stows.editorAutoInvert.value;
       _invertBackground = stows.editorAutoInvertBackground.value;
       _hexBorderController.text = _colorToHex(_borderColor);
@@ -198,6 +208,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
     _hexController.text = _colorToHex(_pageColor);
     _hexLineController.text = _colorToHex(_lineColor);
     _panelOrientation = ci.notePageOrientation;
+    _panelFormat = ci.notePageFormat;
   }
 
   @override
@@ -488,6 +499,53 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
                       : 'Invert background images in dark mode',
                 ),
               ],
+              if (widget.onSetPageFormat != null) ...[
+                const Divider(height: 26),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Page format',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<NotePageFormat>(
+                  dropdownColor: colorScheme.surfaceContainerHighest,
+                  isExpanded: true,
+                  value: _panelFormat,
+                  decoration: InputDecoration(
+                    isDense: false,
+                    labelText: 'Format',
+                    prefixIcon: const Icon(Icons.description_outlined),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: colorScheme.surface.withValues(alpha: 0.72),
+                  ),
+                  items: [
+                    for (final format in NotePageFormat.values)
+                      DropdownMenuItem(
+                        value: format,
+                        child: Text(format.label),
+                      ),
+                  ],
+                  onChanged: (format) {
+                    if (format == null || format == _panelFormat) return;
+                    setState(() {
+                      _panelFormat = format;
+                      _pageSize = format.sizeForOrientation(_panelOrientation);
+                    });
+                    widget.onSetPageFormat!(format);
+                    if (widget.configureGlobalNoteDefaults) {
+                      stows.defaultNotePageFormatIndex.value = format.index;
+                    }
+                  },
+                ),
+              ],
               if (widget.onSetPageOrientation != null) ...[
                 const Divider(height: 26),
                 Align(
@@ -534,7 +592,7 @@ class EditorPageSettingsBodyState extends State<EditorPageSettingsBody> {
                     final o = selected.single;
                     setState(() {
                       _panelOrientation = o;
-                      _pageSize = o.defaultSize;
+                      _pageSize = _panelFormat.sizeForOrientation(o);
                     });
                     widget.onSetPageOrientation!(o);
                     if (widget.configureGlobalNoteDefaults) {

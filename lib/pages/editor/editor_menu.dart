@@ -29,6 +29,7 @@ class ModernEditorMenu extends StatefulWidget {
   final ValueChanged<Color> onSetPageLineColor;
 
   final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<NotePageFormat>? onSetPageFormat;
   final void Function(double left, double right, double top, double bottom)?
   onSetMargins;
   final ValueChanged<Color>? onSetBorderColor;
@@ -96,6 +97,7 @@ class ModernEditorMenu extends StatefulWidget {
     required this.onSetPageColor,
     required this.onSetPageLineColor,
     this.onSetPageOrientation,
+    this.onSetPageFormat,
     this.onSetMargins,
     this.onSetBorderColor,
     required this.onClearPage,
@@ -194,6 +196,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             onSetColor: widget.onSetPageColor,
             onSetLineColor: widget.onSetPageLineColor,
             onSetPageOrientation: widget.onSetPageOrientation,
+            onSetPageFormat: widget.onSetPageFormat,
             onSetMargins: widget.onSetMargins,
             onSetBorderColor: widget.onSetBorderColor,
             onToggleGlobalBackgroundInversion:
@@ -1362,6 +1365,7 @@ class EditorPageSettingsPage extends StatelessWidget {
     required this.onSetColor,
     required this.onSetLineColor,
     this.onSetPageOrientation,
+    this.onSetPageFormat,
     required this.onToggleGlobalBackgroundInversion,
     this.onSetMargins,
     this.onSetBorderColor,
@@ -1375,6 +1379,7 @@ class EditorPageSettingsPage extends StatelessWidget {
   final ValueChanged<Color> onSetColor;
   final ValueChanged<Color> onSetLineColor;
   final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<NotePageFormat>? onSetPageFormat;
   final ValueChanged<bool> onToggleGlobalBackgroundInversion;
   final void Function(double left, double right, double top, double bottom)?
       onSetMargins;
@@ -1425,6 +1430,7 @@ class EditorPageSettingsPage extends StatelessWidget {
           onSetColor: onSetColor,
           onSetLineColor: onSetLineColor,
           onSetPageOrientation: onSetPageOrientation,
+          onSetPageFormat: onSetPageFormat,
           onToggleGlobalBackgroundInversion: onToggleGlobalBackgroundInversion,
           onSetMargins: onSetMargins,
           onSetBorderColor: onSetBorderColor,
@@ -1748,6 +1754,7 @@ class _PageSettingsSidebarView extends StatelessWidget {
     required this.onSetColor,
     required this.onSetLineColor,
     this.onSetPageOrientation,
+    this.onSetPageFormat,
     required this.onToggleGlobalBackgroundInversion,
     this.onSetMargins,
     this.onSetBorderColor,
@@ -1762,6 +1769,7 @@ class _PageSettingsSidebarView extends StatelessWidget {
   final ValueChanged<Color> onSetColor;
   final ValueChanged<Color> onSetLineColor;
   final ValueChanged<PageOrientation>? onSetPageOrientation;
+  final ValueChanged<NotePageFormat>? onSetPageFormat;
   final ValueChanged<bool> onToggleGlobalBackgroundInversion;
   final void Function(double left, double right, double top, double bottom)?
       onSetMargins;
@@ -1808,6 +1816,7 @@ class _PageSettingsSidebarView extends StatelessWidget {
             onSetColor: onSetColor,
             onSetLineColor: onSetLineColor,
             onSetPageOrientation: onSetPageOrientation,
+            onSetPageFormat: onSetPageFormat,
             onToggleGlobalBackgroundInversion: onToggleGlobalBackgroundInversion,
             onSetMargins: onSetMargins,
             onSetBorderColor: onSetBorderColor,

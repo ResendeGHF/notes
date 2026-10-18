@@ -22,6 +22,7 @@ import 'package:saber/components/canvas/_asset_cache.dart';
 import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/note_tool_settings.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/note_page_index.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
@@ -208,6 +209,7 @@ class _SbnHeader {
     required this.noteDefaultMarginBottomLoaded,
     required this.noteDefaultBorderColorLoaded,
     required this.notePageOrientationLoaded,
+    required this.notePageFormatLoaded,
     required this.noteToolSettingsLoaded,
     required this.floatingCalculatorMetadataLoaded,
   });
@@ -247,6 +249,7 @@ class _SbnHeader {
   final double? noteDefaultMarginBottomLoaded;
   final int? noteDefaultBorderColorLoaded;
   final PageOrientation notePageOrientationLoaded;
+  final NotePageFormat? notePageFormatLoaded;
   final NoteToolSettings? noteToolSettingsLoaded;
   final String? floatingCalculatorMetadataLoaded;
 
@@ -451,6 +454,7 @@ class _SbnHeader {
     double? noteDefaultMarginBottomLoaded;
     int? noteDefaultBorderColorLoaded;
     PageOrientation notePageOrientationLoaded = PageOrientation.portrait;
+    NotePageFormat? notePageFormatLoaded;
     NoteToolSettings? noteToolSettingsLoaded;
     String? floatingCalculatorMetadataLoaded;
 
@@ -508,6 +512,8 @@ class _SbnHeader {
       } else if (nextKey == SBNBinaryKeys.notePageOrientation) {
         notePageOrientationLoaded =
             PageOrientation.values[reader.readIntNoKey()];
+      } else if (nextKey == SBNBinaryKeys.notePageFormat) {
+        notePageFormatLoaded = notePageFormatFromName(reader.readStringNoKey());
       } else if (nextKey == SBNBinaryKeys.noteToolSettings) {
         noteToolSettingsLoaded = NoteToolSettings.fromJsonString(
           reader.readStringNoKey(),
@@ -574,6 +580,7 @@ class _SbnHeader {
       noteDefaultMarginBottomLoaded: noteDefaultMarginBottomLoaded,
       noteDefaultBorderColorLoaded: noteDefaultBorderColorLoaded,
       notePageOrientationLoaded: notePageOrientationLoaded,
+      notePageFormatLoaded: notePageFormatLoaded,
       noteToolSettingsLoaded: noteToolSettingsLoaded,
       floatingCalculatorMetadataLoaded: floatingCalculatorMetadataLoaded,
     );
@@ -584,7 +591,10 @@ class _SbnHeader {
 class EditorCoreInfo extends ChangeNotifier {
   static final log = Logger('EditorCoreInfo');
 
-  static const int sbnVersion = 20;
+  /// Bumped to 21 when the `notePageFormat` header key (28) was added: older
+  /// builds cannot skip unknown header payloads and would desync, so files
+  /// written from v21 open read-only there instead.
+  static const int sbnVersion = 21;
 
   /// First four bytes `FF FF FF FF` marks custom SABER binary (not BSON).
   /// Full parse must run on the root isolate (Quill [FocusNode], image providers).
@@ -718,6 +728,13 @@ class EditorCoreInfo extends ChangeNotifier {
   int? noteDefaultBorderColor;
 
   PageOrientation notePageOrientation = PageOrientation.portrait;
+
+  /// Sheet format used for new pages (and the default for new notes).
+  ///
+  /// Imported Samsung notes use [NotePageFormat.samsungNotes] so pages added
+  /// later match the imported ones. The header key is only absent in legacy
+  /// files — see [_inferPageFormat].
+  NotePageFormat notePageFormat = NotePageFormat.a4;
 
   bool isInfinite = false;
 
@@ -947,6 +964,9 @@ class EditorCoreInfo extends ChangeNotifier {
     notePageOrientation =
         PageOrientation.values[stows.defaultNotePageOrientationIndex.value
             .clamp(0, PageOrientation.values.length - 1)];
+    notePageFormat = NotePageFormat.values[stows.defaultNotePageFormatIndex
+        .value
+        .clamp(0, NotePageFormat.values.length - 1)];
   }
 
   /// Preview carrier for Settings → Note defaults (not a persisted note path).
@@ -957,7 +977,7 @@ class EditorCoreInfo extends ChangeNotifier {
     );
     ci.overwriteNoteDefaultsFromGlobalPrefs();
     ci.pages.clear();
-    final sz = ci.notePageOrientation.defaultSize;
+    final sz = ci.notePageFormat.sizeForOrientation(ci.notePageOrientation);
     ci.pages.add(EditorPage(width: sz.width, height: sz.height));
     return ci;
   }
@@ -982,6 +1002,25 @@ class EditorCoreInfo extends ChangeNotifier {
     notePageOrientation =
         PageOrientation.values[stows.defaultNotePageOrientationIndex.value
             .clamp(0, PageOrientation.values.length - 1)];
+    notePageFormat = NotePageFormat.values[stows.defaultNotePageFormatIndex
+        .value
+        .clamp(0, NotePageFormat.values.length - 1)];
+  }
+
+  /// Infers the page format of notes saved before [notePageFormat] existed.
+  ///
+  /// Samsung imports carried 1440×2036 pages (short edge > 1100) with no
+  /// stored format; every legacy Saber note used the 1000×1400 default, so it
+  /// resolves to A4.
+  static NotePageFormat _inferPageFormat(List<EditorPage> pages) {
+    if (pages.isEmpty) return NotePageFormat.a4;
+    final size = pages.first.size;
+    final short = size.width < size.height ? size.width : size.height;
+    final long = size.width < size.height ? size.height : size.width;
+    if (short <= 1100) return NotePageFormat.a4;
+    final ratio = long / short;
+    if (ratio > 1.3 && ratio < 1.55) return NotePageFormat.samsungNotes;
+    return NotePageFormat.a4;
   }
 
   EditorCoreInfo._({
@@ -2095,6 +2134,7 @@ class EditorCoreInfo extends ChangeNotifier {
     final noteDefaultMarginBottomLoaded = header.noteDefaultMarginBottomLoaded;
     final noteDefaultBorderColorLoaded = header.noteDefaultBorderColorLoaded;
     final notePageOrientationLoaded = header.notePageOrientationLoaded;
+    final notePageFormatLoaded = header.notePageFormatLoaded;
     final noteToolSettingsLoaded = header.noteToolSettingsLoaded;
     final floatingCalculatorMetadataLoaded = header.floatingCalculatorMetadataLoaded;
 
@@ -2265,6 +2305,8 @@ class EditorCoreInfo extends ChangeNotifier {
       info.noteDefaultBorderColor = noteDefaultBorderColorLoaded;
     }
     info.notePageOrientation = notePageOrientationLoaded;
+    info.notePageFormat =
+        notePageFormatLoaded ?? _inferPageFormat(info.pages);
     info.noteToolSettings = noteToolSettingsLoaded;
     info.floatingCalculatorMetadata = floatingCalculatorMetadataLoaded;
     info.isInfinite = isInfiniteLoaded;
@@ -2496,6 +2538,7 @@ class EditorCoreInfo extends ChangeNotifier {
     double? noteDefaultMarginBottomLoaded;
     int? noteDefaultBorderColorLoaded;
     PageOrientation notePageOrientationLoaded = PageOrientation.portrait;
+    NotePageFormat? notePageFormatLoaded;
     NoteToolSettings? noteToolSettingsLoaded;
     String? floatingCalculatorMetadataLoaded;
 
@@ -2553,6 +2596,8 @@ class EditorCoreInfo extends ChangeNotifier {
       } else if (nextKey == SBNBinaryKeys.notePageOrientation) {
         notePageOrientationLoaded =
             PageOrientation.values[reader.readIntNoKey()];
+      } else if (nextKey == SBNBinaryKeys.notePageFormat) {
+        notePageFormatLoaded = notePageFormatFromName(reader.readStringNoKey());
       } else if (nextKey == SBNBinaryKeys.noteToolSettings) {
         noteToolSettingsLoaded = NoteToolSettings.fromJsonString(
           reader.readStringNoKey(),
@@ -2700,6 +2745,8 @@ class EditorCoreInfo extends ChangeNotifier {
       info.noteDefaultBorderColor = noteDefaultBorderColorLoaded;
     }
     info.notePageOrientation = notePageOrientationLoaded;
+    info.notePageFormat =
+        notePageFormatLoaded ?? _inferPageFormat(info.pages);
     info.noteToolSettings = noteToolSettingsLoaded;
     info.floatingCalculatorMetadata = floatingCalculatorMetadataLoaded;
     info.isInfinite = isInfiniteLoaded;
@@ -3016,6 +3063,8 @@ class EditorCoreInfo extends ChangeNotifier {
     }
     writer.writeKey(SBNBinaryKeys.notePageOrientation);
     writer.writeIntNoKey(notePageOrientation.index);
+    writer.writeKey(SBNBinaryKeys.notePageFormat);
+    writer.writeStringNoKey(notePageFormat.name);
 
     if (noteToolSettings != null) {
       writer.writeKey(SBNBinaryKeys.noteToolSettings);
@@ -3269,6 +3318,8 @@ class EditorCoreInfo extends ChangeNotifier {
     }
     writer.writeKey(SBNBinaryKeys.notePageOrientation);
     writer.writeIntNoKey(notePageOrientation.index);
+    writer.writeKey(SBNBinaryKeys.notePageFormat);
+    writer.writeStringNoKey(notePageFormat.name);
 
     if (noteToolSettings != null) {
       writer.writeKey(SBNBinaryKeys.noteToolSettings);
@@ -3486,6 +3537,7 @@ class EditorCoreInfo extends ChangeNotifier {
     info.noteDefaultMarginBottom = noteDefaultMarginBottom;
     info.noteDefaultBorderColor = noteDefaultBorderColor;
     info.notePageOrientation = notePageOrientation;
+    info.notePageFormat = notePageFormat;
     info.noteToolSettings = noteToolSettings;
     info.floatingCalculatorMetadata =
         floatingCalculatorMetadata ?? this.floatingCalculatorMetadata;

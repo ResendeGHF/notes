@@ -86,6 +86,7 @@ import 'package:saber/data/editor/editor_recovery_journal.dart';
 import 'package:saber/data/editor/link_export_expander.dart';
 import 'package:saber/data/editor/editor_history.dart';
 import 'package:saber/data/editor/note_tool_settings.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
@@ -2772,7 +2773,9 @@ class EditorState extends State<Editor>
 
   Size _newPageSize() => coreInfo.isInfinite
       ? infinitePageSize
-      : coreInfo.notePageOrientation.defaultSize;
+      : coreInfo.notePageFormat.sizeForOrientation(
+          coreInfo.notePageOrientation,
+        );
 
   ({
     CanvasBackgroundPattern pattern,
@@ -2823,6 +2826,54 @@ class EditorState extends State<Editor>
       marginBottom: mb,
       borderColor: borderColor,
     );
+  }
+
+  /// Rebuilds the current page at [newSize] (orientation/format change),
+  /// preserving ink, images, quill state and local style overrides.
+  /// No-op when the size did not change.
+  void _resizeCurrentPageTo(Size newSize) {
+    final oldPage = coreInfo.pages[currentPageIndex];
+    final sameSize =
+        oldPage.size.width == newSize.width &&
+        oldPage.size.height == newSize.height;
+    if (sameSize) {
+      coreInfo.notifyListeners();
+      return;
+    }
+    oldPage.quill.changeSubscription?.cancel();
+    oldPage.quill.focusNode.removeListener(_onQuillFocusChange);
+    final d = _newPageDefaults();
+    final newPage = EditorPage(
+      id: oldPage.id,
+      size: newSize,
+      strokes: List<Stroke>.from(oldPage.allStrokesInDrawOrder),
+      images: List<EditorImage>.from(oldPage.allImagesInDrawOrder),
+      quill: oldPage.quill,
+      backgroundImage: oldPage.backgroundImage,
+      backgroundPattern: oldPage.backgroundPattern ?? d.pattern,
+      backgroundColor: oldPage.backgroundColor,
+      lineColor: oldPage.lineColor,
+      lineHeight: oldPage.lineHeight,
+      lineThickness: oldPage.lineThickness,
+      hasLocalPattern: oldPage.hasLocalPattern || true,
+      hasLocalBackgroundColor: oldPage.hasLocalBackgroundColor || true,
+      hasLocalLineColor: oldPage.hasLocalLineColor || true,
+      hasLocalLineHeight: oldPage.hasLocalLineHeight || true,
+      hasLocalLineThickness: oldPage.hasLocalLineThickness || true,
+      hasLocalMargins: oldPage.hasLocalMargins,
+      marginLeft: oldPage.marginLeft,
+      marginRight: oldPage.marginRight,
+      marginTop: oldPage.marginTop,
+      marginBottom: oldPage.marginBottom,
+      hasLocalBorderColor: oldPage.hasLocalBorderColor,
+      borderColor: oldPage.hasLocalBorderColor ? oldPage.borderColor : null,
+    );
+    coreInfo.pages[currentPageIndex] = newPage;
+    listenToQuillChanges(newPage.quill, currentPageIndex);
+    newPage.buildSpatialIndex();
+    coreInfo.notifyListeners();
+    _pageRasterCache.invalidatePage(currentPageIndex);
+    autosaveAfterDelay();
   }
 
   void createPage(int pageIndex) {
@@ -11356,49 +11407,13 @@ class EditorState extends State<Editor>
       onSetPageOrientation: (orientation) => setState(() {
         if (coreInfo.readOnly) return;
         coreInfo.notePageOrientation = orientation;
-        final oldPage = coreInfo.pages[currentPageIndex];
-        final newSize = _newPageSize();
-        final sameSize =
-            oldPage.size.width == newSize.width &&
-            oldPage.size.height == newSize.height;
-        if (sameSize) {
-          coreInfo.notifyListeners();
-          return;
-        }
-        oldPage.quill.changeSubscription?.cancel();
-        oldPage.quill.focusNode.removeListener(_onQuillFocusChange);
-        final d = _newPageDefaults();
-        final newPage = EditorPage(
-          id: oldPage.id,
-          size: newSize,
-          strokes: List<Stroke>.from(oldPage.allStrokesInDrawOrder),
-          images: List<EditorImage>.from(oldPage.allImagesInDrawOrder),
-          quill: oldPage.quill,
-          backgroundImage: oldPage.backgroundImage,
-          backgroundPattern: oldPage.backgroundPattern ?? d.pattern,
-          backgroundColor: oldPage.backgroundColor,
-          lineColor: oldPage.lineColor,
-          lineHeight: oldPage.lineHeight,
-          lineThickness: oldPage.lineThickness,
-          hasLocalPattern: oldPage.hasLocalPattern || true,
-          hasLocalBackgroundColor: oldPage.hasLocalBackgroundColor || true,
-          hasLocalLineColor: oldPage.hasLocalLineColor || true,
-          hasLocalLineHeight: oldPage.hasLocalLineHeight || true,
-          hasLocalLineThickness: oldPage.hasLocalLineThickness || true,
-          hasLocalMargins: oldPage.hasLocalMargins,
-          marginLeft: oldPage.marginLeft,
-          marginRight: oldPage.marginRight,
-          marginTop: oldPage.marginTop,
-          marginBottom: oldPage.marginBottom,
-          hasLocalBorderColor: oldPage.hasLocalBorderColor,
-          borderColor: oldPage.hasLocalBorderColor ? oldPage.borderColor : null,
-        );
-        coreInfo.pages[currentPageIndex] = newPage;
-        listenToQuillChanges(newPage.quill, currentPageIndex);
-        newPage.buildSpatialIndex();
-        coreInfo.notifyListeners();
-        _pageRasterCache.invalidatePage(currentPageIndex);
-        autosaveAfterDelay();
+        _resizeCurrentPageTo(_newPageSize());
+      }),
+
+      onSetPageFormat: (format) => setState(() {
+        if (coreInfo.readOnly) return;
+        coreInfo.notePageFormat = format;
+        _resizeCurrentPageTo(_newPageSize());
       }),
 
       onClearPage: () {

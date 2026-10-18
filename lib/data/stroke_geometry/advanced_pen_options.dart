@@ -322,6 +322,12 @@ class AdvancedPenOptions {
   double dashLength;
   double dashGap;
 
+  double angleLag;
+  double pressureInertia;
+  double inkPooling;
+  double ropePull;
+  double surfaceFriction;
+
   AdvancedPenOptions({
     required this.pressureCurve,
     required this.lineCap,
@@ -333,6 +339,11 @@ class AdvancedPenOptions {
     this.useTilt = false,
     this.dashLength = 0.0,
     this.dashGap = 0.0,
+    this.angleLag = 0.0,
+    this.pressureInertia = 0.0,
+    this.inkPooling = 0.0,
+    this.ropePull = 0.0,
+    this.surfaceFriction = 0.0,
   });
 
   /// Solid defaults (as in Rnote): linear pressure, rounded caps, modeled
@@ -348,6 +359,11 @@ class AdvancedPenOptions {
         useTilt: false,
         dashLength: 0.0,
         dashGap: 0.0,
+        angleLag: 0.0,
+        pressureInertia: 0.0,
+        inkPooling: 0.0,
+        ropePull: 0.0,
+        surfaceFriction: 0.0,
       );
 
   /// Marker defaults (as in Rnote): constant pressure (fixed width),
@@ -363,6 +379,11 @@ class AdvancedPenOptions {
         useTilt: false,
         dashLength: 0.0,
         dashGap: 0.0,
+        angleLag: 0.0,
+        pressureInertia: 0.0,
+        inkPooling: 0.0,
+        ropePull: 0.0,
+        surfaceFriction: 0.0,
       );
 
   AdvancedPenOptions copyWith({
@@ -376,6 +397,11 @@ class AdvancedPenOptions {
     bool? useTilt,
     double? dashLength,
     double? dashGap,
+    double? angleLag,
+    double? pressureInertia,
+    double? inkPooling,
+    double? ropePull,
+    double? surfaceFriction,
   }) {
     return AdvancedPenOptions(
       pressureCurve: pressureCurve ?? this.pressureCurve,
@@ -388,6 +414,11 @@ class AdvancedPenOptions {
       useTilt: useTilt ?? this.useTilt,
       dashLength: dashLength ?? this.dashLength,
       dashGap: dashGap ?? this.dashGap,
+      angleLag: angleLag ?? this.angleLag,
+      pressureInertia: pressureInertia ?? this.pressureInertia,
+      inkPooling: inkPooling ?? this.inkPooling,
+      ropePull: ropePull ?? this.ropePull,
+      surfaceFriction: surfaceFriction ?? this.surfaceFriction,
     );
   }
 
@@ -402,6 +433,11 @@ class AdvancedPenOptions {
         'useTilt': useTilt,
         'dashLength': dashLength,
         'dashGap': dashGap,
+        'angleLag': angleLag,
+        'pressureInertia': pressureInertia,
+        'inkPooling': inkPooling,
+        'ropePull': ropePull,
+        'surfaceFriction': surfaceFriction,
       };
 
   factory AdvancedPenOptions.fromJson(Map<String, dynamic> json) {
@@ -419,6 +455,11 @@ class AdvancedPenOptions {
       useTilt: json['useTilt'] as bool? ?? false,
       dashLength: (json['dashLength'] as num?)?.toDouble() ?? 0.0,
       dashGap: (json['dashGap'] as num?)?.toDouble() ?? 0.0,
+      angleLag: (json['angleLag'] as num?)?.toDouble() ?? 0.0,
+      pressureInertia: (json['pressureInertia'] as num?)?.toDouble() ?? 0.0,
+      inkPooling: (json['inkPooling'] as num?)?.toDouble() ?? 0.0,
+      ropePull: (json['ropePull'] as num?)?.toDouble() ?? 0.0,
+      surfaceFriction: (json['surfaceFriction'] as num?)?.toDouble() ?? 0.0,
     );
   }
 
@@ -434,9 +475,14 @@ class AdvancedPenOptions {
         other.tipRatio == tipRatio &&
         other.useTilt == useTilt &&
         other.dashLength == dashLength &&
-        other.dashGap == dashGap;
+        other.dashGap == dashGap &&
+        other.angleLag == angleLag &&
+        other.pressureInertia == pressureInertia &&
+        other.inkPooling == inkPooling &&
+        other.ropePull == ropePull &&
+        other.surfaceFriction == surfaceFriction;
   }
 
   @override
-  int get hashCode => Object.hash(pressureCurve, lineCap, builderType, modeler, velocityThinning, tipAngle, tipRatio, useTilt, dashLength, dashGap);
+  int get hashCode => Object.hash(pressureCurve, lineCap, builderType, modeler, velocityThinning, tipAngle, tipRatio, useTilt, dashLength, dashGap, angleLag, pressureInertia, inkPooling, ropePull, surfaceFriction);
 }

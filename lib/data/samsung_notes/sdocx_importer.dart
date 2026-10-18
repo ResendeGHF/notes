@@ -16,6 +16,7 @@ import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/home_data_cache.dart';
@@ -81,6 +82,14 @@ class SamsungNotesImporter {
       }
 
       final coreInfo = EditorCoreInfo(filePath: sbnBasePath);
+      // Samsung pages keep their native proportion: remember the Samsung
+      // Notes format so pages added to the imported note match the imported
+      // ones instead of dropping back to A4.
+      coreInfo.notePageFormat = NotePageFormat.samsungNotes;
+      coreInfo.notePageOrientation =
+          doc.pages.first.width > doc.pages.first.height
+          ? PageOrientation.landscape
+          : PageOrientation.portrait;
       // Keep a temp PDF file alive for the whole import so PdfDocument can
       // memory-map it (same pattern as createNoteFromPdf).
       final tempPdfFiles = <File>[];

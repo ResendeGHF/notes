@@ -103,6 +103,10 @@ class _GlobalNoteDefaultsSettingsPageState
             stows.defaultNotePageOrientationIndex.value = orientation.index;
             _refreshCarrier();
           },
+          onSetPageFormat: (format) {
+            stows.defaultNotePageFormatIndex.value = format.index;
+            _refreshCarrier();
+          },
           onToggleGlobalBackgroundInversion: (_) {},
           onSetMargins: (left, right, top, bottom) {
             stows.defaultMarginLeft.value = left;

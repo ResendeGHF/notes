@@ -88,11 +88,15 @@ Future<Map<String, ScanOrientation>> detectEpubScanOrientations(
 
 /// Turns per-image scores into the corrections handed to the converter.
 ///
-/// Confident verdicts are kept as they are. Pages whose projections stayed
-/// inconclusive (two-column indexes, sparse figures) adopt the document's
-/// majority rotation when there is a clear one: in a book scanned sideways
-/// cover to cover those pages are sideways too, they just do not look like
-/// single-column text.
+/// Confident verdicts are kept as they are, with one document-level repair: a
+/// scan batch stores every page the same way, so when the pages that clearly
+/// read sideways overwhelmingly agree on which way they need turning, the
+/// handful of pages whose per-page cue picked the other turn are noise (a
+/// justified page leaves little for the cue to read) and are aligned with the
+/// majority. Pages whose projections stayed inconclusive (two-column indexes,
+/// sparse figures) adopt the majority rotation under the same rule: in a book
+/// scanned sideways cover to cover those pages are sideways too, they just do
+/// not look like single-column text.
 Map<String, ScanOrientation> _consolidate(
   Map<String, ScanOrientationScore> scores,
 ) {
@@ -107,7 +111,10 @@ Map<String, ScanOrientation> _consolidate(
   final majority = _majorityRotation(scores.values);
   if (majority != null) {
     for (final entry in scores.entries) {
-      if (entry.value.isInconclusive) {
+      final orientation = entry.value.orientation;
+      if (orientation == ScanOrientation.rotateClockwise ||
+          orientation == ScanOrientation.rotateCounterClockwise ||
+          entry.value.isInconclusive) {
         orientations[entry.key] = majority;
       }
     }

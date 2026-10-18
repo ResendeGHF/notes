@@ -253,6 +253,11 @@ abstract class SBNBinaryKeys {
   static const int noteDefaultBorderColor = 26;
   static const int notePageOrientation = 18;
 
+  /// Page format for new pages, stored as a `NotePageFormat` name
+  /// (`note_page_format.dart`). Absent in legacy files: the reader then infers
+  /// it from the first page's size (Samsung imports) and falls back to A4.
+  static const int notePageFormat = 28;
+
   static const int noteToolSettings = 19;
   static const int floatingCalculatorMetadata = 27;
 

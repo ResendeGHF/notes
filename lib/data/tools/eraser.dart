@@ -643,28 +643,7 @@ class Eraser extends Tool {
   }
 
   bool _capsuleHits(Offset from, Offset to, Stroke stroke, double radius) {
-    final effective = radius + stroke.options.size / 2;
-    final rect = Rect.fromLTRB(
-      (from.dx < to.dx ? from.dx : to.dx) - effective,
-      (from.dy < to.dy ? from.dy : to.dy) - effective,
-      (from.dx > to.dx ? from.dx : to.dx) + effective,
-      (from.dy > to.dy ? from.dy : to.dy) + effective,
-    );
-    if (!stroke.bounds.overlaps(rect)) return false;
-    if ((to - from).distance < 0.5) {
-      return stroke.isHitByCircle(to, radius);
-    }
-    // Sample the capsule so a flick still hits strokes between events.
-    const steps = 4;
-    for (var i = 0; i <= steps; i++) {
-      final t = i / steps;
-      final c = Offset(
-        from.dx + (to.dx - from.dx) * t,
-        from.dy + (to.dy - from.dy) * t,
-      );
-      if (stroke.isHitByCircle(c, radius)) return true;
-    }
-    return false;
+    return stroke.isHitByCapsule(from, to, radius);
   }
 
   static double _distSqToSeg(double px, double py, Offset a, Offset b) {

@@ -19,7 +19,9 @@
 // paragraphs leave a sharp left edge in the column profile, so of the two
 // candidate rotations the one whose left margin is sharper is the readable
 // one. Pages without that asymmetry (centered text, figures, blank pages)
-// fall back to clockwise, which is what a sideways scan almost always needs.
+// fall back to clockwise, which is what a sideways scan almost always needs;
+// callers that see a whole document can also repair the handful of pages this
+// cue reads wrong by adopting the document's majority direction.
 //
 // Everything here is pure Dart: it runs inside the conversion isolate for DjVu
 // (on the decoded bitmaps) and on engine-decoded previews on the root isolate
@@ -50,7 +52,10 @@ const kScanInkGridMaxSide = 160;
 
 /// Minimum p95−p5 spread of the ink grid for a verdict. Below this the page is
 /// blank or flat (photo, solid colour) and the profile carries no signal.
-const kScanMinContrast = 0.15;
+/// Faint scans — light ink on grey-tinged paper — still land around 0.1, so
+/// the gate sits below them; the projection floor is what rejects the noise of
+/// truly blank pages, whose profiles stay far below it.
+const kScanMinContrast = 0.08;
 
 /// How much stronger one projection must be than the other to count as text
 /// lines. Real scans score 2–9× on the correct axis.
