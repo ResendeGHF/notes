@@ -1474,16 +1474,8 @@ class InnerCanvasState extends State<InnerCanvas> {
                     lineThickness: page.hasLocalLineThickness
                         ? page.lineThickness
                         : (widget.lineThickness?.toDouble() ?? widget.coreInfo.lineThickness.toDouble()),
-                    primaryColor:
-                    widget.lineColor ??
-                    (page.lineColor.toARGB32() != 0xFF9E9E9E
-                    ? page.lineColor
-                    : colorScheme.primary),
-                    secondaryColor:
-                    (widget.lineColor ??
-                    (page.lineColor.toARGB32() != 0xFF9E9E9E
-                    ? page.lineColor
-                    : colorScheme.secondary))
+                    primaryColor: widget.lineColor ?? page.lineColor,
+                    secondaryColor: (widget.lineColor ?? page.lineColor)
                     .withValues(alpha: 0.5),
                     marginLeft: page.marginLeft,
                     marginRight: page.marginRight,
@@ -1502,8 +1494,6 @@ class InnerCanvasState extends State<InnerCanvas> {
                     page: page,
                     coreInfo: widget.coreInfo,
                     invert: invert,
-                    primaryColor: colorScheme.primary,
-                    secondaryColor: colorScheme.secondary,
                     defaultLineHeight: widget.coreInfo.lineHeight,
                       defaultLineThickness:
                         widget.coreInfo.lineThickness.toDouble(),
@@ -1538,16 +1528,8 @@ class InnerCanvasState extends State<InnerCanvas> {
                       ? page.lineThickness 
                       : (widget.lineThickness?.toDouble() ?? widget.coreInfo.lineThickness.toDouble()),
 
-                  primaryColor:
-                  widget.lineColor ??
-                  (page.lineColor.toARGB32() != 0xFF9E9E9E
-                  ? page.lineColor
-                  : colorScheme.primary),
-                  secondaryColor:
-                  (widget.lineColor ??
-                  (page.lineColor.toARGB32() != 0xFF9E9E9E
-                  ? page.lineColor
-                  : colorScheme.secondary))
+                  primaryColor: widget.lineColor ?? page.lineColor,
+                  secondaryColor: (widget.lineColor ?? page.lineColor)
                   .withValues(alpha: 0.5),
                   marginLeft: page.marginLeft,
                   marginRight: page.marginRight,

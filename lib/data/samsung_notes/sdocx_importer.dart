@@ -378,6 +378,11 @@ class SamsungNotesImporter {
     page.lineThickness = (coreInfo.noteDefaultLineThickness ?? coreInfo.lineThickness) * scale;
     page.hasLocalLineHeight = true;
     page.hasLocalLineThickness = true;
+    // Mirror [EditorCoreInfo.createPageWithDefaults]: imported pages adopt the
+    // note's default line color, so a customized default applies instead of
+    // the raw page field default (0xFF9E9E9E).
+    page.lineColor = Color(coreInfo.noteDefaultLineColor ?? 0xFF9E9E9E);
+    page.hasLocalLineColor = true;
 
     page.marginLeft = (coreInfo.noteDefaultMarginLeft ?? 0) * scale;
     page.marginRight = (coreInfo.noteDefaultMarginRight ?? 0) * scale;

@@ -921,8 +921,6 @@ final class PageRasterCacheManager {
       page: page,
       coreInfo: coreInfo,
       invert: invert,
-      primaryColor: primaryColor,
-      secondaryColor: secondaryColor,
       defaultLineHeight: defaultLineHeight,
       defaultLineThickness: defaultLineThickness,
       defaultPattern: defaultPattern,
@@ -1317,14 +1315,20 @@ PageRasterBgParams pageRasterBgParamsFor({
   required EditorPage page,
   required EditorCoreInfo coreInfo,
   required bool invert,
-  required Color primaryColor,
-  required Color secondaryColor,
   required int defaultLineHeight,
   required double defaultLineThickness,
   required CanvasBackgroundPattern defaultPattern,
   required Color defaultBackgroundColor,
 }) {
   final hasBgImage = page.backgroundImage != null;
+  // The pattern line color comes straight from the page, exactly like the live
+  // vector path (CanvasBackgroundPainter built by InnerCanvas) and the
+  // exporter. The default line color (0xFF9E9E9E) must NOT resolve to a theme
+  // color here: a light theme primary is nearly invisible at the pattern's 20%
+  // alpha on a white page, so the raster blit and the vector fallback
+  // disagreed and the background pattern appeared to blink/disappear as the
+  // editor switched paths on move/zoom.
+  final lineColor = page.lineColor;
   return PageRasterBgParams(
     invert: invert,
     backgroundColor: hasBgImage
@@ -1341,13 +1345,8 @@ PageRasterBgParams pageRasterBgParamsFor({
     lineThickness: page.hasLocalLineThickness
         ? page.lineThickness
         : defaultLineThickness,
-    primaryColor: page.lineColor.value != 0xFF9E9E9E
-        ? page.lineColor
-        : primaryColor,
-    secondaryColor: (page.lineColor.value != 0xFF9E9E9E
-            ? page.lineColor
-            : secondaryColor)
-        .withValues(alpha: 0.5),
+    primaryColor: lineColor,
+    secondaryColor: lineColor.withValues(alpha: 0.5),
     marginLeft: page.marginLeft,
     marginRight: page.marginRight,
     marginTop: page.marginTop,

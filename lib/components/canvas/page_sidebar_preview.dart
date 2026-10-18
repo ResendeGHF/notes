@@ -379,9 +379,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
                   ? page.lineThickness
                   : widget.coreInfo.lineThickness)
               .toDouble(),
-          lineColor: page.lineColor.value != 0xFF9E9E9E
-              ? page.lineColor
-              : theme.colorScheme.primary,
+          lineColor: page.lineColor,
         );
       }
     }
@@ -453,9 +451,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
     final lineThickness = page.hasLocalLineThickness
         ? page.lineThickness
         : widget.coreInfo.lineThickness;
-    final lineColor = page.lineColor.value != 0xFF9E9E9E
-        ? page.lineColor
-        : colorScheme.primary;
+    final lineColor = page.lineColor;
 
     Widget pageBackgroundLayer({required bool includePdfBackground}) {
       return FittedBox(

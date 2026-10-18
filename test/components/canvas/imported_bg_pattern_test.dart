@@ -15,10 +15,12 @@ import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
+import 'package:saber/data/prefs.dart';
 
 class _Harness {
-  _Harness()
-      : manager = PageRasterCacheManager(),
+  _Harness({ThemeData? theme, this.useRasterCache = true})
+      : theme = theme ?? ThemeData(),
+        manager = PageRasterCacheManager(),
         coreInfo = EditorCoreInfo(
           filePath: '/tmp/imported-bg-pattern',
           readOnly: false,
@@ -37,9 +39,12 @@ class _Harness {
   final EditorCoreInfo coreInfo;
   final EditorPage page = EditorPage(width: 1440, height: 2036);
   final GlobalKey boundaryKey = GlobalKey();
+  final ThemeData theme;
+  final bool useRasterCache;
   double scale = 1.0;
 
   Widget build() => MaterialApp(
+    theme: theme,
     home: Scaffold(
       body: Center(
         child: SizedBox(
@@ -62,7 +67,10 @@ class _Harness {
                   currentSelection: null,
                   currentToolIsSelect: false,
                   currentScale: scale,
-                  pageRasterCache: manager,
+                  // The editor always passes the page's line color through
+                  // (see Editor's Canvas); keep the harness faithful.
+                  lineColor: page.lineColor,
+                  pageRasterCache: useRasterCache ? manager : null,
                 ),
               ),
             ),
@@ -104,6 +112,72 @@ int _countNonWhite(ByteData data) {
     if (r < 250 || g < 250 || b < 250) count++;
   }
   return count;
+}
+
+/// Pattern "ink" metrics used to compare the raster blit against the vector
+/// fallback: how much ink the pattern puts down and in which hue.
+class _InkStats {
+  const _InkStats(this.count, this.inkR, this.inkG, this.inkB);
+
+  final int count;
+  final double inkR, inkG, inkB;
+
+  double get total => inkR + inkG + inkB;
+
+  /// Normalized per-channel ink, i.e. the pattern's perceived hue.
+  (double, double, double) get color => total <= 0
+      ? (0.0, 0.0, 0.0)
+      : (inkR / total, inkG / total, inkB / total);
+
+  @override
+  String toString() =>
+      'count=$count ink=${total.toStringAsFixed(0)} color=('
+      '${color.$1.toStringAsFixed(3)}, ${color.$2.toStringAsFixed(3)}, '
+      '${color.$3.toStringAsFixed(3)})';
+}
+
+Future<_InkStats> _inkStats(
+  WidgetTester tester,
+  GlobalKey boundaryKey, {
+  double pixelRatio = 0.5,
+}) async {
+  final boundary =
+      boundaryKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+  final stats = await tester.runAsync(() async {
+    final ui.Image image = await boundary.toImage(pixelRatio: pixelRatio);
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    image.dispose();
+    if (data == null) return const _InkStats(0, 0, 0, 0);
+    return _inkStatsFromBytes(data);
+  });
+  return stats!;
+}
+
+Future<_InkStats> _imageInkStats(WidgetTester tester, ui.Image image) async {
+  final stats = await tester.runAsync(() async {
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (data == null) return const _InkStats(0, 0, 0, 0);
+    return _inkStatsFromBytes(data);
+  });
+  return stats!;
+}
+
+_InkStats _inkStatsFromBytes(ByteData data) {
+  var count = 0;
+  double inkR = 0, inkG = 0, inkB = 0;
+  for (var i = 0; i + 3 < data.lengthInBytes; i += 4) {
+    // The page background is near-white (0xFFFCFCFC); ignore that baseline
+    // and accumulate the pattern's per-channel darkening.
+    final dr = 255 - data.getUint8(i);
+    final dg = 255 - data.getUint8(i + 1);
+    final db = 255 - data.getUint8(i + 2);
+    if (dr + dg + db <= 12) continue;
+    count++;
+    inkR += dr;
+    inkG += dg;
+    inkB += db;
+  }
+  return _InkStats(count, inkR, inkG, inkB);
 }
 
 /// Phone-like viewport: the page (1440 page units) is shrunk into a 400px box
@@ -165,6 +239,7 @@ class _PhoneHarness {
                         currentSelection: null,
                         currentToolIsSelect: false,
                         currentScale: scale,
+                        lineColor: page.lineColor,
                         pageRasterCache: manager,
                       ),
                     ),
@@ -394,5 +469,73 @@ void main() {
     PageRasterCacheManager.debugResetViewportLod();
 
     h.dispose();
+  });
+
+  testWidgets('raster bake and vector path share the default line color', (
+    tester,
+  ) async {
+    // A page that keeps the default line color (0xFF9E9E9E) must paint the
+    // pattern in that same gray on both paths. If the raster bake resolves it
+    // to a theme color (colorScheme.primary) instead, then in a dark theme the
+    // light primary at the pattern's 20% alpha all but vanishes on the white
+    // page: the pattern blinks/disappears as the editor switches between the
+    // baked blit and the crisp vector fallback on move/zoom, while the strokes
+    // stay visible.
+    final previousAutoInvert = stows.editorAutoInvert.value;
+    stows.editorAutoInvert.value = false; // keep the page white in dark mode
+    PageRasterCacheManager.debugForceSyncRaster = true;
+    final darkTheme = ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xFF6750A4),
+        brightness: Brightness.dark,
+      ),
+    );
+
+    // --- Vector path: the settled fallback the user sees. ---
+    final vector = _Harness(theme: darkTheme, useRasterCache: false);
+    await tester.pumpWidget(vector.build());
+    await tester.pump(const Duration(milliseconds: 16));
+    final vectorStats = await _inkStats(tester, vector.boundaryKey);
+    debugPrint('default line vector: $vectorStats');
+
+    // --- Raster path: the bitmap the painter blits while moving/sharp. ---
+    final raster = _Harness(theme: darkTheme, useRasterCache: true);
+    await tester.pumpWidget(raster.build());
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    final entry = raster.manager.debugBgEntry(0);
+    expect(entry, isNotNull, reason: 'raster was baked');
+    final rasterStats = await _imageInkStats(tester, entry!.image);
+    debugPrint('default line raster: $rasterStats');
+
+    expect(vectorStats.count, greaterThan(1000), reason: 'vector visible');
+    expect(rasterStats.count, greaterThan(1000), reason: 'raster visible');
+
+    // Both paths must paint the pattern with the same color...
+    final (vr, vg, vb) = vectorStats.color;
+    final (rr, rg, rb) = rasterStats.color;
+    expect((rr - vr).abs(), lessThan(0.05), reason: 'same red channel');
+    expect((rg - vg).abs(), lessThan(0.05), reason: 'same green channel');
+    expect((rb - vb).abs(), lessThan(0.05), reason: 'same blue channel');
+
+    // ...and that color must be the neutral gray default, not a theme tint.
+    for (final channel in [vr, vg, vb, rr, rg, rb]) {
+      expect(
+        channel,
+        inInclusiveRange(0.30, 0.37),
+        reason: 'default pattern line color is the neutral gray',
+      );
+    }
+
+    // Let the manager's timers drain before teardown.
+    PageRasterCacheManager.debugResetViewportLod();
+    PageRasterCacheManager.updateViewportMoving(false);
+    await tester.pump(const Duration(seconds: 2));
+    PageRasterCacheManager.debugResetViewportLod();
+
+    vector.dispose();
+    raster.dispose();
+    stows.editorAutoInvert.value = previousAutoInvert;
   });
 }
