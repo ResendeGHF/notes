@@ -383,6 +383,7 @@ update:
   update: Update
   downloadNotAvailableYet: The download isn't available yet for your platform. Please check back shortly.
 editor:
+  convertingDocument: Converting document…
   navigation:
     title: Notes
     pdfOutlines: Outlines

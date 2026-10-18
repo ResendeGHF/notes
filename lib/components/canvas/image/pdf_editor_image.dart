@@ -1459,7 +1459,10 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
         _mode == _PdfSurfaceMode.released) {
       return Stack(
         fit: StackFit.passthrough,
-        children: [_thumbOrPlaceholder(), _tapOverlay()],
+        children: [
+          InvertWidget(invert: widget.invert, child: _thumbOrPlaceholder()), 
+          _tapOverlay()
+        ],
       );
     }
     final useNative = nativeEligible;
@@ -1504,7 +1507,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
             // Instant tile under the live render: covers the raster gap with
             // an exact-aspect JPEG until the surface arrives (and after
             // release).
-            _thumbOrPlaceholder(),
+            InvertWidget(invert: widget.invert, child: _thumbOrPlaceholder()),
             // Base layer, IDENTICAL in full and tiled modes: same tree, same
             // keys, same resolution policy. Mode switches only add/remove
             // the overlay — the base never remounts, downgrades, or flashes.
@@ -1570,7 +1573,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
           widthPx: rw,
           heightPx: rh,
           invert: widget.invert,
-          fallback: _thumbOrPlaceholder(),
+          fallback: const SizedBox.shrink(), // O underlay escuro já previne flashes na base
           onFirstFrame: () {
             if (!mounted) return;
             _doKick();
@@ -1601,7 +1604,7 @@ class _PdfPageRendererState extends State<_PdfPageRenderer> {
     final doc = widget.pdfDocument;
     // Unreachable when the build gate passed with a pending document, except
     // thumbnails mounted pre-open: hold the tile until arrival (no remount).
-    if (doc == null) return _thumbOrPlaceholder();
+    if (doc == null) return const SizedBox.shrink(); // O underlay escuro já previne flashes na base
     return InvertWidget(
       invert: widget.invert,
       child: PdfPageView(

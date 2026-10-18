@@ -34,26 +34,26 @@ class BzzException implements Exception {
 /// - … up to level 8; total 3 + 3 + 2 + 4 + 8 + 16 + 32 + 64 + 128 = 260,
 ///   plus the terminator context. 300 slots leave headroom, matching the
 ///   reference allocation and keeping indexing identical.
-const int _bzzCtxCount = 300;
+const _bzzCtxCount = 300;
 
 /// Number of "frequency" slots tracked in the MTF order.
-const int _bzzFreqSlots = 4;
+const _bzzFreqSlots = 4;
 
 /// Number of context ids used for the first two MTF levels.
-const int _bzzLevelCtxIds = 3;
+const _bzzLevelCtxIds = 3;
 
 /// Maximum allowed block size (4 MB), matching DjVuLibre's MAXBLOCK.
-const int _bzzMaxBlockSize = 4 * 1024 * 1024;
+const _bzzMaxBlockSize = 4 * 1024 * 1024;
 
 /// Maximum allowed total decompressed output size (256 MB).
-const int _bzzMaxOutputSize = 256 * 1024 * 1024;
+const _bzzMaxOutputSize = 256 * 1024 * 1024;
 
 /// Post-EOF spin guard: byte overshoot tolerated before a block is declared
 /// truncated (see the reference `ZP_EOF_SLACK_BYTES`).
-const int _bzzZpEofSlackBytes = 16;
+const _bzzZpEofSlackBytes = 16;
 
 /// How often the MTF hot loop checks the spin guard.
-const int _bzzSpinCheckInterval = 4096;
+const _bzzSpinCheckInterval = 4096;
 
 /// Decompresses a BZZ stream.
 ///
@@ -338,7 +338,15 @@ Uint8List _decodeOneBlock(ZpDecoder zp, Uint8List ctx, int blockSize) {
     // Move the symbol to its frequency-ordered slot.
     var insertAt = mtfPosition;
     if (insertAt >= _bzzFreqSlots) {
-      mtfOrder.setRange(_bzzFreqSlots, insertAt, mtfOrder, _bzzFreqSlots - 1);
+      // Equivalent to Rust's `copy_within(3..insertAt, 4)`: shift elements
+      // 3..insertAt-1 up by one. Dart's `setRange` end is exclusive, so the
+      // destination must run to `insertAt + 1`.
+      mtfOrder.setRange(
+        _bzzFreqSlots,
+        insertAt + 1,
+        mtfOrder,
+        _bzzFreqSlots - 1,
+      );
       insertAt = _bzzFreqSlots - 1;
     }
     while (insertAt > 0) {

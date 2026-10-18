@@ -12,9 +12,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:keybinder/keybinder.dart';
-import 'package:saber/components/canvas/hud/canvas_hud.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_transform_cache.dart';
+import 'package:saber/components/canvas/hud/canvas_hud.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
@@ -455,6 +455,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
     if (!widget._transformationController.value.isIdentity()) return;
 
+    // ignore: invalid_use_of_visible_for_testing_member
     final transformCacheItem = CanvasTransformCache.get(widget.filePath);
 
     if (transformCacheItem != null) {
@@ -492,7 +493,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
     // lags a frame behind, so without this a fast pan could render a shell
     // placeholder for one frame. Cheap: binary search over page offsets.
     if (Pen.currentStroke == null &&
-        Eraser.isDragging == false &&
+        !(Eraser.isDragging ?? false) &&
         _pageVerticalOffsets.isNotEmpty &&
         containerBounds.maxHeight > 0 &&
         widget.pages.isNotEmpty) {
@@ -600,7 +601,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
           final center = cWidth * (1 - scale) / 2;
           adjustmentX = center - translation.x;
         } else {
-          final double allowedMargin = 0.0;
+          const allowedMargin = 0.0;
 
           final maxX = allowedMargin - leftOffset * scale;
           final minX = cWidth - allowedMargin - leftOffset * scale - scaledPageWidth;
@@ -786,7 +787,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                       InteractiveCanvasViewer.kDrag,
 
                   boundaryMargin: widget.isInfinite && widget.pages.isNotEmpty
-                      ? EdgeInsets.symmetric(
+                      ? const EdgeInsets.symmetric(
                           horizontal: double.infinity,
                           vertical: double.infinity,
                         )
@@ -861,6 +862,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void dispose() {
+    // ignore: invalid_use_of_visible_for_testing_member
     CanvasTransformCache.add(
       widget.filePath,
       widget._transformationController.value,
@@ -927,7 +929,7 @@ class _PagesBuilder extends StatefulWidget {
 }
 
 class _PagesBuilderState extends State<_PagesBuilder> {
-  static const double _renderCacheExtent = 500;
+  static const _renderCacheExtent = 500.0;
   // PDF notes prebuild ~one page ahead. Two mechanical reasons this must
   // exceed one page:
   // 1. [boundingBox] is bucket-floored (360px leaves) and rebuilt at most
@@ -940,33 +942,33 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   //    when the page is already visible, i.e. seconds of blank.
   // Widgets are cheap to build; big surfaces are still owned by the retile
   // logic inside the PDF page renderer.
-  static const double _pdfRenderCacheExtent = 1000;
-  static const int _minHydrateRadius = 1;
-  static const int _maxShellsPerIdleFrame = 1;
+  static const _pdfRenderCacheExtent = 1000.0;
+  static const _minHydrateRadius = 1;
+  static const _maxShellsPerIdleFrame = 1;
   // Parse-ahead horizon for the aggressive warmer: scrolls land inside it.
-  static const int _warmHydrateRadius = 2;
+  static const _warmHydrateRadius = 2;
   // Far-horizon pacing: one slice per tick, no vsync storm while waiting.
   // Fast enough that a freshly opened note converges in about a second;
   // each tick still yields, so opening stays interactive.
-  static const int _trickleIntervalMs = 500;
+  static const _trickleIntervalMs = 500;
 
-  final List<double> _pageOffsets = [];
-  final List<double> _pageHeights = [];
-  final List<double> _pageWidths = [];
+  final _pageOffsets = <double>[];
+  final _pageHeights = <double>[];
+  final _pageWidths = <double>[];
 
   double? _cachedContainerWidth;
-  int _cachedPagesLength = 0;
-  double _totalHeight = 0;
-  bool _idleWorkScheduled = false;
-  bool _hasPdfBackedPages = false;
-  int _viewportMovingBlockedFrames = 0;
+  var _cachedPagesLength = 0;
+  var _totalHeight = 0.0;
+  var _idleWorkScheduled = false;
+  var _hasPdfBackedPages = false;
+  var _viewportMovingBlockedFrames = 0;
   // Persistent whole-note warmer: the aggressive loop chains frame callbacks
   // while making progress (nearest-first), then sleeps; any build kick
   // (scroll/edit/theme) wakes it. A slow trickle covers pages beyond the
   // aggressive horizon so waiting really warms everything over time.
-  bool _warming = false;
-  int _lastVisibleStart = 0;
-  int _lastVisibleEnd = 0;
+  var _warming = false;
+  var _lastVisibleStart = 0;
+  var _lastVisibleEnd = 0;
   Timer? _trickleTimer;
 
   @override

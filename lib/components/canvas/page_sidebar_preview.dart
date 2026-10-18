@@ -500,7 +500,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
               ),
               if (includePdfBackground &&
                   page.backgroundImage is PdfEditorImage)
-                _SidebarPdfThumb(image: page.backgroundImage! as PdfEditorImage)
+                _SidebarPdfThumb(image: page.backgroundImage! as PdfEditorImage, invert: invert)
               else if (includePdfBackground && page.backgroundImage != null)
                 CanvasImage(
                   filePath: widget.coreInfo.filePath,
@@ -587,7 +587,7 @@ class _PageSidebarPreviewState extends State<PageSidebarPreview> {
                         top: image.dstRect.top,
                         width: image.dstRect.width,
                         height: image.dstRect.height,
-                        child: _SidebarPdfThumb(image: image),
+                        child: _SidebarPdfThumb(image: image, invert: invert),
                       )
                     else
                       CanvasImage(
@@ -668,12 +668,12 @@ class _SidebarStrokeSketchPainter extends CustomPainter {
           ? 1
           : (pts.length / maxSamples).ceil();
       paint.strokeWidth = width;
-      final path = Path()..moveTo(pts.first.x * sx, pts.first.y * sy);
-      for (var i = stride; i < pts.length - 1; i += stride) {
-        path.lineTo(pts[i].x * sx, pts[i].y * sy);
+      final offsetList = <Offset>[];
+      for (var i = 0; i < pts.length - 1; i += stride) {
+        offsetList.add(Offset(pts[i].x * sx, pts[i].y * sy));
       }
-      path.lineTo(pts.last.x * sx, pts.last.y * sy);
-      canvas.drawPath(path, paint);
+      offsetList.add(Offset(pts.last.x * sx, pts.last.y * sy));
+      canvas.drawPoints(ui.PointMode.polygon, offsetList, paint);
     }
   }
 
@@ -706,9 +706,10 @@ class _SidebarStrokeSketchPainter extends CustomPainter {
 /// 240px keys never hit the 360/720/1080px tiles the canvas writes, which
 /// is why every far page stayed blank).
 class _SidebarPdfThumb extends StatefulWidget {
-  const _SidebarPdfThumb({required this.image});
+  const _SidebarPdfThumb({required this.image, this.invert = false});
 
   final PdfEditorImage image;
+  final bool invert;
 
   @override
   State<_SidebarPdfThumb> createState() => _SidebarPdfThumbState();
@@ -766,6 +767,10 @@ class _SidebarPdfThumbState extends State<_SidebarPdfThumb> {
       
       final cache = widget.image.assetCacheAll;
       
+      // Yield strongly to keep scrolling at 120fps
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      if (!mounted || gen != _gen) return;
+
       // These cache queries can hit the disk synchronously (e.g. file size)
       final fileSize = cache.getAssetFileSize(widget.image.assetId);
       final hash = cache.getAssetPreviewHash(widget.image.assetId);
@@ -917,26 +922,43 @@ class _SidebarPdfThumbState extends State<_SidebarPdfThumb> {
 
   @override
   Widget build(BuildContext context) {
+    Widget applyInvert(Widget child) {
+      if (!widget.invert) return child;
+      return ColorFiltered(
+        colorFilter: const ColorFilter.matrix([
+          -1, 0, 0, 0, 255,
+          0, -1, 0, 0, 255,
+          0, 0, -1, 0, 255,
+          0, 0, 0, 1, 0,
+        ]),
+        child: child,
+      );
+    }
+
     final mem = _memory;
     if (mem != null) {
       return RepaintBoundary(
-        child: Image.memory(
-          mem,
-          fit: BoxFit.fill,
-          gaplessPlayback: true,
-          filterQuality: FilterQuality.low,
+        child: applyInvert(
+          Image.memory(
+            mem,
+            fit: BoxFit.fill,
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.low,
+          ),
         ),
       );
     }
     final file = _file;
     if (file != null) {
       return RepaintBoundary(
-        child: Image.file(
-          file,
-          fit: BoxFit.fill,
-          gaplessPlayback: true,
-          filterQuality: FilterQuality.low,
-          errorBuilder: (_, _, _) => const SizedBox.expand(),
+        child: applyInvert(
+          Image.file(
+            file,
+            fit: BoxFit.fill,
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.low,
+            errorBuilder: (_, _, _) => const SizedBox.expand(),
+          ),
         ),
       );
     }

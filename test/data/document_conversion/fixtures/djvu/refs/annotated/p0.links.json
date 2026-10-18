@@ -1,5 +1,5 @@
 {
   "areas": [{"url": "#page_2", "description": "next page", "shape": {"kind":"rect","x":40,"y":40,"w":200,"h":40}},{"url": "https://example.com/", "description": "external", "shape": {"kind":"rect","x":40,"y":100,"w":220,"h":40}},{"url": "#page_3", "description": "circle", "shape": {"kind":"oval","x":300,"y":150,"w":120,"h":80}}],
   "zoom": 100,
-  "mode": "color",
+  "mode": "color"
 }

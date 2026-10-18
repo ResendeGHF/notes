@@ -188,16 +188,14 @@ class _CanvasImageState extends State<CanvasImage> {
         Select.currentSelect.doneSelecting &&
         Select.currentSelect.selectResult.images.contains(widget.image);
 
-    final currentBrightness = widget.image.invertible
-        ? Theme.brightnessOf(context)
-        : Brightness.light;
-
-    final shouldInvertInDarkMode =
-        getEffectiveNoteInvertInDarkModeForFile(widget.filePath);
+    final shouldInvertInDarkMode = widget.image.invertible && 
+        (Theme.of(context).brightness == Brightness.dark 
+            ? getEffectiveNoteInvertInDarkModeForFile(widget.filePath) 
+            : false);
 
     if (shouldInvertInDarkMode) {
-      if (currentBrightness != imageBrightness) {
-        imageBrightness = currentBrightness;
+      if (Brightness.dark != imageBrightness) {
+        imageBrightness = Brightness.dark;
       }
     } else if (imageBrightness != Brightness.light) {
       imageBrightness = Brightness.light;

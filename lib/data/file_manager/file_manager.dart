@@ -27,6 +27,8 @@ import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/data/backup/backup_format.dart';
 import 'package:saber/data/backup/incremental_backup_core.dart';
 import 'package:saber/data/backup/monolith_backup_core.dart';
+import 'package:saber/data/document_conversion/document_converter.dart';
+import 'package:saber/data/document_conversion/epub/epub_fonts.dart';
 import 'package:saber/components/editor/pdf_outline_extractor.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/editor_exporter.dart';
@@ -612,6 +614,7 @@ class FileManager {
     if (shouldWatchRootDirectory) unawaited(watchRootDirectory());
 
     unawaited(_cleanupVaultTempFiles());
+    unawaited(_cleanupImportTempFiles());
   }
 
   static Future<void> _cleanupVaultTempFiles() async {
@@ -4436,6 +4439,131 @@ class FileManager {
       log.severe('Erro ao criar nota via PDF em background: $e', e, stack);
       return false;
     }
+  }
+
+  /// Starter of the scratch PDF names used for converted document imports.
+  static const _importTempPrefix = 'saber_import_';
+
+  /// Allocates a scratch PDF file for a converted document import.
+  ///
+  /// The file lives in the app's temporary directory. Callers delete it once
+  /// the note referencing it has been saved; [_cleanupImportTempFiles]
+  /// removes leftovers at startup.
+  static Future<File> createImportScratchPdf() async {
+    final tempDir = await getTemporaryDirectory();
+    return File(
+      '${tempDir.path}/$_importTempPrefix'
+      '${DateTime.now().microsecondsSinceEpoch % 100000000}_'
+      '${Random().nextInt(1 << 30)}.pdf',
+    );
+  }
+
+  /// Imports a `.djvu`/`.epub` file as a new note.
+  ///
+  /// The document is converted to PDF (in a background isolate) and then
+  /// handed to [createNoteFromPdf], so converted notes share the exact PDF
+  /// pipeline. The outline produced by the converter pre-seeds the note's
+  /// Pages menu, saving a second extraction pass. The scratch PDF is deleted
+  /// once the note is written; any leftover from a crash is removed on the
+  /// next launch by [_cleanupImportTempFiles].
+  static Future<bool> createNoteFromConvertedDocument(
+    String sbnFilePath,
+    String documentPath, {
+    required ThemeData theme,
+    required MediaQueryData mediaQuery,
+    void Function(double progress, String status)? onImportProgress,
+  }) async {
+    final format = documentFormatForPath(documentPath);
+    if (format == null) {
+      log.warning(
+        'createNoteFromConvertedDocument: unsupported file $documentPath',
+      );
+      return false;
+    }
+    if (format == DocumentFormat.pdf) {
+      return createNoteFromPdf(
+        sbnFilePath,
+        documentPath,
+        theme: theme,
+        mediaQuery: mediaQuery,
+        onImportProgress: onImportProgress,
+      );
+    }
+
+    File? tempPdf;
+    try {
+      onImportProgress?.call(0.02, 'Reading document');
+      tempPdf = await createImportScratchPdf();
+
+      onImportProgress?.call(0.05, 'Converting document');
+      // The conversion isolate writes the PDF itself ([outputPath]): for a
+      // 60 MB scan, copying the bytes back and flushing them on this isolate
+      // froze the UI for seconds.
+      final converted = await convertDocumentFileToPdf(
+        documentPath,
+        format: format,
+        epubOptions: await loadEpubPdfOptions(),
+        outputPath: tempPdf.path,
+        onScanProgress: (done, total) {
+          if (total <= 0) return;
+          onImportProgress?.call(
+            0.05 + 0.04 * done / total,
+            'Converting document',
+          );
+        },
+      );
+
+      final ok = await createNoteFromPdf(
+        sbnFilePath,
+        tempPdf.path,
+        theme: theme,
+        mediaQuery: mediaQuery,
+        pdfOutlines: _toPdfOutline(converted.outline),
+        onImportProgress: onImportProgress,
+      );
+      return ok;
+    } catch (e, stack) {
+      log.severe('Failed to import document $documentPath: $e', e, stack);
+      return false;
+    } finally {
+      try {
+        if (tempPdf != null && tempPdf.existsSync()) tempPdf.deleteSync();
+      } catch (_) {}
+    }
+  }
+
+  /// Converts the converter's outline model into the editor's outline items.
+  ///
+  /// An empty outline is reported as null so [createNoteFromPdf] may still
+  /// fall back to extracting the (already embedded) outline.
+  static List<PdfOutlineItem>? _toPdfOutline(
+    List<ConvertedOutlineEntry> entries,
+  ) {
+    if (entries.isEmpty) return null;
+    return [
+      for (final entry in entries)
+        PdfOutlineItem(
+          title: entry.title,
+          pageIndex: entry.pageIndex,
+          children: _toPdfOutline(entry.children),
+        ),
+    ];
+  }
+
+  /// Removes scratch PDFs left behind by interrupted document imports.
+  static Future<void> _cleanupImportTempFiles() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      if (!tempDir.existsSync()) return;
+      final cutoff = DateTime.now().subtract(const Duration(hours: 6));
+      for (final entity in tempDir.listSync()) {
+        if (entity is! File) continue;
+        if (!p.basename(entity.path).startsWith(_importTempPrefix)) continue;
+        try {
+          if (entity.statSync().modified.isBefore(cutoff)) entity.deleteSync();
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   static Future _createFileDirectory(String filePath) async {

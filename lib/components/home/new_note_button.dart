@@ -507,6 +507,45 @@ class _NewNoteButtonState extends State<NewNoteButton> {
                                     count++;
                                     lastImportedPath = sbnBasePath;
                                   }
+                                } else if (lowerPath.endsWith('.epub') ||
+                                    lowerPath.endsWith('.djvu') ||
+                                    lowerPath.endsWith('.djv')) {
+                                  if (!Editor.canRasterPdf) {
+                                    if (scaffoldCtx.mounted) {
+                                      ScaffoldMessenger.of(scaffoldCtx)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(t.home.deviceNoPdfImport),
+                                        ),
+                                      );
+                                    }
+                                    continue;
+                                  }
+                                  final extIndex = file.name.lastIndexOf('.');
+                                  final baseName = extIndex > 0
+                                      ? file.name.substring(0, extIndex)
+                                      : file.name;
+                                  final sbnBasePath =
+                                      await FileManager.suffixFilePathToMakeItUnique(
+                                    '${widget.path ?? ''}/$baseName',
+                                  );
+                                  final ok =
+                                      await FileManager.createNoteFromConvertedDocument(
+                                    sbnBasePath,
+                                    filePath,
+                                    theme: themeData,
+                                    mediaQuery: mediaQueryData,
+                                    onImportProgress: (p, status) {
+                                      onProgress(
+                                        (i + p) / otherFiles.length,
+                                        '${i + 1}/${otherFiles.length} · $status',
+                                      );
+                                    },
+                                  );
+                                  if (ok) {
+                                    count++;
+                                    lastImportedPath = sbnBasePath;
+                                  }
                                 }
                               }
 
@@ -766,6 +805,44 @@ class _NewNoteButtonState extends State<NewNoteButton> {
                           if (importedPath != null) {
                             count++;
                             lastImportedPath = importedPath;
+                          }
+                        } else if (filePath.toLowerCase().endsWith('.epub') ||
+                            filePath.toLowerCase().endsWith('.djvu') ||
+                            filePath.toLowerCase().endsWith('.djv')) {
+                          if (!Editor.canRasterPdf) {
+                            if (scaffoldCtx.mounted) {
+                              ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                                SnackBar(
+                                  content: Text(t.home.deviceNoPdfImport),
+                                ),
+                              );
+                            }
+                            continue;
+                          }
+                          final extIndex = file.name.lastIndexOf('.');
+                          final baseName = extIndex > 0
+                              ? file.name.substring(0, extIndex)
+                              : file.name;
+                          final sbnBasePath =
+                              await FileManager.suffixFilePathToMakeItUnique(
+                            '${widget.path ?? ''}/$baseName',
+                          );
+                          final ok =
+                              await FileManager.createNoteFromConvertedDocument(
+                            sbnBasePath,
+                            filePath,
+                            theme: themeData,
+                            mediaQuery: mediaQueryData,
+                            onImportProgress: (p, status) {
+                              onProgress(
+                                (i + p) / otherFiles.length,
+                                '${i + 1}/${otherFiles.length} · $status',
+                              );
+                            },
+                          );
+                          if (ok) {
+                            count++;
+                            lastImportedPath = sbnBasePath;
                           }
                         }
                       }

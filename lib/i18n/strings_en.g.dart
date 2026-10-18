@@ -434,6 +434,10 @@ class Translations$editor$en {
 	final Translations _root; // ignore: unused_field
 
 	// Translations
+
+	/// en: 'Converting document…'
+	String get convertingDocument => 'Converting document…';
+
 	late final Translations$editor$navigation$en navigation = Translations$editor$navigation$en.internal(_root);
 	late final Translations$editor$pens$en pens = Translations$editor$pens$en.internal(_root);
 	late final Translations$editor$selectionBar$en selectionBar = Translations$editor$selectionBar$en.internal(_root);

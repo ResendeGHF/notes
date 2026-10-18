@@ -285,6 +285,93 @@ class _AdvancedPenSettingsState extends State<AdvancedPenSettings> {
             _persist();
           },
         ),
+        sectionTitle('Dynamics & Shape'),
+        _slider(
+          label: 'Velocity Thinning',
+          value: _opts.velocityThinning,
+          min: -1.0,
+          max: 1.0,
+          onChanged: (v) { _opts.velocityThinning = v; _persist(); },
+        ),
+        _slider(
+          label: 'Tip Ratio (Squash)',
+          value: _opts.tipRatio,
+          min: 0.05,
+          max: 1.0,
+          onChanged: (v) { _opts.tipRatio = v; _persist(); },
+        ),
+        _slider(
+          label: 'Tip Angle (rad)',
+          value: _opts.tipAngle,
+          min: -math.pi,
+          max: math.pi,
+          onChanged: (v) { _opts.tipAngle = v; _persist(); },
+        ),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: Text('Tip Follows Path (Tilt)', style: theme.textTheme.bodyMedium),
+          value: _opts.useTilt,
+          onChanged: (v) { _opts.useTilt = v; _persist(); },
+        ),
+        sectionTitle('Topology (Dash)'),
+        _slider(
+          label: 'Dash Length',
+          value: _opts.dashLength,
+          min: 0.0,
+          max: 100.0,
+          onChanged: (v) { _opts.dashLength = v; _persist(); },
+        ),
+        _slider(
+          label: 'Dash Gap',
+          value: _opts.dashGap,
+          min: 0.0,
+          max: 100.0,
+          onChanged: (v) { _opts.dashGap = v; _persist(); },
+        ),
+        sectionTitle('Custom Tapers'),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: Text('Start Taper', style: theme.textTheme.bodyMedium),
+          value: widget.pen.options.start.taperEnabled,
+          onChanged: (v) { 
+            widget.pen.options.start.taperEnabled = v; 
+            if (v && widget.pen.options.start.customTaper == null) {
+              widget.pen.options.start.customTaper = 20.0;
+            }
+            _persist(); 
+          },
+        ),
+        if (widget.pen.options.start.taperEnabled)
+          _slider(
+            label: 'Start Taper Length',
+            value: widget.pen.options.start.customTaper ?? 20.0,
+            min: 5.0,
+            max: 100.0,
+            onChanged: (v) { widget.pen.options.start.customTaper = v; _persist(); },
+          ),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: Text('End Taper', style: theme.textTheme.bodyMedium),
+          value: widget.pen.options.end.taperEnabled,
+          onChanged: (v) { 
+            widget.pen.options.end.taperEnabled = v; 
+            if (v && widget.pen.options.end.customTaper == null) {
+              widget.pen.options.end.customTaper = 20.0;
+            }
+            _persist(); 
+          },
+        ),
+        if (widget.pen.options.end.taperEnabled)
+          _slider(
+            label: 'End Taper Length',
+            value: widget.pen.options.end.customTaper ?? 20.0,
+            min: 5.0,
+            max: 100.0,
+            onChanged: (v) { widget.pen.options.end.customTaper = v; _persist(); },
+          ),
         sectionTitle('Wobble Smoother'),
         _slider(
           label: 'Timeout',

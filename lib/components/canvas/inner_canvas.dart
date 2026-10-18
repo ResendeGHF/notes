@@ -13,6 +13,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:one_dollar_unistroke_recognizer/one_dollar_unistroke_recognizer.dart';
+import 'package:pdfrx/pdfrx.dart' hide PdfLink;
 import 'package:saber/components/canvas/_canvas_background_painter.dart';
 import 'package:saber/components/canvas/_canvas_painter.dart';
 import 'package:saber/components/canvas/_circle_stroke.dart';
@@ -22,14 +23,15 @@ import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
-import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/components/canvas/selection_handles_overlay.dart';
 import 'package:saber/components/canvas/shape_control_points_overlay.dart';
+import 'package:saber/components/editor/pdf_link_detector.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/quill_styles.dart';
 import 'package:saber/data/editor/stroke_paint_image_cache.dart';
+import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
@@ -37,8 +39,6 @@ import 'package:saber/data/tools/pen.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/services/display_ink_feel.dart';
-import 'package:pdfrx/pdfrx.dart' hide PdfLink;
-import 'package:saber/components/editor/pdf_link_detector.dart';
 
 bool _strokeCanMergeSolidMesh(Stroke stroke) => stroke.canBatchSolidMesh;
 
@@ -283,7 +283,7 @@ class InnerCanvasState extends State<InnerCanvas> {
   Listenable? _cachedRasterRepaint;
   Listenable? _cachedInkRepaint;
 
-  bool _linkMarkersCollapsed = true;
+  var _linkMarkersCollapsed = true;
 
   /// Raster-drag snapshot for massive selections (see
   /// [CanvasPainter.captureSelectionRaster]): one blit per frame instead of a
@@ -435,14 +435,14 @@ class InnerCanvasState extends State<InnerCanvas> {
   List<Stroke>? _cachedCommittedInkStrokes;
   List<Stroke>? _cachedCommittedHighlighterStrokes;
 
-  final List<Stroke> _pendingInk = [];
-  final Set<Stroke> _pendingInkSet = {};
+  final _pendingInk = <Stroke>[];
+  final _pendingInkSet = <Stroke>{};
   Timer? _pendingBakeTimer;
-  final ValueNotifier<int> _pendingRepaint = ValueNotifier(0);
+  final _pendingRepaint = ValueNotifier<int>(0);
   var _pendingGeneration = 0;
-  List<Stroke> _tiledStrokesSnapshot = const [];
-  List<Stroke> _pageStrokeSnapshot = const [];
-  final _LiveStrokeList _liveTiledStrokes = _LiveStrokeList();
+  var _tiledStrokesSnapshot = const <Stroke>[];
+  var _pageStrokeSnapshot = const <Stroke>[];
+  final _liveTiledStrokes = _LiveStrokeList();
 
   void _invalidateCommittedStrokesFlatCache() {
     _cachedCommittedStrokesFlat = null;
@@ -694,7 +694,7 @@ class InnerCanvasState extends State<InnerCanvas> {
   }
 
   Timer? _shapePreviewTicker;
-  final ValueNotifier<int> _shapePreviewRepaint = ValueNotifier(0);
+  final _shapePreviewRepaint = ValueNotifier<int>(0);
   var _shapePreviewTick = 0;
   late final ScrollController _quillScrollController;
 
@@ -870,14 +870,14 @@ class InnerCanvasState extends State<InnerCanvas> {
 
   Listenable get _canvasRepaintListenable {
     return _cachedCanvasRepaint ??= Listenable.merge([
-      if (widget.redrawPageListenable != null) widget.redrawPageListenable!,
-      if (widget.interactionRepaintListenable != null) widget.interactionRepaintListenable!,
-      if (widget.eraserPositionListenable != null) widget.eraserPositionListenable!,
+      widget.redrawPageListenable,
+      widget.interactionRepaintListenable,
+      widget.eraserPositionListenable,
       _shapePreviewRepaint,
       _pendingRepaint,
-      _layer2Repaint, // ALWAYS include it to avoid recreating the Listenable when selection changes
+      _layer2Repaint,
       StrokePaintImageCache.instance.revision,
-    ]);
+    ].whereType<Listenable>().toList());
   }
 
   Listenable? get _pageRasterRepaintListenable {
@@ -892,10 +892,10 @@ class InnerCanvasState extends State<InnerCanvas> {
     return _cachedInkRepaint ??= Listenable.merge([
       _layer2Repaint,
       _pendingRepaint,
-      if (_pageRasterRepaintListenable != null) _pageRasterRepaintListenable!,
+      _pageRasterRepaintListenable,
       _strokePictureCache.recordGeneration,
       TiledStrokePictureCache.lodEpoch,
-    ]);
+    ].whereType<Listenable>().toList());
   }
 
   @override
@@ -1283,24 +1283,29 @@ class InnerCanvasState extends State<InnerCanvas> {
     final colorScheme = theme.colorScheme;
     final brightness = theme.brightness;
 
-    final overrides = stows.noteInvertInDarkModeOverrides.value;
-    final invert =
-    widget.overrideInvert ??
-    (brightness == Brightness.dark
-    ? (overrides[widget.coreInfo.filePath] == 1)
-    : false);
+    // IGNORA o widget.overrideInvert se for o canvas principal, pois o builder do EditorState
+    // pode estar passando um valor defasado. Força a leitura hierárquica real.
+    final invert = widget.isPreview 
+        ? (widget.overrideInvert ?? (brightness == Brightness.dark ? getEffectiveNoteInvertInDarkModeForFile(widget.coreInfo.filePath) : false))
+        : (brightness == Brightness.dark ? getEffectiveNoteInvertInDarkModeForFile(widget.coreInfo.filePath) : false);
 
-    if (widget.overrideInvert == null && brightness == Brightness.dark) {
-      return ValueListenableBuilder<Map<String, int>>(
-        valueListenable: stows.noteInvertInDarkModeOverrides,
-        builder: (context, overridesMap, _) {
-          final effectiveInvert = overridesMap[widget.coreInfo.filePath] == 1;
-          return _buildContent(
-            context,
-            theme,
-            colorScheme,
-            brightness,
-            effectiveInvert,
+    if (!widget.isPreview && brightness == Brightness.dark) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: stows.editorAutoInvert,
+        builder: (context, globalAutoInvert, _) {
+          return ValueListenableBuilder<Map<String, int>>(
+            valueListenable: stows.noteInvertInDarkModeOverrides,
+            builder: (context, overridesMap, _) {
+              final overrideVal = overridesMap[widget.coreInfo.filePath];
+              final effectiveInvert = overrideVal != null ? overrideVal == 1 : globalAutoInvert;
+              return _buildContent(
+                context,
+                theme,
+                colorScheme,
+                brightness,
+                effectiveInvert,
+              );
+            },
           );
         },
       );
@@ -2402,15 +2407,15 @@ class TiledStrokePictureCache {
     debugForceSyncRaster = false;
   }
 
-  final Map<int, ui.Picture> _pictures = {};
-  final Map<int, ui.Image> _rasters = {};
-  final Map<int, double> _rasterScales = {};
-  final Set<int> _pathOnlyKeys = {};
-  final Set<int> _fineInkKeys = {};
-  final Set<int> _bakingKeys = {};
+  final _pictures = <int, ui.Picture>{};
+  final _rasters = <int, ui.Image>{};
+  final _rasterScales = <int, double>{};
+  final _pathOnlyKeys = <int>{};
+  final _fineInkKeys = <int>{};
+  final _bakingKeys = <int>{};
   var _rasterBakeEpoch = 0;
-  final Map<int, _PendingRasterJob> _pendingRasterJobs = {};
-  final List<int> _pendingRasterOrder = [];
+  final _pendingRasterJobs = <int, _PendingRasterJob>{};
+  final _pendingRasterOrder = <int>[];
   var _bakeScheduled = false;
   SpatialGrid? _grid;
   var _gridDirty = true;

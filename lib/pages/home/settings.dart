@@ -1205,12 +1205,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     afterChange: (_) => setState(() {}),
                   ),
                   SettingsSwitch(
-                    title: t.settings.prefLabels.editorAutoInvert,
-                    iconBuilder: (b) =>
-                        b ? Icons.invert_colors_on : Icons.invert_colors_off,
-                    pref: stows.editorAutoInvert,
-                  ),
-                  SettingsSwitch(
                     title: t.settings.prefLabels.editorPromptRename,
                     subtitle: t.settings.prefDescriptions.editorPromptRename,
                     iconBuilder: (b) =>

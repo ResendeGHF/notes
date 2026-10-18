@@ -115,13 +115,13 @@ final class PageRasterCacheManager {
   final ValueNotifier<int> repaintEpoch = ValueNotifier(0);
 
   int _cacheGen = 0;
-  final Map<int, PageCacheEntry> _inkCaches = {};
-  final Map<int, PageCacheEntry> _bgCaches = {};
-  final Map<int, int> _pageInkGeneration = {};
-  final Map<int, int> _pageBgGeneration = {};
-  final Map<int, Size> _pageSizes = {};
-  final Set<int> _pendingInk = {};
-  final Set<int> _pendingBg = {};
+  final _inkCaches = <int, PageCacheEntry>{};
+  final _bgCaches = <int, PageCacheEntry>{};
+  final _pageInkGeneration = <int, int>{};
+  final _pageBgGeneration = <int, int>{};
+  final _pageSizes = <int, Size>{};
+  final _pendingInk = <int>{};
+  final _pendingBg = <int>{};
   bool _disposed = false;
   bool _jobRunning = false;
 
@@ -144,7 +144,7 @@ final class PageRasterCacheManager {
   /// yielding to the event loop. Bakes are sliced so pan/zoom/ink input is
   /// never blocked for more than one slice (~3 ms).
   static const Duration _warmupSliceBudget = Duration(milliseconds: 3);
-  final Queue<_RasterJob> _jobQueue = Queue();
+  final _jobQueue = Queue<_RasterJob>();
 
   // --- Viewport / zoom LOD (shared with gesture detector) ---
 
@@ -1393,4 +1393,4 @@ bool _resSufficientForBlit(double cachedRes, double targetRes) =>
 
 /// Whether [cachedRes] is enough to blit without upscaling artifacts.
 bool pageRasterCacheResCoversTarget(double cachedRes, double targetRes) =>
-    _resSufficientForBlit(cachedRes, targetRes);
+      _resSufficientForBlit(cachedRes, targetRes);

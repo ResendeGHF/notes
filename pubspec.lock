@@ -1424,10 +1424,9 @@ packages:
   pdf:
     dependency: "direct main"
     description:
-      name: pdf
-      sha256: "517df47af468734a23c8b513c0c6a8a62357403ab1b8ab7fad1606576a9dbdd0"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/pdf"
+      relative: true
+    source: path
     version: "3.13.0"
   pdf_combiner:
     dependency: "direct main"

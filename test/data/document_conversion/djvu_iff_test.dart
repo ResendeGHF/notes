@@ -236,7 +236,7 @@ void main() {
 
         expect(dirm.isBundled, isTrue, reason: '$name bundled');
         expect(
-          dirm.metadata,
+          bzzDecode(dirm.metadata),
           equals(readDjvuRef(name, 'root.DIRM.dec.bin')),
           reason: '$name metadata',
         );

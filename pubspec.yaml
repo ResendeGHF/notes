@@ -202,6 +202,10 @@ dev_dependencies:
 
 dependency_overrides:
   irondash_engine_context: ^0.6.0-dev.0
+  # Local patch: PdfStream grows geometrically (see packages/pdf/PATCHES.md);
+  # without it saving a large PDF is quadratic and takes ~15s for a scan book.
+  pdf:
+    path: packages/pdf
   # https://github.com/KasemJaffer/receive_sharing_intent/pull/333
   receive_sharing_intent:
     git:
@@ -232,6 +236,11 @@ flutter:
     - assets/google_fonts/Dekko/OFL.txt
     - assets/google_fonts/Fira_Mono/OFL.txt
     - assets/google_fonts/Neucha/OFL.txt
+    - assets/google_fonts/Atkinson_Hyperlegible_Next/OFL.txt
+    - assets/google_fonts/Atkinson_Hyperlegible_Next/AtkinsonHyperlegibleNext-Regular.ttf
+    - assets/google_fonts/Atkinson_Hyperlegible_Next/AtkinsonHyperlegibleNext-SemiBold.ttf
+    - assets/google_fonts/Atkinson_Hyperlegible_Next/AtkinsonHyperlegibleNext-Italic.ttf
+    - assets/google_fonts/Atkinson_Hyperlegible_Next/AtkinsonHyperlegibleNext-SemiBoldItalic.ttf
 
   shaders:
     - shaders/pencil.frag

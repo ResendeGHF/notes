@@ -314,12 +314,25 @@ class AdvancedPenOptions {
   AdvancedPenLineCap lineCap;
   AdvancedPenBuilderType builderType;
   AdvancedPenModelerParams modeler;
+  
+  double velocityThinning;
+  double tipAngle;
+  double tipRatio;
+  bool useTilt;
+  double dashLength;
+  double dashGap;
 
   AdvancedPenOptions({
     required this.pressureCurve,
     required this.lineCap,
     required this.builderType,
     required this.modeler,
+    this.velocityThinning = 0.0,
+    this.tipAngle = 0.0,
+    this.tipRatio = 1.0,
+    this.useTilt = false,
+    this.dashLength = 0.0,
+    this.dashGap = 0.0,
   });
 
   /// Solid defaults (as in Rnote): linear pressure, rounded caps, modeled
@@ -329,6 +342,12 @@ class AdvancedPenOptions {
         lineCap: AdvancedPenLineCap.rounded,
         builderType: AdvancedPenBuilderType.modeled,
         modeler: AdvancedPenModelerParams.advancedDefaults,
+        velocityThinning: 0.0,
+        tipAngle: 0.0,
+        tipRatio: 1.0,
+        useTilt: false,
+        dashLength: 0.0,
+        dashGap: 0.0,
       );
 
   /// Marker defaults (as in Rnote): constant pressure (fixed width),
@@ -338,6 +357,12 @@ class AdvancedPenOptions {
         lineCap: AdvancedPenLineCap.straight,
         builderType: AdvancedPenBuilderType.modeled,
         modeler: AdvancedPenModelerParams.advancedDefaults,
+        velocityThinning: 0.0,
+        tipAngle: 0.0,
+        tipRatio: 1.0,
+        useTilt: false,
+        dashLength: 0.0,
+        dashGap: 0.0,
       );
 
   AdvancedPenOptions copyWith({
@@ -345,12 +370,24 @@ class AdvancedPenOptions {
     AdvancedPenLineCap? lineCap,
     AdvancedPenBuilderType? builderType,
     AdvancedPenModelerParams? modeler,
+    double? velocityThinning,
+    double? tipAngle,
+    double? tipRatio,
+    bool? useTilt,
+    double? dashLength,
+    double? dashGap,
   }) {
     return AdvancedPenOptions(
       pressureCurve: pressureCurve ?? this.pressureCurve,
       lineCap: lineCap ?? this.lineCap,
       builderType: builderType ?? this.builderType,
       modeler: modeler ?? this.modeler,
+      velocityThinning: velocityThinning ?? this.velocityThinning,
+      tipAngle: tipAngle ?? this.tipAngle,
+      tipRatio: tipRatio ?? this.tipRatio,
+      useTilt: useTilt ?? this.useTilt,
+      dashLength: dashLength ?? this.dashLength,
+      dashGap: dashGap ?? this.dashGap,
     );
   }
 
@@ -359,6 +396,12 @@ class AdvancedPenOptions {
         'lineCap': lineCap.id,
         'builderType': builderType.id,
         'modeler': modeler.toJson(),
+        'velocityThinning': velocityThinning,
+        'tipAngle': tipAngle,
+        'tipRatio': tipRatio,
+        'useTilt': useTilt,
+        'dashLength': dashLength,
+        'dashGap': dashGap,
       };
 
   factory AdvancedPenOptions.fromJson(Map<String, dynamic> json) {
@@ -370,6 +413,12 @@ class AdvancedPenOptions {
       modeler: modelerRaw is Map
           ? AdvancedPenModelerParams.fromJson(Map<String, dynamic>.from(modelerRaw))
           : AdvancedPenModelerParams.advancedDefaults,
+      velocityThinning: (json['velocityThinning'] as num?)?.toDouble() ?? 0.0,
+      tipAngle: (json['tipAngle'] as num?)?.toDouble() ?? 0.0,
+      tipRatio: (json['tipRatio'] as num?)?.toDouble() ?? 1.0,
+      useTilt: json['useTilt'] as bool? ?? false,
+      dashLength: (json['dashLength'] as num?)?.toDouble() ?? 0.0,
+      dashGap: (json['dashGap'] as num?)?.toDouble() ?? 0.0,
     );
   }
 
@@ -379,9 +428,15 @@ class AdvancedPenOptions {
         other.pressureCurve == pressureCurve &&
         other.lineCap == lineCap &&
         other.builderType == builderType &&
-        other.modeler == modeler;
+        other.modeler == modeler &&
+        other.velocityThinning == velocityThinning &&
+        other.tipAngle == tipAngle &&
+        other.tipRatio == tipRatio &&
+        other.useTilt == useTilt &&
+        other.dashLength == dashLength &&
+        other.dashGap == dashGap;
   }
 
   @override
-  int get hashCode => Object.hash(pressureCurve, lineCap, builderType, modeler);
+  int get hashCode => Object.hash(pressureCurve, lineCap, builderType, modeler, velocityThinning, tipAngle, tipRatio, useTilt, dashLength, dashGap);
 }

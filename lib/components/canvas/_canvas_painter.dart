@@ -1175,6 +1175,8 @@ class CanvasPainter extends CustomPainter {
                     return math.max(0.05, baseRadius * (0.25 + 0.9 * pressure * pressure));
                   } else if (currentStroke!.toolId == ToolId.ballpointPen || currentStroke!.toolId == ToolId.calligraphyPen) {
                     return baseRadius;
+                  } else if (currentStroke!.toolId == ToolId.advancedPen) {
+                    return math.max(0.05, currentStroke!.brushOptions.pressureCurve.apply(baseRadius * 2, pressure) / 2);
                   }
                   return math.max(0.1, baseRadius * (0.2 + 0.8 * pressure * 2));
                 }().clamp(0.5, 999.0),
@@ -1280,6 +1282,8 @@ class CanvasPainter extends CustomPainter {
       double radius = baseRadius;
       if (currentStroke!.toolId == ToolId.fountainPen) {
         radius = math.max(0.05, baseRadius * (0.25 + 0.9 * pressure * pressure));
+      } else if (currentStroke!.toolId == ToolId.advancedPen) {
+        radius = math.max(0.05, currentStroke!.brushOptions.pressureCurve.apply(baseRadius * 2, pressure) / 2);
       } else if (currentStroke!.toolId != ToolId.ballpointPen && currentStroke!.toolId != ToolId.calligraphyPen) {
         radius = math.max(0.1, baseRadius * (0.2 + 0.8 * pressure * 2));
       }

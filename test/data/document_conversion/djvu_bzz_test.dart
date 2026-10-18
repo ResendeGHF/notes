@@ -13,14 +13,13 @@ void main() {
   group('bzzDecode', () {
     test('decodes DIRM metadata of every fixture', () {
       for (final name in djvuFixtures) {
-        final raw = readDjvuRef(name, 'root.DIRM.bin');
         final manifest = readDjvuManifest(name);
         final hasDirm = (manifest['rootChunks'] as List<dynamic>).any(
           (chunk) => (chunk as List<dynamic>)[0] == 'DIRM',
         );
         if (!hasDirm) continue;
         // Only the tail of the DIRM chunk is BZZ-compressed.
-        final dirm = parseDirmPayload(raw);
+        final dirm = parseDirmPayload(readDjvuRef(name, 'root.DIRM.bin'));
         expect(
           bzzDecode(dirm.metadata),
           equals(

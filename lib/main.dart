@@ -368,6 +368,35 @@ class App extends StatefulWidget {
               '/$fileNameWithoutExtension',
             );
             _router.push(RoutePaths.editImportPdf(sbnFilePath, file.path));
+          } else if ((extension == 'epub' ||
+                  extension == 'djvu' ||
+                  extension == 'djv') &&
+              Editor.canRasterPdf) {
+            // Converted documents are laid out into a note right away, so the
+            // scratch PDF can be removed before the note is opened.
+            onProgress(0, leafName, indeterminate: true);
+            final fileName = file.path.split(RegExp(r'[\\/]')).last;
+            final dot = fileName.lastIndexOf('.');
+            final fileNameWithoutExtension = dot > 0
+                ? fileName.substring(0, dot)
+                : fileName;
+            final sbnFilePath = await FileManager.suffixFilePathToMakeItUnique(
+              '/$fileNameWithoutExtension',
+            );
+            final ctx = App._rootNavigatorKey.currentContext;
+            if (ctx == null || !ctx.mounted) return;
+            final imported =
+                await FileManager.createNoteFromConvertedDocument(
+              sbnFilePath,
+              file.path,
+              theme: Theme.of(ctx),
+              mediaQuery: MediaQuery.of(ctx),
+              onImportProgress: onProgress,
+            );
+            if (imported) {
+              await Future<void>.delayed(const Duration(milliseconds: 100));
+              _router.push(RoutePaths.editFilePath(sbnFilePath));
+            }
           } else {
             log.warning('openFile: Unsupported file type: $extension');
           }

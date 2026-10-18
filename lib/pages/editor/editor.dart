@@ -61,6 +61,7 @@ import 'package:saber/components/editor/export_dialog.dart';
 import 'package:saber/components/editor/note_properties_dialog.dart';
 import 'package:saber/components/editor/pdf_equation_preview.dart';
 import 'package:saber/components/editor/pdf_link_detector.dart';
+import 'package:saber/components/editor/pdf_outline_extractor.dart';
 import 'package:saber/components/editor/pdf_page_picker_dialog.dart';
 import 'package:saber/components/editor/region_screenshot_overlay.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
@@ -76,6 +77,8 @@ import 'package:saber/components/toolbar/enhanced_toolbar.dart';
 import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/floating_calculator.dart';
 import 'package:saber/components/toolbar/plot_animation_metadata.dart';
+import 'package:saber/data/document_conversion/document_converter.dart';
+import 'package:saber/data/document_conversion/epub/epub_fonts.dart';
 import 'package:saber/data/editor/_color_change.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
@@ -455,7 +458,7 @@ class EditorState extends State<Editor>
     _lastPageRasterBandEnd = bandEnd;
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
-        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     _pageRasterCache.maintainVisibleBand(
       coreInfo: coreInfo,
@@ -662,7 +665,7 @@ class EditorState extends State<Editor>
     final visibleCenter = _visibleBandCenter(pageCount, bandStart, bandEnd);
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
-        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     final scale = _transformationController.value.approxScale;
     final currentScale = scale > 0 ? scale : 1.0;
@@ -2123,6 +2126,7 @@ class EditorState extends State<Editor>
     _assignKeybindings();
 
     stows.noteInvertInDarkModeOverrides.addListener(_onGlobalInvertChanged);
+    stows.editorAutoInvert.addListener(_onGlobalInvertChanged);
     _showPdfLinkBoxes.addListener(_onShowPdfLinkBoxesChanged);
 
     NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
@@ -2172,7 +2176,7 @@ class EditorState extends State<Editor>
   void _initAsync() async {
     log.info('PDFTIMING editor._initAsync start');
     coreInfo.filePath = await widget.initialPath;
-    _lastInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
+    _lastInvertBool = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
     filenameTextEditingController.text = coreInfo.fileName;
 
     if (needsNaming) {
@@ -7891,7 +7895,7 @@ class EditorState extends State<Editor>
     try {
       filesResult = await FilePicker.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf'],
+        allowedExtensions: ['pdf', 'epub', 'djvu', 'djv'],
         allowMultiple: false,
         withData: false,
       );
@@ -7904,6 +7908,23 @@ class EditorState extends State<Editor>
     final PlatformFile file = filesResult.single;
     final path = file.path!;
 
+    // `.epub`/`.djvu` are converted to a scratch PDF first. The asset cache
+    // keeps a reference to that file until the note is saved, so it is
+    // deleted only once the import save completes; leftovers from a crash
+    // are removed by FileManager at startup.
+    final format = documentFormatForPath(path);
+    if (format != null && format != DocumentFormat.pdf) {
+      final scratchPath = await _convertDocumentForImport(path, format);
+      if (scratchPath == null) return false;
+      if (coreInfo.isInfinite) {
+        return _importPdfAsImageForInfiniteNote(
+          scratchPath,
+          deleteAfterSave: true,
+        );
+      }
+      return importPdfFromFilePath(scratchPath, deleteAfterSave: true);
+    }
+
     if (coreInfo.isInfinite) {
       return _importPdfAsImageForInfiniteNote(path);
     }
@@ -7911,7 +7932,66 @@ class EditorState extends State<Editor>
     return importPdfFromFilePath(path);
   }
 
-  Future<bool> _importPdfAsImageForInfiniteNote(String path) async {
+  /// Converts an `.epub`/`.djvu` file into a scratch PDF for importing.
+  ///
+  /// Returns the scratch file's path, or null when the import was cancelled
+  /// or the document could not be converted. The conversion runs in a
+  /// background isolate and writes the scratch file there, so the UI keeps
+  /// responding and the PDF bytes never touch this isolate's heap; cancelling
+  /// the progress dialog discards the result but cannot abort the conversion
+  /// itself. The caller passes `deleteAfterSave: true` to the import methods
+  /// so the scratch file is removed once the asset cache has persisted it.
+  Future<String?> _convertDocumentForImport(
+    String path,
+    DocumentFormat format,
+  ) async {
+    if (!mounted) return null;
+    final progress = _BlockingProgress(context, title: t.editor.menu.import)
+      ..show();
+    try {
+      progress.status.value = t.editor.convertingDocument;
+      final scratch = await FileManager.createImportScratchPdf();
+      await convertDocumentFileToPdf(
+        path,
+        format: format,
+        epubOptions: await loadEpubPdfOptions(),
+        outputPath: scratch.path,
+      );
+      if (progress.cancelled || !mounted) {
+        await _deleteScratchImport(scratch.path);
+        return null;
+      }
+      return scratch.path;
+    } catch (e, stack) {
+      log.severe('Failed to convert document $path: $e', stack);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.home.errorImporting(error: e))),
+        );
+      }
+      return null;
+    } finally {
+      progress.close();
+    }
+  }
+
+  /// Deletes a converted-document scratch PDF after it has been persisted.
+  ///
+  /// Only ever called for files allocated by
+  /// [FileManager.createImportScratchPdf].
+  Future<void> _deleteScratchImport(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      log.warning('Failed to delete scratch import file $path: $e');
+    }
+  }
+
+  Future<bool> _importPdfAsImageForInfiniteNote(
+    String path, {
+    bool deleteAfterSave = false,
+  }) async {
     final pdfFile = File(path);
 
     final assetIndex = await coreInfo.assetCacheAll.addPdfFast(pdfFile);
@@ -7933,8 +8013,7 @@ class EditorState extends State<Editor>
     if (!mounted) return false;
     if (pdfDocument.pages.isEmpty) return false;
 
-    final invert =
-        stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
+    final invert = Theme.of(context).brightness == Brightness.dark ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath) : false;
     final selected = await PdfPagePickerDialog.show(
       context,
       pdfDocument: pdfDocument,
@@ -8033,11 +8112,26 @@ class EditorState extends State<Editor>
     if (mounted) setState(() {});
     _checkForPdfLinks();
     currentTool = Select.currentSelect;
-    autosaveAfterDelay();
+    if (deleteAfterSave) {
+      // The asset cache keeps the scratch PDF until the note is saved; save
+      // now so the converted file can be removed.
+      unawaited(
+        saveToFile(force: true, updateThumbnail: false)
+            .then((_) => _deleteScratchImport(path))
+            .catchError((e) {
+              log.warning('Background save after PDF import failed: $e');
+            }),
+      );
+    } else {
+      autosaveAfterDelay();
+    }
     return true;
   }
 
-  Future<bool> importPdfFromFilePath(String path) async {
+  Future<bool> importPdfFromFilePath(
+    String path, {
+    bool deleteAfterSave = false,
+  }) async {
     if (coreInfo.isInfinite) {
       return _importPdfAsImageForInfiniteNote(path);
     }
@@ -8071,6 +8165,19 @@ class EditorState extends State<Editor>
       return false;
     }
     log.info('PDF loaded with $totalPages pages');
+
+    // Adopt the PDF's own outline when the note has none yet (for example a
+    // converted `.epub`/`.djvu` imported through the editor's import button).
+    if (coreInfo.pdfOutlines == null) {
+      try {
+        final outlines = await PdfOutlineExtractor.extractOutlines(pdfDocument);
+        if (outlines != null && outlines.isNotEmpty && mounted) {
+          coreInfo.pdfOutlines = outlines;
+        }
+      } catch (e) {
+        log.warning('Failed to adopt PDF outlines: $e');
+      }
+    }
 
     final emptyPage = coreInfo.pages.removeLast();
     assert(emptyPage.isEmpty);
@@ -8209,9 +8316,13 @@ class EditorState extends State<Editor>
     });
 
     unawaited(
-      saveToFile(force: true, updateThumbnail: false).catchError((e) {
-        log.warning('Background save after PDF import failed: $e');
-      }),
+      saveToFile(force: true, updateThumbnail: false)
+          .then((_) async {
+            if (deleteAfterSave) await _deleteScratchImport(path);
+          })
+          .catchError((e) {
+            log.warning('Background save after PDF import failed: $e');
+          }),
     );
 
     return true;
@@ -9413,9 +9524,8 @@ class EditorState extends State<Editor>
 
     // Snapshot style once; rendering/generation outlive frames.
     final theme = Theme.of(context);
-    final overrides = stows.noteInvertInDarkModeOverrides.value;
     final invert = theme.brightness == Brightness.dark
-        ? (overrides[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     final backgroundColor = InnerCanvas.getBackgroundColor(
       context,
@@ -9530,9 +9640,8 @@ class EditorState extends State<Editor>
     final svc = OnlineTranscriptionService();
 
     final theme = Theme.of(context);
-    final overrides = stows.noteInvertInDarkModeOverrides.value;
     final invert = theme.brightness == Brightness.dark
-        ? (overrides[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     final backgroundColor = InnerCanvas.getBackgroundColor(
       context,
@@ -10039,7 +10148,7 @@ class EditorState extends State<Editor>
         stows.editorToolbarAlignment.value == AxisDirection.right;
     final brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     void notifyHostToolbarChanged() {
       onHostToolbarChanged?.call();
@@ -10545,9 +10654,7 @@ class EditorState extends State<Editor>
                   onGoToLocation: _onGoToLocation,
                   maxWidth: maxWidth,
                   invert: Theme.of(context).brightness == Brightness.dark
-                      ? (stows.noteInvertInDarkModeOverrides.value[coreInfo
-                                .filePath] ==
-                            1)
+                      ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
                       : false,
                 );
               },
@@ -10587,13 +10694,16 @@ class EditorState extends State<Editor>
       showToolbar: widget.showToolbar,
     );
 
-    return ValueListenableBuilder<Map<String, int>>(
-      valueListenable: stows.noteInvertInDarkModeOverrides,
-      builder: (context, _, __) {
-        return ValueListenableBuilder(
-          valueListenable: savingState,
-          builder: (context, savingState, child) {
-            return PopScope(
+    return ValueListenableBuilder<bool>(
+      valueListenable: stows.editorAutoInvert,
+      builder: (context, globalAutoInvert, _) {
+        return ValueListenableBuilder<Map<String, int>>(
+          valueListenable: stows.noteInvertInDarkModeOverrides,
+          builder: (context, overridesMap, __) {
+            return ValueListenableBuilder(
+              valueListenable: savingState,
+              builder: (context, savingState, child) {
+                return PopScope(
               canPop: widget.embedded && !_isDockedSidePanelVisible,
               onPopInvokedWithResult: (didPop, _) {
                 if (!didPop && _isDockedSidePanelVisible) {
@@ -10714,9 +10824,11 @@ class EditorState extends State<Editor>
                     );
                   },
                 ),
-        );
-      },
-    );
+              );
+            },
+          );
+        },
+      );
   }
 
   void snackBarNeedsToSaveBeforeExiting() {
@@ -10852,7 +10964,7 @@ class EditorState extends State<Editor>
 
   void _onGlobalInvertChanged() {
     if (!mounted) return;
-    final currentInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
+    final currentInvertBool = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
     if (currentInvertBool != _lastInvertBool) {
       _lastInvertBool = currentInvertBool;
 
@@ -10860,15 +10972,11 @@ class EditorState extends State<Editor>
         for (int i = 0; i < coreInfo.pages.length; i++) {
           final page = coreInfo.pages[i];
           
-          if (page.backgroundImage != null) {
-            page.backgroundImage!.invertible = currentInvertBool;
-          }
-          for (final image in page.images) {
-            image.invertible = currentInvertBool;
+          if (!page.isLazyShell) {
+            _forceRefreshPageStrokes(page);
+            page.strokePictureCache.invalidateAll(eagerRefill: true);
           }
           
-          _forceRefreshPageStrokes(page);
-          page.strokePictureCache.invalidateAll(eagerRefill: true);
           _pageRasterCache.invalidateInk(i, discardStale: true);
           _pageRasterCache.invalidatePage(i, ink: true, bg: true);
         }
@@ -10893,18 +11001,13 @@ class EditorState extends State<Editor>
   }
 
   void _toggleGlobalBackgroundInversion(bool invert) {
-    // Update the stows override so the setting persists across canvas interactions
-    final currentOverrides = Map<String, int>.from(
-      stows.noteInvertInDarkModeOverrides.value,
-    );
-    currentOverrides[coreInfo.filePath] = invert ? 1 : 0;
-    stows.noteInvertInDarkModeOverrides.value = currentOverrides;
+    setNoteInvertInDarkModeOverrideForFile(coreInfo.filePath, invert);
   }
 
   Widget bottomSheet(BuildContext context) {
     final Brightness brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
+        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
         : false;
     final int currentPageIndex = this.currentPageIndex;
 
@@ -11368,40 +11471,52 @@ class EditorState extends State<Editor>
   Widget _editorPlaceholderPageBuilder(BuildContext context, int pageIndex) {
     final page = coreInfo.pages[pageIndex];
 
-    return ValueListenableBuilder<Map<String, int>>(
-      valueListenable: stows.noteInvertInDarkModeOverrides,
-      builder: (context, overrides, _) {
-        final theme = _cachedTheme ?? Theme.of(context);
-        final invert = theme.brightness == Brightness.dark
-            ? (overrides[coreInfo.filePath] == 1)
-            : false;
+    return ValueListenableBuilder<bool>(
+      valueListenable: stows.editorAutoInvert,
+      builder: (context, globalAutoInvert, _) {
+        return ValueListenableBuilder<Map<String, int>>(
+          valueListenable: stows.noteInvertInDarkModeOverrides,
+          builder: (context, overrides, _) {
+            final theme = _cachedTheme ?? Theme.of(context);
+            final overrideVal = overrides[coreInfo.filePath];
+            final invert = theme.brightness == Brightness.dark
+                ? (overrideVal != null ? overrideVal == 1 : globalAutoInvert)
+                : false;
 
-        return Canvas(
-          key: ValueKey('placeholder_${invert}_$pageIndex'),
-          overrideInvert: invert,
-          path: coreInfo.filePath,
-          page: page,
-          pageIndex: 0,
-          textEditing: false,
-          coreInfo: EditorCoreInfo.empty,
-          currentStroke: null,
-          currentStrokeDetectedShape: null,
-          currentSelection: null,
-          placeholder: true,
-          setAsBackground: null,
-          currentTool: currentTool,
-          currentScale: double.minPositive,
-          eraserPosition: null,
-          eraserSize: null,
-          onNoteLinkTap: null,
-          lineHeight: page.hasLocalLineHeight
-              ? page.lineHeight
-              : coreInfo.lineHeight,
-          lineThickness: page.hasLocalLineThickness
-              ? page.lineThickness.toInt()
-              : coreInfo.lineThickness.toInt(),
-          lineColor: page.lineColor,
-          showPdfLinkBoxes: _showPdfLinkBoxes,
+            Color bgColor;
+            if (page.backgroundImage != null) {
+              bgColor = invert ? Colors.black : Colors.white;
+            } else {
+              bgColor = InnerCanvas.getBackgroundColor(
+                context,
+                page.backgroundColor.value != 0xFFFFFFFF
+                    ? page.backgroundColor
+                    : coreInfo.backgroundColor,
+              );
+              if (invert) {
+                bgColor = Color.fromARGB(
+                  bgColor.alpha,
+                  255 - bgColor.red,
+                  255 - bgColor.green,
+                  255 - bgColor.blue,
+                );
+              }
+            }
+
+            return Container(
+              width: page.size.width,
+              height: page.size.height,
+              color: bgColor,
+              child: Center(
+                child: Text(
+                  '${pageIndex + 1}',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant.withOpacity(0.3),
+                  ),
+                ),
+              ),
+            );
+          },
         );
       },
     );
