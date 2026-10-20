@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
-import 'dart:collection';
 import 'dart:math';
 import 'dart:ui';
 
@@ -15,11 +14,9 @@ import 'package:keybinder/keybinder.dart';
 import 'package:saber/components/canvas/hud/canvas_hud.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_transform_cache.dart';
-import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/components/canvas/interactive_canvas.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/data/editor/page.dart';
-import 'package:saber/data/extensions/change_notifier_extensions.dart';
 import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/eraser.dart';
@@ -64,6 +61,8 @@ class CanvasGestureDetector extends StatefulWidget {
     this.tryHydratePage,
     this.onMaintainPageRasterBand,
     this.onPrefetchNearbyPages,
+    this.onAddPageAbove,
+    this.onAddPageBelow,
     TransformationController? transformationController,
   }) : _transformationController =
            transformationController ?? TransformationController();
@@ -142,6 +141,8 @@ class CanvasGestureDetector extends StatefulWidget {
   late final TransformationController _transformationController;
 
   final void Function(Offset globalPosition)? onTapDown;
+  final VoidCallback? onAddPageAbove;
+  final VoidCallback? onAddPageBelow;
 
   @override
   State<CanvasGestureDetector> createState() => CanvasGestureDetectorState();
@@ -452,6 +453,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
     if (!widget._transformationController.value.isIdentity()) return;
 
+    // ignore: invalid_use_of_visible_for_testing_member
     final transformCacheItem = CanvasTransformCache.get(widget.filePath);
 
     if (transformCacheItem != null) {
@@ -846,6 +848,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
               this.axisAlignedPanLock = axisAlignedPanLock;
               stows.lastAxisAlignedPanLock.value = axisAlignedPanLock;
             }),
+            onAddPageAbove: widget.onAddPageAbove,
+            onAddPageBelow: widget.onAddPageBelow,
           ),
         ),
       ],
@@ -854,6 +858,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void dispose() {
+    // ignore: invalid_use_of_visible_for_testing_member
     CanvasTransformCache.add(
       widget.filePath,
       widget._transformationController.value,

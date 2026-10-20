@@ -9500,77 +9500,6 @@ class EditorState extends State<Editor>
 
       ...leadingActions,
 
-      if (!coreInfo.isInfinite)
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.post_add_outlined),
-          tooltip: 'Insert page',
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          offset: const Offset(0, 48),
-          onSelected: (value) {
-            final currentIdx = currentPageIndex;
-            if (value == 'above') {
-              insertPageBefore(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            } else if (value == 'below') {
-              insertPageAfter(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx + 1,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            }
-          },
-          itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-            PopupMenuItem<String>(
-              value: 'above',
-              child: Row(
-                children: [
-                  Icon(
-                    CupertinoIcons.arrow_up_circle,
-                    color: colorScheme.onSurface,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text('Page above'),
-                ],
-              ),
-            ),
-            PopupMenuItem<String>(
-              value: 'below',
-              child: Row(
-                children: [
-                  Icon(
-                    CupertinoIcons.arrow_down_circle,
-                    color: colorScheme.onSurface,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text('Page below'),
-                ],
-              ),
-            ),
-          ],
-        ),
-
-      // Pages button in the AppBar (single access — no floating FAB)
-      if (!coreInfo.isInfinite)
-        IconButton(
-          icon: const Icon(Icons.article_outlined),
-          tooltip: 'Pages',
-          isSelected: _dockedSidePanel == _EditorDockedSidePanel.pages,
-          onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
-        ),
-
       IconButton(
         icon: const Icon(Icons.more_vert_rounded),
         tooltip: t.home.tabs.settings,
@@ -9964,6 +9893,30 @@ class EditorState extends State<Editor>
             onDrawStart: onDrawStart,
             onDrawUpdate: onDrawUpdate,
             onDrawEnd: onDrawEnd,
+            onAddPageAbove: () {
+              final currentIdx = currentPageIndex;
+              insertPageBefore(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            },
+            onAddPageBelow: () {
+              final currentIdx = currentPageIndex;
+              insertPageAfter(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx + 1,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            },
             shouldInjectRawPointerSamplesForDraw:
                 shouldInjectRawPointerSamplesForDraw,
             onRawPointerMoveForDraw: onRawPointerMoveForDraw,
@@ -10183,6 +10136,18 @@ class EditorState extends State<Editor>
         children: [
           canvas,
 
+          if (!coreInfo.isInfinite && _dockedSidePanel != _EditorDockedSidePanel.pages)
+            Positioned(
+              bottom: 16,
+              left: 16,
+              child: FloatingActionButton.extended(
+                heroTag: 'pages_sidebar_fab',
+                onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
+                icon: const Icon(Icons.article_outlined),
+                label: const Text('Pages'),
+              ),
+            ),
+
           if (_previewPdfDocument != null &&
               _previewPageIndex != null &&
               _previewRegion != null)
@@ -10359,9 +10324,6 @@ class EditorState extends State<Editor>
                             ? const Color(0xFF1E1E1E)
                             : Theme.of(context).colorScheme.surfaceContainerLow,
                         resizeToAvoidBottomInset: false,
-                        // No Pages FAB: single access via the Pages button in the AppBar,
-                        // next to the add-pages button.
-                        // AppBar is only hidden when the PAGES tab is open. Settings and split view keep it visible!
                         appBar:
                             (_dockedSidePanel == _EditorDockedSidePanel.pages)
                             ? null
@@ -10899,6 +10861,54 @@ class EditorState extends State<Editor>
         _forceRefreshPageStrokes(page);
         _pageRasterCache.invalidateBg(currentPageIndex);
         _bumpInteractionRepaint();
+        autosaveAfterDelay();
+      }),
+
+      onSetPageFormat: (format) => setState(() {
+        if (coreInfo.readOnly) return;
+        coreInfo.notePageFormat = format;
+        final oldPage = coreInfo.pages[currentPageIndex];
+        final newSize = _newPageSize();
+        final sameSize =
+            oldPage.size.width == newSize.width &&
+            oldPage.size.height == newSize.height;
+        if (sameSize) {
+          coreInfo.notifyListeners();
+          return;
+        }
+        oldPage.quill.changeSubscription?.cancel();
+        oldPage.quill.focusNode.removeListener(_onQuillFocusChange);
+        final d = _newPageDefaults();
+        final newPage = EditorPage(
+          id: oldPage.id,
+          size: newSize,
+          strokes: List<Stroke>.from(oldPage.allStrokesInDrawOrder),
+          images: List<EditorImage>.from(oldPage.allImagesInDrawOrder),
+          quill: oldPage.quill,
+          backgroundImage: oldPage.backgroundImage,
+          backgroundPattern: oldPage.backgroundPattern ?? d.pattern,
+          backgroundColor: oldPage.backgroundColor,
+          lineColor: oldPage.lineColor,
+          lineHeight: oldPage.lineHeight,
+          lineThickness: oldPage.lineThickness,
+          hasLocalPattern: oldPage.hasLocalPattern || true,
+          hasLocalBackgroundColor: oldPage.hasLocalBackgroundColor || true,
+          hasLocalLineColor: oldPage.hasLocalLineColor || true,
+          hasLocalLineHeight: oldPage.hasLocalLineHeight || true,
+          hasLocalLineThickness: oldPage.hasLocalLineThickness || true,
+          hasLocalMargins: oldPage.hasLocalMargins,
+          marginLeft: oldPage.marginLeft,
+          marginRight: oldPage.marginRight,
+          marginTop: oldPage.marginTop,
+          marginBottom: oldPage.marginBottom,
+          hasLocalBorderColor: oldPage.hasLocalBorderColor,
+          borderColor: oldPage.hasLocalBorderColor ? oldPage.borderColor : null,
+        );
+        coreInfo.pages[currentPageIndex] = newPage;
+        listenToQuillChanges(newPage.quill, currentPageIndex);
+        newPage.buildSpatialIndex();
+        coreInfo.notifyListeners();
+        _pageRasterCache.invalidatePage(currentPageIndex);
         autosaveAfterDelay();
       }),
 
@@ -13818,14 +13828,6 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     }
   }
 
-  Widget _buildNewTabButton() {
-    return IconButton(
-      icon: const Icon(Icons.add_rounded),
-      tooltip: 'Open note in new tab',
-      onPressed: _addNewTab,
-    );
-  }
-
   PreferredSizeWidget? _buildTabbedAppBar(BuildContext context) {
     final activeState = _activeState;
     if (activeState == null) {
@@ -13848,14 +13850,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
           onPressed: _goToHome,
         ),
         title: const Text('Loading…'),
-        actions: [_buildNewTabButton()],
+        actions: const [],
         bottom: _buildTabStripBottom(context, null),
       );
     }
 
     final inner = activeState._buildEditorAppBar(
       context,
-      leadingActions: [_buildNewTabButton()],
+      leadingActions: const [],
       onBackOverride: _goToHome,
     );
     if (inner is AppBar) {

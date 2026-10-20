@@ -305,7 +305,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
 
         if (widget.onOpenNoteInNewTab != null || widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
           const Divider(height: 16),
-          subHeader('Split view'),
+          subHeader('Multitasking'),
           if (widget.onOpenNoteInNewTab != null)
             ListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 24),
