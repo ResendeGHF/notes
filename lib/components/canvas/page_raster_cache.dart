@@ -19,7 +19,6 @@ import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/services/display_ink_feel.dart';
-import 'package:saber/services/perf_probe.dart';
 import 'package:saber/components/canvas/inner_canvas.dart' show buildOrderedMeshBatches;
 
 /// One baked bitmap layer for a page (ink or background).
@@ -116,13 +115,13 @@ final class PageRasterCacheManager {
   final ValueNotifier<int> repaintEpoch = ValueNotifier(0);
 
   int _cacheGen = 0;
-  final _inkCaches = <int, PageCacheEntry>{};
-  final _bgCaches = <int, PageCacheEntry>{};
-  final _pageInkGeneration = <int, int>{};
-  final _pageBgGeneration = <int, int>{};
-  final _pageSizes = <int, Size>{};
-  final _pendingInk = <int>{};
-  final _pendingBg = <int>{};
+  final Map<int, PageCacheEntry> _inkCaches = {};
+  final Map<int, PageCacheEntry> _bgCaches = {};
+  final Map<int, int> _pageInkGeneration = {};
+  final Map<int, int> _pageBgGeneration = {};
+  final Map<int, Size> _pageSizes = {};
+  final Set<int> _pendingInk = {};
+  final Set<int> _pendingBg = {};
   bool _disposed = false;
   bool _jobRunning = false;
 
@@ -145,7 +144,7 @@ final class PageRasterCacheManager {
   /// yielding to the event loop. Bakes are sliced so pan/zoom/ink input is
   /// never blocked for more than one slice (~3 ms).
   static const Duration _warmupSliceBudget = Duration(milliseconds: 3);
-  final _jobQueue = Queue<_RasterJob>();
+  final Queue<_RasterJob> _jobQueue = Queue();
 
   // --- Viewport / zoom LOD (shared with gesture detector) ---
 
@@ -922,6 +921,8 @@ final class PageRasterCacheManager {
       page: page,
       coreInfo: coreInfo,
       invert: invert,
+      primaryColor: primaryColor,
+      secondaryColor: secondaryColor,
       defaultLineHeight: defaultLineHeight,
       defaultLineThickness: defaultLineThickness,
       defaultPattern: defaultPattern,
@@ -971,48 +972,17 @@ final class PageRasterCacheManager {
   /// full-page toImage work.
   static DateTime? deferBakesUntil;
 
-  /// Timestamp set when an editor freshly opens a note. While it is in the
-  /// future, the page band builder keeps only the pages actually on screen
-  /// mounted: the first paint of a cold dense page records the whole page
-  /// (~60-130 ms), and paying that once per invisible neighbor made the
-  /// open instant hit three heavy frames in a row. The band mounts again as
-  /// soon as the viewport moves; the warm-up pump (which runs in budgeted
-  /// slices from the first frame) records the neighbors' tiles meanwhile, so
-  /// they blit instead of re-recording when they appear.
-  static DateTime? openGraceUntil;
-
-  /// Wall-clock of the last user input on the canvas (pointer down, pen
-  /// sample, pan start). The open-grace orders (band clamp, pump waiver) only
-  /// describe a viewport that is being placed programmatically; the moment
-  /// the user drives it, they must be released — and raster bakes must not
-  /// start (or keep running) under the first touch either: one bake holds the
-  /// raster thread for 10-150 ms per page, which is exactly the "pan is
-  /// stuck right after opening" stall on dense notes.
-  static DateTime? lastUserInputAt;
-
-  static void noteUserInput() => lastUserInputAt = DateTime.now();
-
-  static bool get userInputRecent {
-    final at = lastUserInputAt;
-    return at != null &&
-        DateTime.now().difference(at) < const Duration(milliseconds: 800);
-  }
-
   Future<void> _processQueue() async {
     _jobRunning = true;
     while (_jobQueue.isNotEmpty && !_disposed) {
       // Never run CanvasPainter + toImage on the UI isolate mid-stroke —
       // that is the classic cause of dropped pointer samples / square ink.
       // Same for viewport motion: pinch-zoom frames must stay at composite
-      // cost, so bakes queue up and run once the viewport settles. Same for
-      // the quiet window right after any canvas input: a bake started in that
-      // window is in flight (10-150 ms of raster thread) when the next pan
-      // frame lands, which reads as the pan stalling right after open.
+      // cost, so bakes queue up and run once the viewport settles.
       final deferUntil = deferBakesUntil;
       if (!debugForceSyncRaster &&
           (inkInputBusy ||
               viewportMoving ||
-              userInputRecent ||
               (deferUntil != null && DateTime.now().isBefore(deferUntil)))) {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
@@ -1052,13 +1022,7 @@ final class PageRasterCacheManager {
         continue;
       }
 
-      PerfProbe.mark('raster.start page=${job.pageIndex} ink=${job.isInk}');
-      final _bakeWatch = PerfProbe.enabled ? (Stopwatch()..start()) : null;
       final image = await _buildJob(job);
-      PerfProbe.mark(
-        'raster.bake page=${job.pageIndex} ink=${job.isInk} '
-        'ms=${_bakeWatch?.elapsedMilliseconds} ok=${image != null}',
-      );
       if (_disposed || job.cacheGen != _cacheGen) {
         image?.dispose();
         _clearPending(job);
@@ -1089,13 +1053,7 @@ final class PageRasterCacheManager {
         _pendingBg.remove(job.pageIndex);
       }
       _bumpRepaint();
-      // One bake per frame: the picture recording below runs on the UI
-      // isolate, so chaining jobs back-to-back with a zero-delay yield kept
-      // the isolate busy for the whole band (hundreds of ms after every pan)
-      // and showed up as 20-40 ms frames right after opening. Letting a frame
-      // render between jobs keeps the scale sharpening gradual instead of
-      // stalling the gesture that just ended.
-      await SchedulerBinding.instance.endOfFrame;
+      await Future<void>.delayed(Duration.zero);
     }
     _jobRunning = false;
   }
@@ -1150,11 +1108,9 @@ final class PageRasterCacheManager {
         }
         if (sliceWatch.elapsedMilliseconds >=
             _warmupSliceBudget.inMilliseconds) {
-          // Yield a whole frame, not just the microtask queue: this loop
-          // builds geometry for every uncached stroke of a page, and a
-          // zero-delay yield let it re-enter immediately, pinning the UI
-          // isolate for hundreds of milliseconds after a pan settled.
-          await SchedulerBinding.instance.endOfFrame;
+          // Yield the event loop so frames / pointer samples can run, then
+          // re-check preemption before the next slice.
+          await Future<void>.delayed(Duration.zero);
           if (!debugForceSyncRaster &&
               _preempted(
                 contentEpochAtStart: contentEpochAtStart,
@@ -1277,7 +1233,6 @@ final class PageRasterCacheManager {
   }
 
   void _bumpRepaint() {
-    PerfProbe.hit('raster.bump');
     repaintEpoch.value++;
     onRepaintRequested?.call();
   }
@@ -1307,9 +1262,6 @@ final class PageRasterCacheManager {
 
   @visibleForTesting
   int get debugBgCacheCount => _bgCaches.length;
-
-  @visibleForTesting
-  PageCacheEntry? debugBgEntry(int pageIndex) => _bgCaches[pageIndex];
 
   @visibleForTesting
   bool get debugHasPendingInk => _pendingInk.isNotEmpty;
@@ -1362,20 +1314,14 @@ PageRasterBgParams pageRasterBgParamsFor({
   required EditorPage page,
   required EditorCoreInfo coreInfo,
   required bool invert,
+  required Color primaryColor,
+  required Color secondaryColor,
   required int defaultLineHeight,
   required double defaultLineThickness,
   required CanvasBackgroundPattern defaultPattern,
   required Color defaultBackgroundColor,
 }) {
   final hasBgImage = page.backgroundImage != null;
-  // The pattern line color comes straight from the page, exactly like the live
-  // vector path (CanvasBackgroundPainter built by InnerCanvas) and the
-  // exporter. The default line color (0xFF9E9E9E) must NOT resolve to a theme
-  // color here: a light theme primary is nearly invisible at the pattern's 20%
-  // alpha on a white page, so the raster blit and the vector fallback
-  // disagreed and the background pattern appeared to blink/disappear as the
-  // editor switched paths on move/zoom.
-  final lineColor = page.lineColor;
   return PageRasterBgParams(
     invert: invert,
     backgroundColor: hasBgImage
@@ -1390,10 +1336,15 @@ PageRasterBgParams pageRasterBgParamsFor({
         ? page.lineHeight
         : defaultLineHeight,
     lineThickness: page.hasLocalLineThickness
-        ? page.lineThickness
+        ? page.lineThickness.toDouble()
         : defaultLineThickness,
-    primaryColor: lineColor,
-    secondaryColor: lineColor.withValues(alpha: 0.5),
+    primaryColor: page.lineColor.value != 0xFF9E9E9E
+        ? page.lineColor
+        : primaryColor,
+    secondaryColor: (page.lineColor.value != 0xFF9E9E9E
+            ? page.lineColor
+            : secondaryColor)
+        .withValues(alpha: 0.5),
     marginLeft: page.marginLeft,
     marginRight: page.marginRight,
     marginTop: page.marginTop,
@@ -1442,4 +1393,4 @@ bool _resSufficientForBlit(double cachedRes, double targetRes) =>
 
 /// Whether [cachedRes] is enough to blit without upscaling artifacts.
 bool pageRasterCacheResCoversTarget(double cachedRes, double targetRes) =>
-      _resSufficientForBlit(cachedRes, targetRes);
+    _resSufficientForBlit(cachedRes, targetRes);

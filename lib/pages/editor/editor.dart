@@ -44,7 +44,6 @@ import 'package:saber/components/canvas/canvas.dart' show Canvas;
 import 'package:saber/components/canvas/canvas_background_preview.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_gesture_detector.dart';
-import 'package:saber/components/canvas/canvas_transform_cache.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/canvas_preview.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -62,7 +61,6 @@ import 'package:saber/components/editor/export_dialog.dart';
 import 'package:saber/components/editor/note_properties_dialog.dart';
 import 'package:saber/components/editor/pdf_equation_preview.dart';
 import 'package:saber/components/editor/pdf_link_detector.dart';
-import 'package:saber/components/editor/pdf_outline_extractor.dart';
 import 'package:saber/components/editor/pdf_page_picker_dialog.dart';
 import 'package:saber/components/editor/region_screenshot_overlay.dart';
 import 'package:saber/components/editor/sba_export_dialog.dart';
@@ -78,16 +76,14 @@ import 'package:saber/components/toolbar/enhanced_toolbar.dart';
 import 'package:saber/components/toolbar/notes_color_picker_modal.dart';
 import 'package:saber/components/toolbar/floating_calculator.dart';
 import 'package:saber/components/toolbar/plot_animation_metadata.dart';
-import 'package:saber/data/document_conversion/document_converter.dart';
-import 'package:saber/data/document_conversion/epub/epub_fonts.dart';
 import 'package:saber/data/editor/_color_change.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/editor_recovery_journal.dart';
 import 'package:saber/data/editor/link_export_expander.dart';
 import 'package:saber/data/editor/editor_history.dart';
-import 'package:saber/data/editor/note_tool_settings.dart';
 import 'package:saber/data/editor/note_page_format.dart';
+import 'package:saber/data/editor/note_tool_settings.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/data/extensions/change_notifier_extensions.dart';
@@ -120,7 +116,6 @@ import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/math_solver_service.dart';
 import 'package:saber/services/online/online_transcription_service.dart';
 import 'package:saber/services/pdf_viewport.dart';
-import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/recognition_service.dart';
 import 'package:saber/services/vlm/page_image_renderer.dart';
 import 'package:saber/services/vlm/page_latex_vlm_service.dart';
@@ -388,41 +383,8 @@ class EditorState extends State<Editor>
   int? _lastPageRasterBandStart;
   int? _lastPageRasterBandEnd;
 
-  /// Post-open window where shell parses start gently: the first frames own
-  /// the UI isolate, so background hydration paces itself instead of running
-  /// the whole note's sweep inside the open second. Any viewport motion lifts
-  /// the pacing (an actual scroll needs its pages now).
-  DateTime? _openGraceUntil;
-
-  /// Wall-clock of the last completed background page parse; used to stagger
-  /// parse starts during the open grace so two dense completions never land
-  /// in one frame.
-  DateTime? _lastHydrateCompletionAt;
-
-  bool _probeSetStateTraced = false;
-
-  @override
-  void setState(VoidCallback fn) {
-    if (PerfProbe.enabled) {
-      PerfProbe.hit('editor.setState');
-      if (!_probeSetStateTraced) {
-        _probeSetStateTraced = true;
-        final trace = StackTrace.current.toString().replaceAll('\n', ' | ');
-        PerfProbe.mark(
-          'setState.trace ${trace.length > 1500 ? trace.substring(0, 1500) : trace}',
-        );
-      }
-    }
-    super.setState(fn);
-  }
-
   void _onPageRasterRepaint() {
-    // The page painters already listen to PageRasterCacheManager.repaintEpoch
-    // (merged into their CustomPaint `repaint` listenables), so a completed
-    // bake repaints its page without touching the widget tree. A full editor
-    // rebuild here used to fire once per bake — during the post-open bake
-    // storm that meant ~20 rebuilds/second, each re-building and re-painting
-    // every visible dense page (~40 ms per frame).
+    if (mounted) setState(() {});
   }
 
   double _canvasDevicePixelRatio() {
@@ -433,26 +395,11 @@ class EditorState extends State<Editor>
     return MediaQuery.devicePixelRatioOf(context).clamp(1.0, 4.0);
   }
 
-  bool _showCanvasHud = true;
-  Timer? _hudVisibilityTimer;
-
-  void _pokeCanvasHud() {
-    if (!_showCanvasHud && mounted) {
-      setState(() => _showCanvasHud = true);
-    }
-    _hudVisibilityTimer?.cancel();
-    _hudVisibilityTimer = Timer(const Duration(milliseconds: 2500), () {
-      if (mounted) setState(() => _showCanvasHud = false);
-    });
-  }
-
   /// Pan/zoom tick fan-out for PDF viewport tiling (see [PdfViewportBus]).
   /// The renderer debounces and early-outs on unchanged rects, so per-tick
   /// cost here is a single epoch bump.
   void _onCanvasTransformTick() {
-    PerfProbe.hit('xform.tick');
     PdfViewportBus.tick();
-    _pokeCanvasHud();
   }
 
   void _onPageRasterLodSettled() {
@@ -490,13 +437,12 @@ class EditorState extends State<Editor>
     bool forceSchedule = false,
     double? scale,
   }) {
-    PerfProbe.hit('band.maint');
     if (coreInfo.pages.isEmpty) return;
     _lastPageRasterBandStart = bandStart;
     _lastPageRasterBandEnd = bandEnd;
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     _pageRasterCache.maintainVisibleBand(
       coreInfo: coreInfo,
@@ -552,7 +498,7 @@ class EditorState extends State<Editor>
 
   /// Background mesh workers in flight (bounded CPU: triangulation is pure
   /// ALU, but more workers than this starves the UI thread on small SoCs).
-  static const int _kMeshWarmConcurrency = 4;
+  static const int _kMeshWarmConcurrency = 2;
   int _meshWarmInFlight = 0;
   final Set<EditorPage> _meshWarmPages = <EditorPage>{};
 
@@ -591,8 +537,9 @@ class EditorState extends State<Editor>
         if (dist > 0) visibleCenter + dist,
       }) {
         if (i < bandStart || i > bandEnd || i < 0 || i >= pageCount) continue;
-        // We no longer skip near pages; let the background worker triangulate 
-        // EVERYTHING it can to avoid blocking the UI thread on demand.
+        // Disjoint by construction: near pages belong to the UI paint and
+        // tile prewarm (instant, demand-driven); the worker warms ahead.
+        if ((i - visibleCenter).abs() < 3) continue;
         final page = coreInfo.pages[i];
         if (page.isLazyShell) continue;
         if (_meshWarmPages.contains(page)) continue;
@@ -633,7 +580,7 @@ class EditorState extends State<Editor>
           }
           if (attached == 0) return;
           if (!page.strokePictureCache.isDisposed) {
-            page.strokePictureCache.notifyRecordGeneration();
+            page.strokePictureCache.recordGeneration.value++;
           }
           // More slices remain when cold strokes are left; otherwise done.
           if (!_hasColdMeshStrokes(page)) {
@@ -683,228 +630,47 @@ class EditorState extends State<Editor>
     return false;
   }
 
-  /// Seeds the opening viewport before the first canvas frame, so the note
-  /// never paints the top of the document and then jumps to the landing page
-  /// (the jump also re-mounted the look-ahead band, whose cold first paints
-  /// were the open hitch). Restores the exact previous viewport when
-  /// available, else the note's saved landing page. The detector re-asserts
-  /// the same values in initState/didUpdateWidget and its identity checks
-  /// make this idempotent.
-  void _seedOpeningTransform(EditorCoreInfo info) {
-    if (!_transformationController.value.isIdentity()) return;
-    final restored = CanvasTransformCache.get(info.filePath);
-    if (restored != null) {
-      _transformationController.value = restored.transform;
-      return;
-    }
-    if (info.pages.isEmpty) return;
-    final landing = (widget.initialPageIndexOverride ??
-            info.initialPageIndex ??
-            0)
-        .clamp(0, info.pages.length - 1);
-    final width = _pageLayoutWidthOverride ?? _currentViewportWidth();
-    if (width <= 0) return;
-    final offsets = _generatePageOffsets(info.pages, width);
-    final top = -CanvasGestureDetector.getTopOfPage(
-      pageIndex: landing,
-      pageOffsets: offsets,
-    );
-    // Flush with the page top (no peek of the page above): the open instant
-    // then mounts exactly one page, so a dense neighbor can never pay a cold
-    // full-page paint over the first frames.
-    _transformationController.value = Matrix4.translationValues(0, top, 0);
-    PageRasterCacheManager.endProgrammaticViewportJump();
-  }
-
-  /// Records the tile pictures of every page visible at the seeded landing
-  /// transform in bounded slices, before the first canvas frame of a freshly
-  /// opened note.
-  ///
-  /// A cold page's first paint records its whole page on the UI thread
-  /// (measured 60-130 ms) regardless of how much of it is on screen — the
-  /// page canvas clip is the page bounds. Without this warm the open instant
-  /// pays that cost once per mounted page as a visible hitch. The slices run
-  /// while the route transition still covers the screen; each is bounded by
-  /// the warmer's own time/tile caps (see [_prefetchNearbyPageContent]) and
-  /// the whole loop by [maxTotalMs], so the open never stalls on the warm.
-  Future<void> _warmLandingTilesBeforeFirstFrame({
-    EditorCoreInfo? infoOverride,
-  }) async {
-    final info = infoOverride ?? coreInfo;
-    if (info.pages.isEmpty) return;
-    final landing = (widget.initialPageIndexOverride ??
-            info.initialPageIndex ??
-            0)
-        .clamp(0, info.pages.length - 1);
-    // Landing first, then the rest of the pages on screen (the seeded
-    // placement leaves a peek of the page above).
-    final targets = <int>[landing];
-    final transform = _transformationController.value;
-    final scale = transform.approxScale;
-    final viewportHeight =
-        _canvasGestureDetectorKey.currentState?.containerBounds.maxHeight ?? 0;
-    final width = _pageLayoutWidthOverride ?? _currentViewportWidth();
-    if (scale > 0 && viewportHeight > 0 && width > 0) {
-      final offsets = _generatePageOffsets(info.pages, width);
-      final contentTop = -transform.getTranslation().y / scale;
-      final contentBottom = contentTop + viewportHeight / scale;
-      for (var i = 0; i < info.pages.length; i++) {
-        final page = info.pages[i];
-        if (offsets[i] >= contentBottom) break;
-        final pageWidth = math.min(page.size.width, width);
-        final height = page.size.height * (pageWidth / page.size.width);
-        if (offsets[i] + height <= contentTop) continue;
-        if (!targets.contains(i)) targets.add(i);
-      }
-    }
-    // Bound the wait on the first canvas frame: dense pages converge in a
-    // handful of slices; a pathological page stops here and lets the first
-    // paint record the rest (bounded by the paint's own budget). Frames are
-    // yielded between slices so the route transition keeps full frame rate;
-    // the note appears as soon as the transition ends instead of waiting for
-    // a full tile warm (any remainder converges behind the cheap fallback).
-    final stopwatch = Stopwatch()..start();
-    const maxTotalMs = 260;
-
-    for (final pageIndex in targets) {
-      // Shells cannot be warmed: their strokes are still BSON bytes. Parse
-      // them here (chunked, yielding between slices) while the route
-      // transition still covers the screen; bounded like the rest of the
-      // warm. The first paint finishes anything that does not fit.
-      var page = info.pages[pageIndex];
-      if (page.isLazyShell) {
-        for (var attempt = 0; attempt < 3; attempt++) {
-          if (!mounted || stopwatch.elapsedMilliseconds >= maxTotalMs) break;
-          final hydrated = await info.hydratePageChunked(pageIndex);
-          if (hydrated != null) {
-            page = hydrated;
-            _wirePageImageCallbacks(pageIndex, infoOverride: info);
-            break;
-          }
-          if (!info.isLazyShellPage(pageIndex)) {
-            page = info.pages[pageIndex];
-            break;
-          }
-          // Concurrent-parse cap saturated: give the in-flight parse a turn.
-          await Future<void>.delayed(const Duration(milliseconds: 40));
-        }
-        if (!mounted) return;
-        if (page.isLazyShell) continue;
-      }
-      var stalled = 0;
-      while (stopwatch.elapsedMilliseconds < maxTotalMs) {
-        if (!mounted) return;
-        if (Pen.currentStroke != null || Eraser.isDragging) return;
-        if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) break;
-        final before = page.strokePictureCache.pictureCount;
-        final geomBefore = TiledStrokePictureCache.geometryWarmEpoch;
-        final recorded = _prefetchNearbyPageContent(
-          pageIndex,
-          pageIndex,
-          infoOverride: infoOverride,
-        );
-        PerfProbe.markOnce(
-          'warm.preframe.p$pageIndex',
-          'warm.preframe page=$pageIndex recorded=$recorded',
-        );
-        final progressed = page.strokePictureCache.pictureCount > before ||
-            TiledStrokePictureCache.geometryWarmEpoch != geomBefore;
-        if (!progressed && recorded <= 0) {
-          // Budget too small for the next tile, or a stale signature: yield
-          // and retry once, then stop (the first paint finishes the rest).
-          if (++stalled >= 2) break;
-        } else {
-          stalled = 0;
-        }
-        // One frame per slice: each pass is already frame-bounded, so this
-        // keeps the route transition at full frame rate while the warm
-        // converges over the next few frames.
-        await SchedulerBinding.instance.endOfFrame;
-      }
-    }
-  }
-
-  int _prefetchNearbyPageContent(
-    int bandStart,
-    int bandEnd, {
-    EditorCoreInfo? infoOverride,
-  }) {
-    PerfProbe.hit('prefetch');
-    // [infoOverride] lets the pre-first-frame warm run against a freshly
-    // loaded coreInfo that is not published to the widget tree yet.
-    final info = infoOverride ?? coreInfo;
-    if (info.pages.isEmpty) return 0;
+  int _prefetchNearbyPageContent(int bandStart, int bandEnd) {
+    if (coreInfo.pages.isEmpty) return 0;
     if (Pen.currentStroke != null || Eraser.isDragging) return 0;
     // Fast motion records nothing here (the paint path draws synchronous
     // fallback vectors instead, so pages are never blank). A slow reading
     // pan keeps a tight prewarm slice so neighbors converge to cached tiles
     // while content stays visible.
-    //
-    // Exception: the open grace window. There the viewport only "moves"
-    // because the landing transform is being placed programmatically; the
-    // first paint of every dense page would otherwise fall back to vectors
-    // (measured 55-160 ms per page) because no tiles exist yet. The moment
-    // the user drives the viewport (pan with a finger / S Pen, pen down)
-    // that exception ends: the pump then bails on fast motion or shrinks to
-    // the slow-pan slice like any other frame, so the user's own frames are
-    // never queued behind a 20 ms warm slice.
-    final openGrace =
-        _openGraceUntil != null &&
-            DateTime.now().isBefore(_openGraceUntil!) &&
-            !PageRasterCacheManager.userInputRecent;
     final moving = TiledStrokePictureCache.viewportMoving;
     final slowMoving =
         moving && PageRasterCacheManager.viewportSlowMotion;
-    if (moving && !slowMoving && !openGrace) {
-      PerfProbe.hit('prefetch.moving');
-      return 0;
-    }
+    if (moving && !slowMoving) return 0;
     // Meshes first (off-thread): tile recording below then finds them warm.
     // Skipped on fast motion: DTO assembly runs on the UI thread and the
     // fallback paint path needs no meshes.
-    if (!moving && infoOverride == null) _meshWarmupStep(bandStart, bandEnd);
-    final pageCount = info.pages.length;
+    if (!moving) _meshWarmupStep(bandStart, bandEnd);
+    final pageCount = coreInfo.pages.length;
     final visibleCenter = _visibleBandCenter(pageCount, bandStart, bandEnd);
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(info.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     final scale = _transformationController.value.approxScale;
     final currentScale = scale > 0 ? scale : 1.0;
     final defaultTextStyle =
         theme.textTheme.bodyMedium ?? const TextStyle();
     // Whole-frame budget; slices are shared across the pages we touch.
-    // Settled slices stay modest on purpose: the warmer runs on the UI
-    // thread, and a 24ms slice right after open delays pen/pan input landing
-    // mid-slice by a full frame (reads as tip lag + pan stutter exactly when
-    // the user first touches a cold note). 12ms still converges over a few
-    // idle frames via chaining. While slow panning the slice shrinks further
-    // so gesture frames stay smooth while still converging (fast flings
-    // return early above and rely on paint fallback).
+    // A generous slice warms neighbors well ahead of scrolling. While slow
+    // panning the slice shrinks so gesture frames stay smooth while still
+    // converging (fast flings return early above and rely on paint fallback).
     final frameStopwatch = Stopwatch()..start();
-    final pagesPerFrame = 1;
-    // The warmer runs on the UI thread, and a paint cannot yield: any slice
-    // longer than a frame budget is a dropped frame. Right after open the
-    // pump used to take 24-32 ms per pass on an 8 ms cadence, which pinned
-    // the UI isolate at ~20-30 fps exactly while the user starts panning.
-    // Keep every pass inside ~one frame instead. Pages are never blank while
-    // the tiles converge: the paint path draws every stroke with the cheap
-    // path fallback until the recorded tiles replace it.
-    final frameBudgetMs = slowMoving ? 5 : 8;
-    final prewarmMaxTiles = slowMoving ? 1 : 2;
-    final prewarmBudgetMs = slowMoving ? 3 : (openGrace ? 6 : 5);
+    final pagesPerFrame = slowMoving ? 1 : 3;
+    final frameBudgetMs = slowMoving ? 6 : 24;
+    final prewarmMaxTiles = slowMoving ? 2 : 8;
+    final prewarmBudgetMs = slowMoving ? 4 : 16;
     var pagesTouched = 0;
     var recordedTotal = 0;
-    // Outward from the visible center, bounded by the passed band, then
-    // coldest-first: a page with no recorded tiles paints every stroke as
-    // vectors on each frame it is visible (measured 55-160 ms per paint), so
-    // it must beat a page that merely lacks refinements. Distance order is
-    // kept for equal coldness.
+    // Outward from the visible center, bounded by the passed band.
     final maxDist = math.max(
       visibleCenter - bandStart,
       bandEnd - visibleCenter,
     );
-    final ordered = <int>[];
     for (var dist = 0; dist <= maxDist; dist++) {
       for (final i in {
         visibleCenter - dist,
@@ -912,41 +678,13 @@ class EditorState extends State<Editor>
       }) {
         if (i < bandStart || i > bandEnd) continue;
         if (i < 0 || i >= pageCount) continue;
-        if (!ordered.contains(i)) ordered.add(i);
-      }
-    }
-    final order = List<int>.generate(ordered.length, (k) => k);
-    order.sort((a, b) {
-      final ca = info.pages[ordered[a]].strokePictureCache.pictureCount;
-      final cb = info.pages[ordered[b]].strokePictureCache.pictureCount;
-      return ca != cb ? ca - cb : a - b;
-    });
-    for (final oi in order) {
-      final i = ordered[oi];
-      {
-        // Input preemption inside the slice: a pen-down or fling landing
-        // mid-warmer must not wait behind neighbor prewarming. The paint
-        // path draws synchronous fallback vectors, so pages are never blank;
-        // the warmer simply resumes on the next idle frame.
-        if (Pen.currentStroke != null || Eraser.isDragging) {
-          return recordedTotal;
-        }
-        if (TiledStrokePictureCache.viewportMoving &&
-            !PageRasterCacheManager.viewportSlowMotion &&
-            !openGrace) {
-          return recordedTotal;
-        }
         if (pagesTouched >= pagesPerFrame) return recordedTotal;
         if (frameStopwatch.elapsedMilliseconds >= frameBudgetMs) {
           return recordedTotal;
         }
-        final page = info.pages[i];
-        if (page.isLazyShell) {
-          PerfProbe.hit('prefetch.shell');
-          continue;
-        }
+        final page = coreInfo.pages[i];
+        if (page.isLazyShell) continue;
         if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) {
-          PerfProbe.hit('prefetch.done');
           continue;
         }
         if (page.allStrokesInDrawOrder.isEmpty) continue;
@@ -970,39 +708,20 @@ class EditorState extends State<Editor>
           defaultTextStyle: defaultTextStyle,
           lineHeight: page.hasLocalLineHeight
               ? page.lineHeight
-              : info.lineHeight,
-          // Must mirror _pageChild's widget params exactly — it truncates the
-          // thickness to int before the painter converts it back to double —
-          // or the tile cache visual signature mismatches and every prewarm
-          // call is rejected as stale.
+              : coreInfo.lineHeight,
           lineThickness: page.hasLocalLineThickness
-              ? page.lineThickness.toInt().toDouble()
-              : info.lineThickness.toDouble(),
+              ? page.lineThickness.toDouble()
+              : coreInfo.lineThickness.toDouble(),
           lineColor: page.lineColor,
           maxTiles: prewarmMaxTiles,
           budgetMs: prewarmBudgetMs,
-          ignoreMovingCap: openGrace,
         );
-        // 0 = nothing left to warm at this revision; <0 = skipped (stale
-        // signature or budget exhausted — retry next frame, keep unmarked).
+        // 0 = nothing left to warm at this revision; -1 = skipped on
+        // signature mismatch (retry next frame, keep unmarked).
         if (recorded == 0) {
-          PerfProbe.markOnce(
-            'prefetch.res0.p$i',
-            'prefetch.res0 page=$i strokes=${page.allStrokesInDrawOrder.length} '
-            'deferred=${page.strokePictureCache.lastPrewarmDeferredTiles}',
-          );
-          // A pass that only warmed cold tile outlines (deferred > 0) is real
-          // progress: the page is not warm yet, so keep it out of the done set.
-          if (page.strokePictureCache.lastPrewarmDeferredTiles == 0) {
-            _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
-          }
+          _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
         } else if (recorded > 0) {
           recordedTotal += recorded;
-        } else {
-          PerfProbe.markOnce(
-            'prefetch.resm.p$i',
-            'prefetch.resm page=$i rec=$recorded',
-          );
         }
       }
     }
@@ -1065,10 +784,6 @@ class EditorState extends State<Editor>
       _autoSwitchBackToShapeTool = false;
     }
 
-    if (tool is Select && _currentTool is! Select) {
-      _toolBeforeSelect = _currentTool;
-    }
-
     if ((tool is Select || tool is Eraser || tool is LaserPointer) &&
         _currentTool is Pen) {
       _lastPenTool = _currentTool;
@@ -1090,8 +805,6 @@ class EditorState extends State<Editor>
       Eraser.isDragging = false;
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
-      _lastRestingRawSampleTimestamp = null;
-      _lastInteractionBumpedStroke = null;
     }
     _bumpInteractionRepaint();
   }
@@ -1119,27 +832,6 @@ class EditorState extends State<Editor>
   DateTime _lastSaveTime = DateTime.now();
   DateTime _lastTimeSpentUpdate = DateTime.now();
   EditorRecoveryJournal? _recoveryJournal;
-
-  /// Memoized first-page hash: every content mutation bumps page-0
-  /// saveBinaryRevision (strokes, quill, images, background), so a revision
-  /// match guarantees freshness. Saves recompute at most once per edit burst
-  /// instead of twice per save (thumbnail decision + metadata write).
-  String? _lastFirstPageHash;
-  int _lastFirstPageHashRevision = -1;
-
-  String _firstPageHashMemoized() {
-    final revision = coreInfo.pages.isNotEmpty
-        ? coreInfo.pages.first.saveBinaryRevision
-        : -2;
-    final cached = _lastFirstPageHash;
-    if (cached != null && revision == _lastFirstPageHashRevision) {
-      return cached;
-    }
-    final hash = coreInfo.calculateFirstPageHash();
-    _lastFirstPageHash = hash;
-    _lastFirstPageHashRevision = revision;
-    return hash;
-  }
 
   bool _isDisposed = false;
   String _lastWrittenThumbnailHash = '';
@@ -1210,23 +902,25 @@ class EditorState extends State<Editor>
           order.add(i);
           seen.add(i);
         }
-        // The open path only inspects the visible window. Hydrating every
-        // shell here re-parses the whole note a second after it appears.
-        if (!currentPageOnly) {
-          for (var i = 0; i < coreInfo.pages.length; i++) {
-            if (seen.add(i)) order.add(i);
-          }
+        for (var i = 0; i < coreInfo.pages.length; i++) {
+          if (seen.add(i)) order.add(i);
         }
         for (final i in order) {
           if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
           if (i < 0 || i >= coreInfo.pages.length) continue;
-          
-          // DO NOT synchronously hydrate shells just to check for links!
-          // This causes massive UI lockups on large PDFs. If the page is a shell,
-          // simply skip it for now. When the user scrolls to it, the page will 
-          // naturally hydrate and trigger a new link scan.
-          if (coreInfo.isLazyShellPage(i)) continue;
-          
+          // Reopened notes keep distant pages as lazy BSON shells without any
+          // backgroundImage. Hydrate on demand so their PDF links are found
+          // too; dense pages hydrate chunked and rescan via
+          // [_finishAsyncHydrate] on completion.
+          if (coreInfo.isLazyShellPage(i)) {
+            try {
+              _tryIdleHydratePage(i);
+            } catch (_) {}
+            if (coreInfo.isLazyShellPage(i)) continue;
+            await Future<void>.delayed(Duration.zero);
+            if (!mounted || epoch != _pdfLinkScanEpoch || _hasPdfLinks) return;
+            if (i < 0 || i >= coreInfo.pages.length) continue;
+          }
           final bg = coreInfo.pages[i].backgroundImage;
           if (bg is! PdfEditorImage) continue;
           final key = '${bg.assetId}:${bg.pdfPage}';
@@ -1329,11 +1023,7 @@ class EditorState extends State<Editor>
       coreInfo.filePath,
       noteId: coreInfo.noteId,
     );
-    // No defensive copy: appendDrawStroke serializes to bytes synchronously
-    // on this thread before returning, so later mutations (select-move etc.)
-    // cannot alias the buffered record. Saves a full point-list clone per
-    // pen-up on dense pages.
-    unawaited(journal.appendDrawStroke(stroke));
+    unawaited(journal.appendDrawStroke(stroke.copy()));
   }
 
   Future<void> _flushRecoveryWrites() async {
@@ -1577,15 +1267,11 @@ class EditorState extends State<Editor>
     final from = (target - neighborWindow).clamp(0, coreInfo.pages.length - 1);
     final to = (target + neighborWindow).clamp(0, coreInfo.pages.length - 1);
 
-    // Warm the landing window without ever parsing BSON on the UI thread:
-    // tiny slices still complete synchronously inside the smart hydrate;
-    // dense pages parse chunked and wire through their completion callback.
-    // The background pump has usually pre-hydrated these already, and the
-    // jump animation covers any parse still running.
-    _tryIdleHydratePage(target);
     for (var i = from; i <= to; i++) {
-      if (i != target) _tryIdleHydratePage(i);
-      if (!coreInfo.isLazyShellPage(i)) _wirePageImageCallbacks(i);
+      if (!coreInfo.isLazyShellPage(i)) {
+        coreInfo.ensurePageHydrated(i);
+        _wirePageImageCallbacks(i);
+      }
     }
     _maintainPageRasterBand(from, to);
 
@@ -2258,10 +1944,6 @@ class EditorState extends State<Editor>
         pageIndex: pageIndex,
         strokes: List<Stroke>.from(select.selectResult.strokes),
         images: List<EditorImage>.from(select.selectResult.images),
-        strokeSpots: [
-          for (final s in select.selectResult.strokes)
-            page.drawOrderSpotOf(s) ?? (-1, -1),
-        ],
       ),
     );
 
@@ -2383,7 +2065,6 @@ class EditorState extends State<Editor>
     _assignKeybindings();
 
     stows.noteInvertInDarkModeOverrides.addListener(_onGlobalInvertChanged);
-    stows.editorAutoInvert.addListener(_onGlobalInvertChanged);
     _showPdfLinkBoxes.addListener(_onShowPdfLinkBoxesChanged);
 
     NotesEyedropperTarget.canvasRepaintKey = _regionScreenshotBoundaryKey;
@@ -2431,10 +2112,9 @@ class EditorState extends State<Editor>
   }
 
   void _initAsync() async {
-    PerfProbe.mark('editor.initAsync');
     log.info('PDFTIMING editor._initAsync start');
     coreInfo.filePath = await widget.initialPath;
-    _lastInvertBool = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
+    _lastInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     filenameTextEditingController.text = coreInfo.fileName;
 
     if (needsNaming) {
@@ -2486,76 +2166,19 @@ class EditorState extends State<Editor>
         await pending;
       }
       log.info('PDFTIMING editor.loadFromFilePath start');
-      // The canvas restores its saved viewport (per-note transform cache)
-      // when this note reopens in the same session; parse the pages that
-      // viewport shows now so the first painted frame is real content, not a
-      // blank lazy-shell placeholder waiting on a background parse.
-      final cacheItem = CanvasTransformCache.get(coreInfo.filePath);
-      final int? restoredPageIndex = cacheItem?.pageIndex;
-      final int? restoredPageIndexEnd = cacheItem?.pageIndexEnd;
-      // Load into a local and only publish it after the warm below: the
-      // route transition (or a re-shown tab) rebuilds this widget during the
-      // awaits, and any rebuild between "pages assigned" and "tiles
-      // recorded" mounts cold pages whose first paint records the whole page
-      // on the UI thread (measured 45-130 ms per page).
-      final loadedCoreInfo = await EditorCoreInfo.loadFromFilePath(
-        coreInfo.filePath,
-        restoredPageIndex: restoredPageIndex,
-        restoredPageIndexEnd: restoredPageIndexEnd,
-      );
-      log.info(
-        'PDFTIMING editor.loadFromFilePath done pages=${loadedCoreInfo.pages.length}',
-      );
-      PerfProbe.mark(
-        'editor.loaded pages=${loadedCoreInfo.pages.length} '
-        'landing=${(loadedCoreInfo.initialPageIndex ?? 0).clamp(0, loadedCoreInfo.pages.isEmpty ? 0 : loadedCoreInfo.pages.length - 1)}',
-      );
+      coreInfo = await EditorCoreInfo.loadFromFilePath(coreInfo.filePath);
+      log.info('PDFTIMING editor.loadFromFilePath done pages=${coreInfo.pages.length}');
       // Restaura o toggle por-nota; o listener ignora quando igual (sem autosave espurio).
-      _showPdfLinkBoxes.value = loadedCoreInfo.showPdfLinkBoxes;
-      loadedCoreInfo.ensureNoteId();
-      _lastWrittenThumbnailHash = loadedCoreInfo.firstPageHash ?? '';
+      _showPdfLinkBoxes.value = coreInfo.showPdfLinkBoxes;
+      coreInfo.ensureNoteId();
+      _lastWrittenThumbnailHash = coreInfo.firstPageHash ?? '';
       _recoveryJournal = EditorRecoveryJournal(
-        loadedCoreInfo.filePath,
-        noteId: loadedCoreInfo.noteId,
+        coreInfo.filePath,
+        noteId: coreInfo.noteId,
       );
-      final recovered = await _recoveryJournal!.replayInto(loadedCoreInfo);
-      // First paint with strokes as soon as the body is parsed (low-quality
-      // paths). Opening chrome stays until this frame can schedule.
-      // Full-page raster bakes wait out the first ~0.9 s: the warm-up pump
-      // records the visible band's tiles in that window (tiles, not rasters,
-      // are what a pan blits), and a bake is 10-150 ms of raster thread per
-      // page — starting them under the user's first touch is the "pan stalls
-      // right after opening" report. The old 1600 ms grace left the whole
-      // early-scroll window with no rasters at all, so this stays well under
-      // it; a quiet canvas still bakes the band before the user gets far.
-      PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
-        const Duration(milliseconds: 900),
-      );
-      _openGraceUntil = DateTime.now().add(
-        const Duration(milliseconds: 1200),
-      );
-      PageRasterCacheManager.openGraceUntil = _openGraceUntil;
-      // Seed the landing viewport BEFORE the first canvas frame, so the note
-      // never paints the top of the document and then jumps to the landing
-      // page (the jump also re-mounted the look-ahead band, whose cold first
-      // paints were the open hitch). Restores the exact previous viewport
-      // when available, else the note's saved landing page. The detector
-      // re-asserts the same values in initState/didUpdateWidget and its
-      // identity checks make this idempotent.
-      _seedOpeningTransform(loadedCoreInfo);
-      // Record the tiles of every page the seeded viewport shows BEFORE the
-      // first canvas frame. The canvas can only blit what is already cached;
-      // without this the first paint of a dense page records the whole
-      // page's strokes on the UI thread (measured 45-130 ms), the visible
-      // hitch right as the note opens. The slices run while the route
-      // transition still covers the screen, so the note itself appears with
-      // its pixels already warm.
-      await _warmLandingTilesBeforeFirstFrame(infoOverride: loadedCoreInfo);
-      // Publish last: the first rebuild after this finds every visible
-      // page's tiles recorded and blits them.
-      coreInfo = loadedCoreInfo;
-      final shouldPersistId = loadedCoreInfo.noteIdWasAssigned;
-      if ((recovered || shouldPersistId) && !loadedCoreInfo.readOnly) {
+      final recovered = await _recoveryJournal!.replayInto(coreInfo);
+      final shouldPersistId = coreInfo.noteIdWasAssigned;
+      if ((recovered || shouldPersistId) && !coreInfo.readOnly) {
         savingState.value = SavingState.waitingToSave;
         unawaited(
           saveToFile(force: true, updateThumbnail: false).catchError((e) {
@@ -2563,8 +2186,14 @@ class EditorState extends State<Editor>
           }),
         );
       }
+      // First paint with strokes as soon as the body is parsed (low-quality
+      // paths). Opening chrome stays until this frame can schedule.
+      // Full-page raster bakes wait out the open grace window so tiled
+      // recording and first frames own the UI isolate.
+      PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
+        const Duration(milliseconds: 700),
+      );
       if (mounted) setState(() {});
-      PerfProbe.mark('editor.firstSetState');
       await Future<void>.delayed(Duration.zero);
     } finally {
       // Setup complete
@@ -2637,58 +2266,9 @@ class EditorState extends State<Editor>
 
     if (mounted) {
       setState(() {});
-      // The embedded (tab host) chrome builds the shared toolbar from this
-      // state. The placeholder coreInfo used while loading reports
-      // readOnly=true, so without this rebuild the host keeps a disabled
-      // toolbar (all tool buttons' onTap null) until some unrelated chrome
-      // refresh happens. Announce readiness now that the real coreInfo,
-      // tool settings and history are in place.
-      if (widget.onEmbeddedChromeChanged != null) {
-        PerfProbe.mark('editor.chromeReadyNotify');
-        _notifyEmbeddedChromeChanged();
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        PerfProbe.mark('editor.bodyPainted');
-      });
     }
 
-    final landing = coreInfo.pages.isEmpty
-        ? 0
-        : (coreInfo.initialPageIndex ?? 0).clamp(0, coreInfo.pages.length - 1);
-    // Let the first frames paint the landing page (and its PDF texture)
-    // before neighbor stroke parses start.
-    Future<void>.delayed(const Duration(milliseconds: 2200), () {
-      if (!mounted) return;
-      unawaited(_hydrateLandingNeighbors(landing));
-    });
-  }
-
-  /// Parses the pages next to the one just opened, after the first frame.
-  /// Keeps a fling onto the neighbor from hitting an empty shell without
-  /// blocking the open transition on those strokes.
-  Future<void> _hydrateLandingNeighbors(int center) async {
-    if (coreInfo.pages.length <= 1) return;
-    final from = (center - 1).clamp(0, coreInfo.pages.length - 1);
-    final to = (center + 1).clamp(0, coreInfo.pages.length - 1);
-    var changed = false;
-    for (var i = from; i <= to; i++) {
-      if (!mounted) return;
-      if (!coreInfo.isLazyShellPage(i)) continue;
-      // Retry briefly when the concurrent-parse cap is saturated: navigation
-      // neighbors must land warm, not wait a full background sweep cycle.
-      EditorPage? page;
-      for (var attempt = 0; attempt < 4 && page == null; attempt++) {
-        page = await coreInfo.hydratePageChunked(i);
-        if (page == null && coreInfo.isLazyShellPage(i)) {
-          await Future<void>.delayed(const Duration(milliseconds: 40));
-        }
-      }
-      if (page == null) continue;
-      _wirePageImageCallbacks(i);
-      changed = true;
-      await Future<void>.delayed(Duration.zero);
-    }
-    if (changed && mounted) setState(() {});
+    // Removed smooth scroll to open directly on the correct page
   }
 
   AnimationController? _smoothScrollController;
@@ -2783,14 +2363,7 @@ class EditorState extends State<Editor>
       final to = (safeTargetPage + 1).clamp(0, coreInfo.pages.length - 1);
       for (var i = from; i <= to; i++) {
         if (coreInfo.isLazyShellPage(i)) {
-          // Retry briefly when the concurrent-parse cap is saturated (idle
-          // sweeps may be mid-parse): the jump must land on warm neighbors.
-          for (var attempt = 0; attempt < 4; attempt++) {
-            final page = await coreInfo.hydratePageChunked(i);
-            if (page != null) break;
-            if (!coreInfo.isLazyShellPage(i)) break;
-            await Future<void>.delayed(const Duration(milliseconds: 40));
-          }
+          await coreInfo.hydratePageAtIndexAsync(i);
           _wirePageImageCallbacks(i);
         }
       }
@@ -2997,14 +2570,10 @@ class EditorState extends State<Editor>
             image.onDeleteImage = onDeleteImage;
             image.onMiscChange = autosaveAfterDelay;
           }
-          // Keep every idle slice under ~3ms so open stays interactive. Yield
-          // a whole frame (not just the microtask queue): a zero-delay yield
-          // let this sweep re-enter immediately and pin the UI isolate while
-          // the user was already panning.
+          // Keep every idle slice under ~3ms so open stays interactive.
           if (budget.elapsedMilliseconds >= 3) {
             budget.reset();
-            await SchedulerBinding.instance.endOfFrame;
-            if (!mounted || !identical(info, coreInfo)) return;
+            await Future<void>.delayed(Duration.zero);
           }
         }
       });
@@ -3136,7 +2705,7 @@ class EditorState extends State<Editor>
     final backgroundColor = Color(coreInfo.noteDefaultPageColor!);
     final lineColor = Color(coreInfo.noteDefaultLineColor!);
     final lineHeight = coreInfo.noteDefaultLineHeight!;
-    final lineThickness = coreInfo.noteDefaultLineThickness!;
+    final lineThickness = coreInfo.noteDefaultLineThickness!.toDouble();
 
     final effectivePattern =
         coreInfo.isInfinite &&
@@ -3166,54 +2735,6 @@ class EditorState extends State<Editor>
       marginBottom: mb,
       borderColor: borderColor,
     );
-  }
-
-  /// Rebuilds the current page at [newSize] (orientation/format change),
-  /// preserving ink, images, quill state and local style overrides.
-  /// No-op when the size did not change.
-  void _resizeCurrentPageTo(Size newSize) {
-    final oldPage = coreInfo.pages[currentPageIndex];
-    final sameSize =
-        oldPage.size.width == newSize.width &&
-        oldPage.size.height == newSize.height;
-    if (sameSize) {
-      coreInfo.notifyListeners();
-      return;
-    }
-    oldPage.quill.changeSubscription?.cancel();
-    oldPage.quill.focusNode.removeListener(_onQuillFocusChange);
-    final d = _newPageDefaults();
-    final newPage = EditorPage(
-      id: oldPage.id,
-      size: newSize,
-      strokes: List<Stroke>.from(oldPage.allStrokesInDrawOrder),
-      images: List<EditorImage>.from(oldPage.allImagesInDrawOrder),
-      quill: oldPage.quill,
-      backgroundImage: oldPage.backgroundImage,
-      backgroundPattern: oldPage.backgroundPattern ?? d.pattern,
-      backgroundColor: oldPage.backgroundColor,
-      lineColor: oldPage.lineColor,
-      lineHeight: oldPage.lineHeight,
-      lineThickness: oldPage.lineThickness,
-      hasLocalPattern: oldPage.hasLocalPattern || true,
-      hasLocalBackgroundColor: oldPage.hasLocalBackgroundColor || true,
-      hasLocalLineColor: oldPage.hasLocalLineColor || true,
-      hasLocalLineHeight: oldPage.hasLocalLineHeight || true,
-      hasLocalLineThickness: oldPage.hasLocalLineThickness || true,
-      hasLocalMargins: oldPage.hasLocalMargins,
-      marginLeft: oldPage.marginLeft,
-      marginRight: oldPage.marginRight,
-      marginTop: oldPage.marginTop,
-      marginBottom: oldPage.marginBottom,
-      hasLocalBorderColor: oldPage.hasLocalBorderColor,
-      borderColor: oldPage.hasLocalBorderColor ? oldPage.borderColor : null,
-    );
-    coreInfo.pages[currentPageIndex] = newPage;
-    listenToQuillChanges(newPage.quill, currentPageIndex);
-    newPage.buildSpatialIndex();
-    coreInfo.notifyListeners();
-    _pageRasterCache.invalidatePage(currentPageIndex);
-    autosaveAfterDelay();
   }
 
   void createPage(int pageIndex) {
@@ -3558,10 +3079,10 @@ class EditorState extends State<Editor>
 
     setState(() {
       _clearSelectionPreview();
-      final affectedPageIndices = <int>{};
 
       switch (item!.type) {
         case .draw:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final page = coreInfo.pages[stroke.pageIndex];
             page.removeStrokeFromAnyLayer(stroke);
@@ -3571,6 +3092,9 @@ class EditorState extends State<Editor>
           for (final image in item.images) {
             coreInfo.pages[image.pageIndex].removeImageFromAnyLayer(image);
             affectedPageIndices.add(image.pageIndex);
+          }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
           }
           removeExcessPages();
 
@@ -3591,29 +3115,15 @@ class EditorState extends State<Editor>
           break;
 
         case .erase:
-          // Positional restore: reinsert at recorded temporal slots so undo
-          // never restacks erased ink on top. Spots absent (legacy items)
-          // fall back to append.
-          final byPageErase = <int, List<Stroke>>{};
-          final byPageEraseSpots = <int, List<(int, int)>>{};
-          for (var si = 0; si < item.strokes.length; si++) {
-            final stroke = item.strokes[si];
+          final affectedPageIndices = <int>{};
+          for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            final page = coreInfo.pages[idx];
             if (coreInfo.isInfinite) stroke.pageIndex = 0;
-            (byPageErase[idx] ??= []).add(stroke);
-            final spot = si < (item.strokeSpots?.length ?? 0)
-                ? item.strokeSpots![si]
-                : null;
-            (byPageEraseSpots[idx] ??= []).add(spot ?? (-1, -1));
-          }
-          for (final entry in byPageErase.entries) {
-            final page = coreInfo.pages[entry.key];
-            page.restoreStrokesAt(entry.value, byPageEraseSpots[entry.key]);
-            for (final stroke in entry.value) {
-              page.strokeSpatialIndex?.insert(stroke);
-            }
-            affectedPageIndices.add(entry.key);
+            page.insertStroke(stroke);
+            page.strokeSpatialIndex?.insert(stroke);
+            affectedPageIndices.add(idx);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
@@ -3623,9 +3133,14 @@ class EditorState extends State<Editor>
             image.newImage = true;
             affectedPageIndices.add(idx);
           }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
           break;
 
         case .areaErase:
+        case .changeStrokeType:
+          final affectedPageIndices = <int>{};
           final added = item.strokesAdded!;
           for (final stroke in added) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -3634,58 +3149,25 @@ class EditorState extends State<Editor>
             page.strokeSpatialIndex?.remove(stroke);
             affectedPageIndices.add(idx);
           }
-          // Positional restore of the originals (see .erase).
-          final byPageArea = <int, List<Stroke>>{};
-          final byPageAreaSpots = <int, List<(int, int)>>{};
-          for (var si = 0; si < item.strokes.length; si++) {
-            final stroke = item.strokes[si];
+          for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            if (coreInfo.isInfinite) stroke.pageIndex = 0;
-            (byPageArea[idx] ??= []).add(stroke);
-            final spot = si < (item.strokeSpots?.length ?? 0)
-                ? item.strokeSpots![si]
-                : null;
-            (byPageAreaSpots[idx] ??= []).add(spot ?? (-1, -1));
-          }
-          for (final entry in byPageArea.entries) {
-            final page = coreInfo.pages[entry.key];
-            page.restoreStrokesAt(entry.value, byPageAreaSpots[entry.key]);
-            for (final stroke in entry.value) {
-              page.strokeSpatialIndex?.insert(stroke);
-            }
-            affectedPageIndices.add(entry.key);
-          }
-          for (final image in item.images) {
-            createPage(image.pageIndex);
-            coreInfo.pages[image.pageIndex].images.add(image);
-            if (coreInfo.isInfinite) image.pageIndex = 0;
-            image.newImage = true;
-            affectedPageIndices.add(image.pageIndex);
-          }
-          break;
-
-        case .changeStrokeType:
-          for (var si = 0; si < item.strokes.length; si++) {
-            final added = item.strokesAdded!;
-            final oldStroke = item.strokes[si];
-            final newStroke = added[si];
-            // In-place swap back: order never moved (1:1 replace both ways).
-            final idx =
-                oldStroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            createPage(newStroke.pageIndex);
             final page = coreInfo.pages[idx];
-            page.strokeSpatialIndex?.remove(newStroke);
-            page.replaceStroke(newStroke, oldStroke);
-            page.strokeSpatialIndex?.insert(oldStroke);
+            if (coreInfo.isInfinite) stroke.pageIndex = 0;
+            page.insertStroke(stroke);
+            page.strokeSpatialIndex?.insert(stroke);
             affectedPageIndices.add(idx);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
-            coreInfo.pages[image.pageIndex].images.add(image);
+            final idx = image.pageIndex.clamp(0, coreInfo.pages.length - 1);
+            coreInfo.pages[idx].images.add(image);
             if (coreInfo.isInfinite) image.pageIndex = 0;
             image.newImage = true;
-            affectedPageIndices.add(image.pageIndex);
+            affectedPageIndices.add(idx);
+          }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
           }
           break;
 
@@ -3737,6 +3219,8 @@ class EditorState extends State<Editor>
           final isCurrentSelection =
               select.doneSelecting &&
               item.strokes.any((s) => select.selectResult.strokes.contains(s));
+
+          final affectedPageIndices = <int>{};
 
           if (item.offset != null) {
             final shiftOffset = Offset(-item.offset!.left, -item.offset!.top);
@@ -3855,6 +3339,13 @@ class EditorState extends State<Editor>
               select.selectResult.recomputeBoundsAround(item.centroid!);
             }
           }
+
+          for (final idx in affectedPageIndices) {
+            // Same as paste-apply above: in-place geometry changes must bump
+            // the content revision for the tile spatial grid (and for save).
+            coreInfo.pages[idx].markSaveBinaryDirty();
+            coreInfo.pages[idx].redrawStrokes();
+          }
           break;
 
         case .quillChange:
@@ -3869,27 +3360,15 @@ class EditorState extends State<Editor>
 
         case .changeColor:
           for (final stroke in item.strokes) {
-            stroke.color = item.colorChange![stroke]!.current;
-            affectedPageIndices.add(stroke.pageIndex);
+            stroke.color = item.colorChange![stroke]!.previous;
           }
           break;
-      }
-
-      for (final i in affectedPageIndices) {
-        if (i >= 0 && i < coreInfo.pages.length) {
-          coreInfo.pages[i].markSaveBinaryDirty();
-          coreInfo.pages[i].redrawStrokes();
-          _pageRasterCache.invalidateInk(i, discardStale: true);
-        }
       }
 
       Select.currentSelect.unselect();
     });
 
-    _notifyEmbeddedChromeChanged();
-
     _bumpInteractionRepaint();
-    stows.lastTool.notifyListeners();
 
     Future.delayed(const Duration(milliseconds: 100), () {
       if (mounted) _isUndoRedoInProgress = false;
@@ -3908,10 +3387,10 @@ class EditorState extends State<Editor>
 
     setState(() {
       _clearSelectionPreview();
-      final affectedPageIndices = <int>{};
 
       switch (item.type) {
         case .draw:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -3929,9 +3408,13 @@ class EditorState extends State<Editor>
             image.newImage = true;
             affectedPageIndices.add(idx);
           }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
           break;
 
         case .erase:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final page = coreInfo.pages[stroke.pageIndex];
             page.removeStrokeFromAnyLayer(stroke);
@@ -3942,51 +3425,31 @@ class EditorState extends State<Editor>
             coreInfo.pages[image.pageIndex].removeImageFromAnyLayer(image);
             affectedPageIndices.add(image.pageIndex);
           }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
+          }
           removeExcessPages();
           break;
 
         case .areaErase:
+        case .changeStrokeType:
+          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
             coreInfo.pages[idx].removeStrokeFromAnyLayer(stroke);
             coreInfo.pages[idx].strokeSpatialIndex?.remove(stroke);
             affectedPageIndices.add(idx);
           }
-          final byPageRedo = <int, List<Stroke>>{};
-          final byPageRedoSpots = <int, List<(int, int)>>{};
-          final addedRedo = item.strokesAdded!;
-          for (var si = 0; si < addedRedo.length; si++) {
-            final stroke = addedRedo[si];
+          for (final stroke in item.strokesAdded!) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            (byPageRedo[idx] ??= []).add(stroke);
-            final spot = si < (item.addedSpots?.length ?? 0)
-                ? item.addedSpots![si]
-                : null;
-            (byPageRedoSpots[idx] ??= []).add(spot ?? (-1, -1));
-          }
-          for (final entry in byPageRedo.entries) {
-            final page = coreInfo.pages[entry.key];
-            page.restoreStrokesAt(entry.value, byPageRedoSpots[entry.key]);
-            for (final stroke in entry.value) {
-              page.strokeSpatialIndex?.insert(stroke);
-            }
-            affectedPageIndices.add(entry.key);
-          }
-          break;
-
-        case .changeStrokeType:
-          for (var si = 0; si < item.strokes.length; si++) {
-            final addedRedo = item.strokesAdded!;
-            final oldStroke = item.strokes[si];
-            final newStroke = addedRedo[si];
-            final idx = newStroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
-            createPage(newStroke.pageIndex);
             final page = coreInfo.pages[idx];
-            page.strokeSpatialIndex?.remove(oldStroke);
-            page.replaceStroke(oldStroke, newStroke);
-            page.strokeSpatialIndex?.insert(newStroke);
+            page.insertStroke(stroke);
+            page.strokeSpatialIndex?.insert(stroke);
             affectedPageIndices.add(idx);
+          }
+          for (final i in affectedPageIndices) {
+            coreInfo.pages[i].redrawStrokes();
           }
           break;
 
@@ -4040,6 +3503,7 @@ class EditorState extends State<Editor>
           final isCurrentSelection =
               select.doneSelecting &&
               item.strokes.any((s) => select.selectResult.strokes.contains(s));
+          final affectedPageIndices = <int>{};
 
           if (item.offset != null) {
             final shiftOffset = Offset(item.offset!.left, item.offset!.top);
@@ -4153,6 +3617,15 @@ class EditorState extends State<Editor>
               select.selectResult.recomputeBoundsAround(item.centroid!);
             }
           }
+
+          for (final idx in affectedPageIndices) {
+            // Geometry changed in place (shift/rotate/scale): same objects,
+            // same count — bump the content revision for the tile spatial grid
+            // rebuilds instead of serving stale bounds (ghost/missing ink
+            // until the next count change). Also marks the note for save.
+            coreInfo.pages[idx].markSaveBinaryDirty();
+            coreInfo.pages[idx].redrawStrokes();
+          }
           break;
 
         case .quillChange:
@@ -4164,26 +3637,14 @@ class EditorState extends State<Editor>
         case .changeColor:
           for (final stroke in item.strokes) {
             stroke.color = item.colorChange![stroke]!.current;
-            affectedPageIndices.add(stroke.pageIndex);
           }
           break;
-      }
-
-      for (final i in affectedPageIndices) {
-        if (i >= 0 && i < coreInfo.pages.length) {
-          coreInfo.pages[i].markSaveBinaryDirty();
-          coreInfo.pages[i].redrawStrokes();
-          _pageRasterCache.invalidateInk(i, discardStale: true);
-        }
       }
 
       Select.currentSelect.unselect();
     });
 
-    _notifyEmbeddedChromeChanged();
-
     _bumpInteractionRepaint();
-    stows.lastTool.notifyListeners();
 
     Future.delayed(const Duration(milliseconds: 100), () {
       if (mounted) _isUndoRedoInProgress = false;
@@ -4363,10 +3824,6 @@ class EditorState extends State<Editor>
   List<Stroke>? _eraserDeltaRemoved;
   List<Stroke>? _eraserDeltaAdded;
 
-  /// Pre-removal draw-order spots (layer, index) for strokes erased this
-  /// drag, feeding positional undo. First win keeps the original slot.
-  final Map<Stroke, (int, int)?> _erasedStrokeSpots = {};
-
   /// Soft per-apply yield for live area erase. Not a stroke-count cap —
   /// unfinished circle geometry continues on the next pointer sample / frame.
   static const int _kAreaEraserTimeBudgetMs = 7;
@@ -4407,33 +3864,14 @@ class EditorState extends State<Editor>
 
   static const double _rawDrawSampleMinDistSq = 0.25;
   static const double _rawDrawSampleMinDistSqLowRefresh = 0.09;
-
-  /// Sub-threshold raw moves are still forwarded (throttled to this clock)
-  /// when the live brush runs time-based physics that advances while the tip
-  /// rests (ink pooling / bristle stiffness).
-  static const Duration _restingRawSampleInterval = Duration(milliseconds: 8);
   bool _rawPenSampleSeenThisStroke = false;
   Duration? _lastRawPenSampleTimestamp;
-  Duration? _lastRestingRawSampleTimestamp;
-  // Tracks which live stroke already mounted its overlay via
-  // [_bumpInteractionRepaint]. The live overlay holds the same [Stroke]
-  // object and repaints through `page.redrawStrokes()` (a repaint-listenable,
-  // no widget rebuild); bumping per sample would rebuild every visible
-  // `Canvas` (`_buildContent` splits O(S) ink/highlighter lists) and is the
-  // dominant cost on dense pages. Only the first sample of each stroke
-  // needs the rebuild to mount `currentStroke`.
-  Stroke? _lastInteractionBumpedStroke;
   Timer? _penHoldRecognitionTimer;
   bool _penHoldSatisfied = false;
   RecognizedUnistroke? _penHoldDetectedShape;
 
   void _markCanvasInputActivity({bool cancelPendingAutosave = false}) {
     _lastUserActivityForAutosave = DateTime.now();
-    // Releases the open-grace heuristics (band clamp, pump waiver) and holds
-    // raster bakes off: from the first touch on, the canvas takes the normal
-    // input-priority path instead of finishing open-time work under the
-    // user's finger.
-    PageRasterCacheManager.noteUserInput();
     if (cancelPendingAutosave &&
         savingState.value == SavingState.waitingToSave) {
       _delayedSaveTimer?.cancel();
@@ -4481,22 +3919,10 @@ class EditorState extends State<Editor>
   }
 
   void _scheduleLiveInkRepaint(EditorPage page) {
-    // The live overlay repaints through the page listenable (no widget
-    // rebuild). Only the first sample of each stroke needs an interaction
-    // bump to mount `currentStroke` in the tree; subsequent samples mutate
-    // the same object in place, so repaint-listenable is enough. This keeps
-    // per-sample work O(1) instead of O(visible strokes) on dense pages and
-    // avoids a full `Canvas` rebuild behind the pen.
+    // Paint this pointer event — waiting for the next frame left the mesh
+    // one sample behind the stylus.
     page.redrawStrokes();
-    final live = Pen.currentStroke;
-    if (live == null) {
-      _bumpInteractionRepaint();
-      return;
-    }
-    if (!identical(_lastInteractionBumpedStroke, live)) {
-      _lastInteractionBumpedStroke = live;
-      _bumpInteractionRepaint();
-    }
+    _bumpInteractionRepaint();
   }
 
   void _recordLivePenSample(
@@ -4737,36 +4163,26 @@ class EditorState extends State<Editor>
   }
 
   void _applyEraserResultToPage(EditorPage page, EraserResult result) {
-    // Replace each removed stroke at its own draw-order index. Inserting
-    // every fragment at the first hole stacked unrelated strokes and made
-    // erased pieces reappear in the wrong tiles.
-    final backing = page.layerAt(page.activeLayerIndex).backingStrokes;
+    var insertAt = page.strokes.length;
     if (result.removed.isNotEmpty) {
+      final removedSet = result.removed.toSet();
       for (final stroke in result.removed) {
-        _erasedStrokeSpots[stroke] ??= page.drawOrderSpotOf(stroke);
+        final index = page.strokes.indexOf(stroke);
+        if (index >= 0 && index < insertAt) insertAt = index;
       }
-      final indexed = <(int, int)>[];
-      for (var i = 0; i < result.removed.length; i++) {
-        final idx = backing.indexOf(result.removed[i]);
-        if (idx >= 0) indexed.add((idx, i));
-      }
-      indexed.sort((a, b) => b.$1.compareTo(a.$1));
-      for (final (idx, i) in indexed) {
-        final stroke = backing.removeAt(idx);
+      page.strokes.removeWhere(removedSet.contains);
+      for (final stroke in removedSet) {
         page.strokeSpatialIndex?.remove(stroke);
-        final group = i < result.replacementGroups.length
-            ? result.replacementGroups[i]
-            : const <Stroke>[];
-        if (group.isNotEmpty) {
-          backing.insertAll(idx, group);
-          for (final frag in group) {
-            page.strokeSpatialIndex?.insert(frag);
-          }
-        }
       }
-      page.markSaveBinaryDirty();
-    } else if (result.contentMutated) {
-      page.markSaveBinaryDirty();
+    }
+    if (result.added.isNotEmpty) {
+      page.strokes.insertAll(
+        insertAt.clamp(0, page.strokes.length),
+        result.added,
+      );
+      for (final stroke in result.added) {
+        page.strokeSpatialIndex?.insert(stroke);
+      }
     }
   }
 
@@ -4775,8 +4191,8 @@ class EditorState extends State<Editor>
       page.strokeSpatialIndex = null;
       return;
     }
-    if (page.strokeSpatialIndex == null) {
-      page.buildSpatialIndex();
+    if (!page.strokeSpatialIndexCoversActiveLayer) {
+      page.buildSpatialIndex(activeLayerOnly: true);
     }
   }
 
@@ -4785,12 +4201,12 @@ class EditorState extends State<Editor>
     Eraser eraser,
     Offset position,
   ) {
-    if (!eraser.mode.isAreaLike) return;
+    if (eraser.mode != EraserMode.area) return;
     _ensureActiveLayerEraserSpatialIndex(page);
     // Unbounded apply: finish any deferred circle cuts before recording undo.
     final result = eraser.apply(
       position,
-      page.layerAt(page.activeLayerIndex).backingStrokes,
+      page.strokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
       areaTimeBudgetMs: null,
@@ -4819,12 +4235,12 @@ class EditorState extends State<Editor>
     if (page == null || pos == null) return;
     if (currentTool is! Eraser) return;
     final eraser = currentTool as Eraser;
-    if (!eraser.mode.isAreaLike) return;
+    if (eraser.mode != EraserMode.area) return;
     _ensureActiveLayerEraserSpatialIndex(page);
 
     final result = eraser.apply(
       pos,
-      page.layerAt(page.activeLayerIndex).backingStrokes,
+      page.strokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
       areaTimeBudgetMs: _kAreaEraserTimeBudgetMs,
@@ -4854,7 +4270,6 @@ class EditorState extends State<Editor>
   void _releaseAreaEraserQueueAndSessions() {
     _abortAreaEraserBackgroundWork();
     Eraser.currentEraser.clearState();
-    _erasedStrokeSpots.clear();
   }
 
   void _doEraserApply(EditorPage page, Offset position) {
@@ -4862,27 +4277,27 @@ class EditorState extends State<Editor>
     if (!eraser.shouldApplyAt(position)) return;
 
     _ensureActiveLayerEraserSpatialIndex(page);
-    final bool isAreaLikeMode = eraser.mode.isAreaLike;
+    final bool isAreaMode = eraser.mode == EraserMode.area;
     _areaEraserWorkPage = page;
     _areaEraserWorkPos = position;
 
     final result = eraser.apply(
       position,
-      page.layerAt(page.activeLayerIndex).backingStrokes,
+      page.strokes,
       spatialIndex: page.strokeSpatialIndex,
       scale: _transformationController.value.getMaxScaleOnAxis(),
-      areaTimeBudgetMs: isAreaLikeMode ? _kAreaEraserTimeBudgetMs : null,
+      areaTimeBudgetMs: isAreaMode ? _kAreaEraserTimeBudgetMs : null,
     );
     _applyEraserResultToPage(page, result);
 
-    if (isAreaLikeMode && result.areaWorkRemaining) {
+    if (isAreaMode && result.areaWorkRemaining) {
       _scheduleAreaEraserBackgroundDrain();
     }
 
     // Force redraw even if removed/added is empty, because in-place point mutations might occur in area mode
-    if (isAreaLikeMode || result.removed.isNotEmpty || result.added.isNotEmpty) {
+    if (isAreaMode || result.removed.isNotEmpty || result.added.isNotEmpty) {
       page.redrawStrokes();
-      if (!isAreaLikeMode) removeExcessPages();
+      if (!isAreaMode) removeExcessPages();
     }
   }
 
@@ -4934,8 +4349,6 @@ class EditorState extends State<Editor>
     if (currentTool is Pen) {
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
-      _lastRestingRawSampleTimestamp = null;
-      _lastInteractionBumpedStroke = null;
       _lastPenDragUpdatePosition = position;
       _lastPenSignificantMoveAt = DateTime.now();
       _restartPenHoldRecognitionTimer();
@@ -4953,19 +4366,12 @@ class EditorState extends State<Editor>
         timestamp,
         accurateTool: _pointerIsAccurateForPrediction,
       );
-      // Mount the live overlay on pen-down so the first tip pixel is already
-      // in the tree when the first move arrives. Without this the down sample
-      // sits invisible for one move event (perceived tip lag at stroke start);
-      // the bump is once per stroke (identity-guarded), subsequent moves
-      // repaint via page-listenable only.
-      _scheduleLiveInkRepaint(page);
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragStart(position, page, dragPageIndex!);
       page.redrawStrokes();
     } else if (currentTool is Eraser) {
       final er = currentTool as Eraser;
-      _eraserAreaDragActive = er.mode.isAreaLike;
-      _erasedStrokeSpots.clear();
+      _eraserAreaDragActive = er.mode == EraserMode.area;
       Eraser.isDragging = true;
       eraserPosition = position;
       _eraserPositionRepaint.value = position;
@@ -5293,10 +4699,6 @@ class EditorState extends State<Editor>
     final timestamp = details.sourceTimeStamp ?? currentTimestamp;
 
     if (currentTool is Pen) {
-      // Focal truth anchor (gesture-arena clock): keeps finger/mouse strokes
-      // — and raw-absorbed samples — tracking the tip. Clock-guarded inside
-      // `noteRawLiveTip`, so an older focal never regresses fresher raw.
-      Pen.currentStroke?.noteRawLiveTip(position, currentPressure, timestamp);
       if (!_shouldSkipGesturePenSample(timestamp)) {
         _recordLivePenSample(
           page,
@@ -5304,8 +4706,7 @@ class EditorState extends State<Editor>
           timestamp,
           rawPointerSample: false,
         );
-        // No extra bump: [_scheduleLiveInkRepaint] already mounts the overlay
-        // on the first sample and repaints via page-listenable afterwards.
+        _bumpInteractionRepaint();
       }
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragUpdate(position, page, dragPageIndex!);
@@ -5372,9 +4773,6 @@ class EditorState extends State<Editor>
             fillColor: triangle.fillColor,
             shapeVertices: newConfig.vertices,
           );
-          // Reshaping rebuilds the object; carry the carve bites over so
-          // control-point edits do not reset carve-eraser editions.
-          newTriangle.carveMask = triangle.carveMask?.clone();
           
           // Apply changes directly to the detached preview selection
           select.selectResult.strokes[0] = newTriangle;
@@ -5553,12 +4951,14 @@ class EditorState extends State<Editor>
       );
     }
 
-    // Feed the predictor BEFORE input decimation: sub-threshold jitter moves
-    // carry velocity information even when they add no visible ink. Dropping
-    // them starved the Kalman filter during slow/precise moves, so the first
-    // fast sample after a slow run predicted from stale velocity (tip lag on
-    // acceleration). The duplicate-position guard inside `record` keeps this
-    // cheap for truly stationary input.
+    final last = stroke.points.last;
+    final dx = position.dx - last.x;
+    final dy = position.dy - last.y;
+    final minDistSq = DisplayInkFeel.instance.isLowRefresh
+        ? _rawDrawSampleMinDistSqLowRefresh
+        : _rawDrawSampleMinDistSq;
+    if (dx * dx + dy * dy < minDistSq) return;
+
     final timestamp = event.timeStamp;
     // Raw-only predictor feed (page-local, event clock): never the
     // gesture-arena focal point — mixing coalesced samples fabricates
@@ -5569,32 +4969,6 @@ class EditorState extends State<Editor>
       timestamp,
       accurateTool: event.kind != PointerDeviceKind.touch,
     );
-    // Raw truth anchor for the live tip connector (end-of-stroke anti-lag):
-    // noted even for absorbed sub-threshold moves so slow creep at stroke
-    // ends still moves the displayed tip. Clock-guarded inside: stale events
-    // never regress it.
-    Pen.currentStroke?.noteRawLiveTip(position, currentPressure, timestamp);
-
-    final last = stroke.points.last;
-    final dx = position.dx - last.x;
-    final dy = position.dy - last.y;
-    final minDistSq = DisplayInkFeel.instance.isLowRefresh
-        ? _rawDrawSampleMinDistSqLowRefresh
-        : _rawDrawSampleMinDistSq;
-    if (dx * dx + dy * dy < minDistSq) {
-      // Time-based brush physics (Ink Pooling, Bristle Stiffness) keeps
-      // consuming samples while the tip rests, so sub-threshold moves cannot
-      // simply be dropped — a stylus held still would never pool. Forward
-      // them on a ~120 Hz clock instead: the brush modeler absorbs
-      // coincident points, so a resting stylus stays cheap.
-      if (!stroke.wantsRestingSamples) return;
-      final previous = _lastRestingRawSampleTimestamp;
-      if (previous != null && timestamp - previous < _restingRawSampleInterval) {
-        return;
-      }
-      _lastRestingRawSampleTimestamp = timestamp;
-    }
-
     _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
     previousPosition = position;
   }
@@ -5733,7 +5107,6 @@ class EditorState extends State<Editor>
       eraserPosition = null;
       _eraserPositionRepaint.value = null;
       Eraser.isDragging = false;
-      _lastInteractionBumpedStroke = null;
       _endCanvasDrawSession();
     }
 
@@ -5905,7 +5278,7 @@ class EditorState extends State<Editor>
         }
       } else if (currentTool is Eraser) {
         final eraser = currentTool as Eraser;
-        if (eraser.mode.isAreaLike) {
+        if (eraser.mode == EraserMode.area) {
           final flushPos = eraserPosition ?? _areaEraserWorkPos ?? Offset.zero;
           _syncFlushAreaEraserWork(page, eraser, flushPos);
         }
@@ -5918,10 +5291,8 @@ class EditorState extends State<Editor>
         _eraserDeltaRemoved = null;
         _eraserDeltaAdded = null;
         setState(() {});
-        if (eraser.mode.isAreaLike) {
-          // DO NOT use activeLayerOnly: true. CanvasPainter uses the QuadTree to cull 
-          // across all layers at once; omitting lower layers makes them vanish completely.
-          page.buildSpatialIndex();
+        if (eraser.mode == EraserMode.area) {
+          page.buildSpatialIndex(activeLayerOnly: true);
           page.redrawStrokes();
           removeExcessPages();
         }
@@ -5945,16 +5316,6 @@ class EditorState extends State<Editor>
               strokes: erased,
               images: [],
               strokesAdded: added,
-              strokeSpots: [
-                for (final s in erased)
-                  _erasedStrokeSpots[s] ??
-                      page.drawOrderSpotOf(s) ??
-                      (-1, -1),
-              ],
-              addedSpots: [
-                for (final s in added)
-                  page.drawOrderSpotOf(s) ?? (-1, -1),
-              ],
             ),
           );
         } else if (erased.isNotEmpty) {
@@ -5964,12 +5325,6 @@ class EditorState extends State<Editor>
               pageIndex: dragPageIndex!,
               strokes: erased,
               images: [],
-              strokeSpots: [
-                for (final s in erased)
-                  _erasedStrokeSpots[s] ??
-                      page.drawOrderSpotOf(s) ??
-                      (-1, -1),
-              ],
             ),
           );
         } else if (added.isNotEmpty) {
@@ -5987,9 +5342,6 @@ class EditorState extends State<Editor>
           if (keepForHistory.contains(stroke)) continue;
           stroke.dispose();
         }
-        // Spots consumed into history above; drop refs so removed strokes
-        // are retained only by history from here.
-        _erasedStrokeSpots.clear();
       } else if (currentTool is Select) {
         final select = currentTool as Select;
         if (select.doneSelecting) {
@@ -6021,7 +5373,6 @@ class EditorState extends State<Editor>
           shouldFitInfiniteCanvas = true;
           // Re-attach the shape back to the main base layer
           _clearSelectionPreview();
-          _exitSelectToolAfterAction();
         } else if (_isScaling) {
             final centroid =
                 committedPreview?.pivot ??
@@ -6043,7 +5394,6 @@ class EditorState extends State<Editor>
                 centroid: centroid,
               ),
             );
-            _exitSelectToolAfterAction();
           } else if (_isRotating) {
             final centroid =
                 committedPreview?.pivot ?? select.selectResult.getCentroid();
@@ -6064,7 +5414,6 @@ class EditorState extends State<Editor>
             _rotationStartPosition = null;
             _rotationStartAngle = 0.0;
             shouldFitInfiniteCanvas = true;
-            _exitSelectToolAfterAction();
           } else if (moveOffset != .zero) {
             _commitSelectionPreview(select.selectResult);
             history.recordChange(
@@ -6084,7 +5433,6 @@ class EditorState extends State<Editor>
             );
             select.selectResult.pageIndexStart = select.selectResult.pageIndex;
             shouldFitInfiniteCanvas = true;
-            _exitSelectToolAfterAction();
           } else {
             _clearSelectionPreview();
           }
@@ -6122,8 +5470,9 @@ class EditorState extends State<Editor>
       if (shouldFitInfiniteCanvas && coreInfo.pages.isNotEmpty) {
         _fitInfiniteCanvasToContent(coreInfo.pages.first);
       }
+      if (mounted) setState(() {});
     }
-    if (mounted) setState(() {});
+
     _keepAliveController.forward(from: 0);
 
     _bumpInteractionRepaint();
@@ -6143,7 +5492,6 @@ class EditorState extends State<Editor>
         );
       }
       autosaveAfterDelay();
-      _notifyEmbeddedChromeChanged();
     }
     resetDrawSessionState();
   }
@@ -6164,35 +5512,23 @@ class EditorState extends State<Editor>
 
     if (lastStroke.points.isEmpty) return false;
 
-    // Cached bounds center instead of two map/reduce passes over raw points:
-    // O(1) warm vs O(P) with two closure allocations per stroke. Mid-range
-    // tracks the mean within a few px for ink spans — noise inside the
-    // ±100px band below.
-    final lastCenterY = lastStroke.bounds.center.dy;
+    final lastCenterY =
+        lastStroke.points.map((p) => p.y).reduce((a, b) => a + b) /
+        lastStroke.points.length;
     final lineHeight = 100.0;
 
     final candidateStrokes = page.strokes.where((s) {
       if (s.points.isEmpty) return false;
-      return (s.bounds.center.dy - lastCenterY).abs() < lineHeight;
+      final centerY =
+          s.points.map((p) => p.y).reduce((a, b) => a + b) / s.points.length;
+      return (centerY - lastCenterY).abs() < lineHeight;
     }).toList();
 
-    // Hoisted left edges: the old comparator recomputed minX via map/reduce
-    // on every comparison — O(C log C · P). One O(P) pass up front.
-    final leftByStroke = <Stroke, double>{};
-    for (final s in candidateStrokes) {
-      if (s.points.isEmpty) {
-        leftByStroke[s] = double.infinity;
-        continue;
-      }
-      var minX = double.infinity;
-      for (final p in s.points) {
-        if (p.x < minX) minX = p.x;
-      }
-      leftByStroke[s] = minX;
-    }
     candidateStrokes.sort((a, b) {
       if (a.points.isEmpty || b.points.isEmpty) return 0;
-      return leftByStroke[a]!.compareTo(leftByStroke[b]!);
+      final aLeft = a.points.map((p) => p.x).reduce((x, y) => x < y ? x : y);
+      final bLeft = b.points.map((p) => p.x).reduce((x, y) => x < y ? x : y);
+      return aLeft.compareTo(bLeft);
     });
 
     if (candidateStrokes.isEmpty) return false;
@@ -6223,11 +5559,6 @@ class EditorState extends State<Editor>
     EditorPage page,
     int pageIndex,
   ) {
-    // Capture pre-removal spots first: the outcome application below mutates
-    // positions, and undo must restore exact temporal slots.
-    final removedSpots = [
-      for (final s in outcome.removedStrokes) page.drawOrderSpotOf(s),
-    ];
     for (final s in outcome.removedStrokes) {
       page.removeStrokeFromAnyLayer(s);
       page.strokeSpatialIndex?.remove(s);
@@ -6247,9 +5578,6 @@ class EditorState extends State<Editor>
           pageIndex: pageIndex,
           strokes: outcome.removedStrokes,
           images: [],
-          strokeSpots: [
-            for (final spot in removedSpots) spot ?? (-1, -1),
-          ],
         ),
       );
     }
@@ -6446,33 +5774,16 @@ class EditorState extends State<Editor>
     _selectionPreview = null;
   }
 
-  /// Draw-order spots of detached selection strokes (parallel to the detached
-  /// list order at detach time; null when absent), so reattach restores exact
-  /// temporal slots instead of restacking moved content on top.
-  List<(int, int)?> _detachedStrokeSpots = const [];
-
   void _detachSelectionStrokesFromPage(SelectResult selection) {
     if (_selectionStrokesDetachedFromPage) return;
     if (selection.strokes.isEmpty) return;
     final pageIndex = selection.pageIndex;
     if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
     final page = coreInfo.pages[pageIndex];
-    _detachedStrokeSpots = [
-      for (final stroke in selection.strokes) page.drawOrderSpotOf(stroke),
-    ];
-    // Single-pass detach on backing storage (was O(N·S) wrapper removes).
-    final doomed = selection.strokes.toSet();
-    var dirty = false;
-    for (var li = 0; li < page.layerCount; li++) {
-      final backing = page.layerAt(li).backingStrokes;
-      final before = backing.length;
-      backing.removeWhere(doomed.contains);
-      if (backing.length != before) dirty = true;
-    }
     for (final stroke in selection.strokes) {
       page.strokeSpatialIndex?.remove(stroke);
+      page.strokes.remove(stroke);
     }
-    if (dirty) page.markSaveBinaryDirty();
     _selectionStrokesDetachedFromPage = true;
     _markSelectionPageDirty(pageIndex);
     page.redrawStrokes();
@@ -6483,60 +5794,16 @@ class EditorState extends State<Editor>
     final pageIndex = selection.pageIndex;
     if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) {
       _selectionStrokesDetachedFromPage = false;
-      _detachedStrokeSpots = const [];
       return;
     }
     final page = coreInfo.pages[pageIndex];
-    // Positional single-pass splice per layer. Spots are full-list
-    // coordinates recorded at detach; the merge walks target positions so
-    // restored strokes land exactly (unknown spots append at the end).
-    final byLayer = <int, List<((int, int)?, Stroke)>>{};
-    for (var k = 0; k < selection.strokes.length; k++) {
-      final stroke = selection.strokes[k];
-      if (page.drawOrderSpotOf(stroke) != null) continue;
-      final (int, int)? spot = k < _detachedStrokeSpots.length
-          ? _detachedStrokeSpots[k]
-          : null;
-      final li = spot?.$1 ?? page.activeLayerIndex;
-      (byLayer[li] ??= []).add((spot, stroke));
-    }
-    for (final entry in byLayer.entries) {
-      var li = entry.key;
-      if (li < 0 || li >= page.layerCount) li = page.activeLayerIndex;
-      final backing = page.layerAt(li).backingStrokes;
-      final known =
-          entry.value.where((e) => e.$1 != null).toList(growable: false)
-            ..sort((a, b) => a.$1!.$2.compareTo(b.$1!.$2));
-      final unknown = entry.value.where((e) => e.$1 == null).toList();
-      final merged = <Stroke>[];
-      var cursor = 0;
-      var si = 0;
-      final totalLen = backing.length + known.length;
-      for (var p = 0; p < totalLen; p++) {
-        if (si < known.length && known[si].$1!.$2 == p) {
-          merged.add(known[si].$2);
-          si++;
-        } else if (cursor < backing.length) {
-          merged.add(backing[cursor]);
-          cursor++;
-        } else if (si < known.length) {
-          merged.add(known[si].$2);
-          si++;
-        }
-      }
-      for (final e in unknown) {
-        merged.add(e.$2);
-      }
-      backing
-        ..clear()
-        ..addAll(merged);
-      for (final stroke in selection.strokes) {
+    for (final stroke in selection.strokes) {
+      if (!page.strokes.contains(stroke)) {
+        page.strokes.add(stroke);
         page.strokeSpatialIndex?.insert(stroke);
       }
     }
-    page.markSaveBinaryDirty();
     _selectionStrokesDetachedFromPage = false;
-    _detachedStrokeSpots = const [];
     _markSelectionPageDirty(pageIndex);
     page.redrawStrokes();
   }
@@ -6914,26 +6181,11 @@ class EditorState extends State<Editor>
     Uint8List? preCapturedThumbnailBytes;
     final String thumbnailPath = '${coreInfo.filePath}${Editor.extension}.p';
 
-    final currentFirstPageHash = _firstPageHashMemoized();
+    final currentFirstPageHash = coreInfo.calculateFirstPageHash();
 
-    // While actively writing, skip the full-page thumbnail raster: the hash
-    // changes every letter, so every autosave would otherwise steal raster/GPU
-    // throughput from live ink (boundary.toImage of a dense page) exactly when
-    // the pen is down again. Body durability is unaffected (recovery journal +
-    // binary save proceed normally); the thumbnail refreshes on the next quiet
-    // autosave or close. Explicit callers (updateThumbnail/force) are ungated.
-    final quietMs = DateTime.now()
-        .difference(
-          _lastUserActivityForAutosave ??
-              DateTime.fromMillisecondsSinceEpoch(0),
-        )
-        .inMilliseconds;
     final allowThumbnail =
         !coreInfo.isInfinite &&
-        (updateThumbnail ||
-            (!force &&
-                stows.thumbnailOnAutosave.value &&
-                quietMs >= 10000));
+        (updateThumbnail || (!force && stows.thumbnailOnAutosave.value));
     if (coreInfo.pages.isNotEmpty && allowThumbnail) {
       try {
         final thumbnailFile = File(thumbnailPath);
@@ -7071,7 +6323,7 @@ class EditorState extends State<Editor>
       await Future.delayed(Duration.zero);
 
       final filePath = coreInfo.filePath + Editor.extension;
-    final currentFirstPageHash = _firstPageHashMemoized();
+      final currentFirstPageHash = coreInfo.calculateFirstPageHash();
       final currentPageIndex = this.currentPageIndex;
       Uint8List? bson;
 
@@ -8291,7 +7543,7 @@ class EditorState extends State<Editor>
     try {
       filesResult = await FilePicker.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf', 'epub', 'djvu', 'djv'],
+        allowedExtensions: ['pdf'],
         allowMultiple: false,
         withData: false,
       );
@@ -8304,23 +7556,6 @@ class EditorState extends State<Editor>
     final PlatformFile file = filesResult.single;
     final path = file.path!;
 
-    // `.epub`/`.djvu` are converted to a scratch PDF first. The asset cache
-    // keeps a reference to that file until the note is saved, so it is
-    // deleted only once the import save completes; leftovers from a crash
-    // are removed by FileManager at startup.
-    final format = documentFormatForPath(path);
-    if (format != null && format != DocumentFormat.pdf) {
-      final scratchPath = await _convertDocumentForImport(path, format);
-      if (scratchPath == null) return false;
-      if (coreInfo.isInfinite) {
-        return _importPdfAsImageForInfiniteNote(
-          scratchPath,
-          deleteAfterSave: true,
-        );
-      }
-      return importPdfFromFilePath(scratchPath, deleteAfterSave: true);
-    }
-
     if (coreInfo.isInfinite) {
       return _importPdfAsImageForInfiniteNote(path);
     }
@@ -8328,66 +7563,7 @@ class EditorState extends State<Editor>
     return importPdfFromFilePath(path);
   }
 
-  /// Converts an `.epub`/`.djvu` file into a scratch PDF for importing.
-  ///
-  /// Returns the scratch file's path, or null when the import was cancelled
-  /// or the document could not be converted. The conversion runs in a
-  /// background isolate and writes the scratch file there, so the UI keeps
-  /// responding and the PDF bytes never touch this isolate's heap; cancelling
-  /// the progress dialog discards the result but cannot abort the conversion
-  /// itself. The caller passes `deleteAfterSave: true` to the import methods
-  /// so the scratch file is removed once the asset cache has persisted it.
-  Future<String?> _convertDocumentForImport(
-    String path,
-    DocumentFormat format,
-  ) async {
-    if (!mounted) return null;
-    final progress = _BlockingProgress(context, title: t.editor.menu.import)
-      ..show();
-    try {
-      progress.status.value = t.editor.convertingDocument;
-      final scratch = await FileManager.createImportScratchPdf();
-      await convertDocumentFileToPdf(
-        path,
-        format: format,
-        epubOptions: await loadEpubPdfOptions(),
-        outputPath: scratch.path,
-      );
-      if (progress.cancelled || !mounted) {
-        await _deleteScratchImport(scratch.path);
-        return null;
-      }
-      return scratch.path;
-    } catch (e, stack) {
-      log.severe('Failed to convert document $path: $e', stack);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(t.home.errorImporting(error: e))),
-        );
-      }
-      return null;
-    } finally {
-      progress.close();
-    }
-  }
-
-  /// Deletes a converted-document scratch PDF after it has been persisted.
-  ///
-  /// Only ever called for files allocated by
-  /// [FileManager.createImportScratchPdf].
-  Future<void> _deleteScratchImport(String path) async {
-    try {
-      final file = File(path);
-      if (await file.exists()) await file.delete();
-    } catch (e) {
-      log.warning('Failed to delete scratch import file $path: $e');
-    }
-  }
-
-  Future<bool> _importPdfAsImageForInfiniteNote(
-    String path, {
-    bool deleteAfterSave = false,
-  }) async {
+  Future<bool> _importPdfAsImageForInfiniteNote(String path) async {
     final pdfFile = File(path);
 
     final assetIndex = await coreInfo.assetCacheAll.addPdfFast(pdfFile);
@@ -8409,7 +7585,8 @@ class EditorState extends State<Editor>
     if (!mounted) return false;
     if (pdfDocument.pages.isEmpty) return false;
 
-    final invert = Theme.of(context).brightness == Brightness.dark ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath) : false;
+    final invert =
+        stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     final selected = await PdfPagePickerDialog.show(
       context,
       pdfDocument: pdfDocument,
@@ -8508,26 +7685,11 @@ class EditorState extends State<Editor>
     if (mounted) setState(() {});
     _checkForPdfLinks();
     currentTool = Select.currentSelect;
-    if (deleteAfterSave) {
-      // The asset cache keeps the scratch PDF until the note is saved; save
-      // now so the converted file can be removed.
-      unawaited(
-        saveToFile(force: true, updateThumbnail: false)
-            .then((_) => _deleteScratchImport(path))
-            .catchError((e) {
-              log.warning('Background save after PDF import failed: $e');
-            }),
-      );
-    } else {
-      autosaveAfterDelay();
-    }
+    autosaveAfterDelay();
     return true;
   }
 
-  Future<bool> importPdfFromFilePath(
-    String path, {
-    bool deleteAfterSave = false,
-  }) async {
+  Future<bool> importPdfFromFilePath(String path) async {
     if (coreInfo.isInfinite) {
       return _importPdfAsImageForInfiniteNote(path);
     }
@@ -8561,19 +7723,6 @@ class EditorState extends State<Editor>
       return false;
     }
     log.info('PDF loaded with $totalPages pages');
-
-    // Adopt the PDF's own outline when the note has none yet (for example a
-    // converted `.epub`/`.djvu` imported through the editor's import button).
-    if (coreInfo.pdfOutlines == null) {
-      try {
-        final outlines = await PdfOutlineExtractor.extractOutlines(pdfDocument);
-        if (outlines != null && outlines.isNotEmpty && mounted) {
-          coreInfo.pdfOutlines = outlines;
-        }
-      } catch (e) {
-        log.warning('Failed to adopt PDF outlines: $e');
-      }
-    }
 
     final emptyPage = coreInfo.pages.removeLast();
     assert(emptyPage.isEmpty);
@@ -8712,13 +7861,9 @@ class EditorState extends State<Editor>
     });
 
     unawaited(
-      saveToFile(force: true, updateThumbnail: false)
-          .then((_) async {
-            if (deleteAfterSave) await _deleteScratchImport(path);
-          })
-          .catchError((e) {
-            log.warning('Background save after PDF import failed: $e');
-          }),
+      saveToFile(force: true, updateThumbnail: false).catchError((e) {
+        log.warning('Background save after PDF import failed: $e');
+      }),
     );
 
     return true;
@@ -9920,8 +9065,9 @@ class EditorState extends State<Editor>
 
     // Snapshot style once; rendering/generation outlive frames.
     final theme = Theme.of(context);
+    final overrides = stows.noteInvertInDarkModeOverrides.value;
     final invert = theme.brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (overrides[coreInfo.filePath] == 1)
         : false;
     final backgroundColor = InnerCanvas.getBackgroundColor(
       context,
@@ -10036,8 +9182,9 @@ class EditorState extends State<Editor>
     final svc = OnlineTranscriptionService();
 
     final theme = Theme.of(context);
+    final overrides = stows.noteInvertInDarkModeOverrides.value;
     final invert = theme.brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (overrides[coreInfo.filePath] == 1)
         : false;
     final backgroundColor = InnerCanvas.getBackgroundColor(
       context,
@@ -10353,6 +9500,77 @@ class EditorState extends State<Editor>
 
       ...leadingActions,
 
+      if (!coreInfo.isInfinite)
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.post_add_outlined),
+          tooltip: 'Insert page',
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          offset: const Offset(0, 48),
+          onSelected: (value) {
+            final currentIdx = currentPageIndex;
+            if (value == 'above') {
+              insertPageBefore(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            } else if (value == 'below') {
+              insertPageAfter(currentIdx);
+              CanvasGestureDetector.scrollToPage(
+                pageIndex: currentIdx + 1,
+                pageOffsets: _generatePageOffsets(
+                  coreInfo.pages,
+                  _currentViewportWidth(),
+                ),
+                transformationController: _transformationController,
+              );
+            }
+          },
+          itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+            PopupMenuItem<String>(
+              value: 'above',
+              child: Row(
+                children: [
+                  Icon(
+                    CupertinoIcons.arrow_up_circle,
+                    color: colorScheme.onSurface,
+                  ),
+                  const SizedBox(width: 12),
+                  const Text('Page above'),
+                ],
+              ),
+            ),
+            PopupMenuItem<String>(
+              value: 'below',
+              child: Row(
+                children: [
+                  Icon(
+                    CupertinoIcons.arrow_down_circle,
+                    color: colorScheme.onSurface,
+                  ),
+                  const SizedBox(width: 12),
+                  const Text('Page below'),
+                ],
+              ),
+            ),
+          ],
+        ),
+
+      // Pages button in the AppBar (single access — no floating FAB)
+      if (!coreInfo.isInfinite)
+        IconButton(
+          icon: const Icon(Icons.article_outlined),
+          tooltip: 'Pages',
+          isSelected: _dockedSidePanel == _EditorDockedSidePanel.pages,
+          onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
+        ),
+
       IconButton(
         icon: const Icon(Icons.more_vert_rounded),
         tooltip: t.home.tabs.settings,
@@ -10462,32 +9680,6 @@ class EditorState extends State<Editor>
     );
   }
 
-  Widget _buildCanvasHudButton(BuildContext context, {required IconData icon, required VoidCallback onPressed, required String tooltip}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-        child: Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface.withOpacity(0.6),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
-            ),
-          ),
-          child: IconButton(
-            padding: EdgeInsets.zero,
-            icon: Icon(icon, size: 22, color: Theme.of(context).colorScheme.onSurface),
-            onPressed: onPressed,
-            tooltip: tooltip,
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildEditorBody({
     required Widget canvas,
     required Widget toolbar,
@@ -10544,7 +9736,7 @@ class EditorState extends State<Editor>
         stows.editorToolbarAlignment.value == AxisDirection.right;
     final brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     void notifyHostToolbarChanged() {
       onHostToolbarChanged?.call();
@@ -10751,19 +9943,6 @@ class EditorState extends State<Editor>
 
   @override
   Widget build(BuildContext context) {
-    PerfProbe.hit('editor.build');
-    if (!PerfProbe.enabled) return _buildImpl(context);
-    final buildWatch = Stopwatch()..start();
-    final result = _buildImpl(context);
-    buildWatch.stop();
-    final buildMs = buildWatch.elapsedMicroseconds / 1000.0;
-    if (buildMs > 40) {
-      PerfProbe.mark('editor.buildSlow ms=${buildMs.toStringAsFixed(1)}');
-    }
-    return result;
-  }
-
-  Widget _buildImpl(BuildContext context) {
     ColorScheme.of(context);
     final isToolbarVertical =
         stows.editorToolbarAlignment.value == AxisDirection.left ||
@@ -10936,30 +10115,6 @@ class EditorState extends State<Editor>
             transformationController: _transformationController,
             scrollPhysicsStopNotifier: _scrollPhysicsStopNotifier,
             pageLayoutWidthOverride: _pageLayoutWidthOverride,
-            onAddPageAbove: !coreInfo.isInfinite ? () {
-              final currentIdx = currentPageIndex;
-              insertPageBefore(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            } : null,
-            onAddPageBelow: !coreInfo.isInfinite ? () {
-              final currentIdx = currentPageIndex;
-              insertPageAfter(currentIdx);
-              CanvasGestureDetector.scrollToPage(
-                pageIndex: currentIdx + 1,
-                pageOffsets: _generatePageOffsets(
-                  coreInfo.pages,
-                  _currentViewportWidth(),
-                ),
-                transformationController: _transformationController,
-              );
-            } : null,
           ),
         ),
         LayoutBuilder(
@@ -11002,25 +10157,10 @@ class EditorState extends State<Editor>
               onSelected: _captureRegionScreenshot,
             ),
           ),
-        if (!coreInfo.isInfinite) ...[
-          if (_dockedSidePanel != _EditorDockedSidePanel.pages)
-            Positioned(
-              left: 16,
-              bottom: 16,
-              child: FloatingActionButton.extended(
-                heroTag: 'pages_fab',
-                elevation: 2,
-                onPressed: () => _toggleDockedSidePanel(_EditorDockedSidePanel.pages),
-                icon: const Icon(Icons.article_outlined),
-                label: const Text('Pages'),
-              ),
-            ),
-        ],
       ],
     );
 
     final Widget? readonlyBanner = coreInfo.readOnlyBecauseOfVersion
-
         ? Collapsible(
             collapsed:
                 !(coreInfo.readOnly && coreInfo.readOnlyBecauseOfVersion),
@@ -11063,7 +10203,9 @@ class EditorState extends State<Editor>
                   onGoToLocation: _onGoToLocation,
                   maxWidth: maxWidth,
                   invert: Theme.of(context).brightness == Brightness.dark
-                      ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+                      ? (stows.noteInvertInDarkModeOverrides.value[coreInfo
+                                .filePath] ==
+                            1)
                       : false,
                 );
               },
@@ -11103,16 +10245,13 @@ class EditorState extends State<Editor>
       showToolbar: widget.showToolbar,
     );
 
-    return ValueListenableBuilder<bool>(
-      valueListenable: stows.editorAutoInvert,
-      builder: (context, globalAutoInvert, _) {
-        return ValueListenableBuilder<Map<String, int>>(
-          valueListenable: stows.noteInvertInDarkModeOverrides,
-          builder: (context, overridesMap, __) {
-            return ValueListenableBuilder(
-              valueListenable: savingState,
-              builder: (context, savingState, child) {
-                return PopScope(
+    return ValueListenableBuilder<Map<String, int>>(
+      valueListenable: stows.noteInvertInDarkModeOverrides,
+      builder: (context, _, __) {
+        return ValueListenableBuilder(
+          valueListenable: savingState,
+          builder: (context, savingState, child) {
+            return PopScope(
               canPop: widget.embedded && !_isDockedSidePanelVisible,
               onPopInvokedWithResult: (didPop, _) {
                 if (!didPop && _isDockedSidePanelVisible) {
@@ -11233,11 +10372,9 @@ class EditorState extends State<Editor>
                     );
                   },
                 ),
-              );
-            },
-          );
-        },
-      );
+        );
+      },
+    );
   }
 
   void snackBarNeedsToSaveBeforeExiting() {
@@ -11373,7 +10510,7 @@ class EditorState extends State<Editor>
 
   void _onGlobalInvertChanged() {
     if (!mounted) return;
-    final currentInvertBool = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
+    final currentInvertBool = stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1;
     if (currentInvertBool != _lastInvertBool) {
       _lastInvertBool = currentInvertBool;
 
@@ -11381,11 +10518,15 @@ class EditorState extends State<Editor>
         for (int i = 0; i < coreInfo.pages.length; i++) {
           final page = coreInfo.pages[i];
           
-          if (!page.isLazyShell) {
-            _forceRefreshPageStrokes(page);
-            page.strokePictureCache.invalidateAll(eagerRefill: true);
+          if (page.backgroundImage != null) {
+            page.backgroundImage!.invertible = currentInvertBool;
+          }
+          for (final image in page.images) {
+            image.invertible = currentInvertBool;
           }
           
+          _forceRefreshPageStrokes(page);
+          page.strokePictureCache.invalidateAll(eagerRefill: true);
           _pageRasterCache.invalidateInk(i, discardStale: true);
           _pageRasterCache.invalidatePage(i, ink: true, bg: true);
         }
@@ -11410,13 +10551,18 @@ class EditorState extends State<Editor>
   }
 
   void _toggleGlobalBackgroundInversion(bool invert) {
-    setNoteInvertInDarkModeOverrideForFile(coreInfo.filePath, invert);
+    // Update the stows override so the setting persists across canvas interactions
+    final currentOverrides = Map<String, int>.from(
+      stows.noteInvertInDarkModeOverrides.value,
+    );
+    currentOverrides[coreInfo.filePath] = invert ? 1 : 0;
+    stows.noteInvertInDarkModeOverrides.value = currentOverrides;
   }
 
   Widget bottomSheet(BuildContext context) {
     final Brightness brightness = Theme.brightnessOf(context);
     final invert = brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? (stows.noteInvertInDarkModeOverrides.value[coreInfo.filePath] == 1)
         : false;
     final int currentPageIndex = this.currentPageIndex;
 
@@ -11463,12 +10609,6 @@ class EditorState extends State<Editor>
       hasPdfLinks: _hasPdfLinks,
       showPdfLinkBoxes: _showPdfLinkBoxes,
       onClose: _closeDockedSidePanel,
-      onOpenNoteInNewTab: widget.onOpenNoteInNewTab != null ? () async {
-        final currentPath = coreInfo.filePath;
-        final selected = await _pickNotePath(context, excludePaths: {currentPath});
-        if (!mounted || selected == null) return;
-        widget.onOpenNoteInNewTab?.call(selected);
-      } : null,
       onOpenSplitView: widget.onOpenSplitView ?? _openSplitView,
       onCloseSplitView: widget.onCloseSplitView,
       onReopenSplitView: widget.onReopenSplitView,
@@ -11765,13 +10905,49 @@ class EditorState extends State<Editor>
       onSetPageOrientation: (orientation) => setState(() {
         if (coreInfo.readOnly) return;
         coreInfo.notePageOrientation = orientation;
-        _resizeCurrentPageTo(_newPageSize());
-      }),
-
-      onSetPageFormat: (format) => setState(() {
-        if (coreInfo.readOnly) return;
-        coreInfo.notePageFormat = format;
-        _resizeCurrentPageTo(_newPageSize());
+        final oldPage = coreInfo.pages[currentPageIndex];
+        final newSize = _newPageSize();
+        final sameSize =
+            oldPage.size.width == newSize.width &&
+            oldPage.size.height == newSize.height;
+        if (sameSize) {
+          coreInfo.notifyListeners();
+          return;
+        }
+        oldPage.quill.changeSubscription?.cancel();
+        oldPage.quill.focusNode.removeListener(_onQuillFocusChange);
+        final d = _newPageDefaults();
+        final newPage = EditorPage(
+          id: oldPage.id,
+          size: newSize,
+          strokes: List<Stroke>.from(oldPage.allStrokesInDrawOrder),
+          images: List<EditorImage>.from(oldPage.allImagesInDrawOrder),
+          quill: oldPage.quill,
+          backgroundImage: oldPage.backgroundImage,
+          backgroundPattern: oldPage.backgroundPattern ?? d.pattern,
+          backgroundColor: oldPage.backgroundColor,
+          lineColor: oldPage.lineColor,
+          lineHeight: oldPage.lineHeight,
+          lineThickness: oldPage.lineThickness,
+          hasLocalPattern: oldPage.hasLocalPattern || true,
+          hasLocalBackgroundColor: oldPage.hasLocalBackgroundColor || true,
+          hasLocalLineColor: oldPage.hasLocalLineColor || true,
+          hasLocalLineHeight: oldPage.hasLocalLineHeight || true,
+          hasLocalLineThickness: oldPage.hasLocalLineThickness || true,
+          hasLocalMargins: oldPage.hasLocalMargins,
+          marginLeft: oldPage.marginLeft,
+          marginRight: oldPage.marginRight,
+          marginTop: oldPage.marginTop,
+          marginBottom: oldPage.marginBottom,
+          hasLocalBorderColor: oldPage.hasLocalBorderColor,
+          borderColor: oldPage.hasLocalBorderColor ? oldPage.borderColor : null,
+        );
+        coreInfo.pages[currentPageIndex] = newPage;
+        listenToQuillChanges(newPage.quill, currentPageIndex);
+        newPage.buildSpatialIndex();
+        coreInfo.notifyListeners();
+        _pageRasterCache.invalidatePage(currentPageIndex);
+        autosaveAfterDelay();
       }),
 
       onClearPage: () {
@@ -11844,61 +11020,48 @@ class EditorState extends State<Editor>
   Widget _editorPlaceholderPageBuilder(BuildContext context, int pageIndex) {
     final page = coreInfo.pages[pageIndex];
 
-    return ValueListenableBuilder<bool>(
-      valueListenable: stows.editorAutoInvert,
-      builder: (context, globalAutoInvert, _) {
-        return ValueListenableBuilder<Map<String, int>>(
-          valueListenable: stows.noteInvertInDarkModeOverrides,
-          builder: (context, overrides, _) {
-            final theme = _cachedTheme ?? Theme.of(context);
-            final overrideVal = overrides[coreInfo.filePath];
-            final invert = theme.brightness == Brightness.dark
-                ? (overrideVal != null ? overrideVal == 1 : globalAutoInvert)
-                : false;
+    return ValueListenableBuilder<Map<String, int>>(
+      valueListenable: stows.noteInvertInDarkModeOverrides,
+      builder: (context, overrides, _) {
+        final theme = _cachedTheme ?? Theme.of(context);
+        final invert = theme.brightness == Brightness.dark
+            ? (overrides[coreInfo.filePath] == 1)
+            : false;
 
-            Color bgColor;
-            if (page.backgroundImage != null) {
-              bgColor = invert ? Colors.black : Colors.white;
-            } else {
-              bgColor = InnerCanvas.getBackgroundColor(
-                context,
-                page.backgroundColor.value != 0xFFFFFFFF
-                    ? page.backgroundColor
-                    : coreInfo.backgroundColor,
-              );
-              if (invert) {
-                bgColor = Color.fromARGB(
-                  bgColor.alpha,
-                  255 - bgColor.red,
-                  255 - bgColor.green,
-                  255 - bgColor.blue,
-                );
-              }
-            }
-
-            return Container(
-              width: page.size.width,
-              height: page.size.height,
-              color: bgColor,
-              child: Center(
-                child: Text(
-                  '${pageIndex + 1}',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant.withOpacity(0.3),
-                  ),
-                ),
-              ),
-            );
-          },
+        return Canvas(
+          key: ValueKey('placeholder_${invert}_$pageIndex'),
+          overrideInvert: invert,
+          path: coreInfo.filePath,
+          page: page,
+          pageIndex: 0,
+          textEditing: false,
+          coreInfo: EditorCoreInfo.empty,
+          currentStroke: null,
+          currentStrokeDetectedShape: null,
+          currentSelection: null,
+          placeholder: true,
+          setAsBackground: null,
+          currentTool: currentTool,
+          currentScale: double.minPositive,
+          eraserPosition: null,
+          eraserSize: null,
+          onNoteLinkTap: null,
+          lineHeight: page.hasLocalLineHeight
+              ? page.lineHeight
+              : coreInfo.lineHeight,
+          lineThickness: page.hasLocalLineThickness
+              ? page.lineThickness.toInt()
+              : coreInfo.lineThickness.toInt(),
+          lineColor: page.lineColor,
+          showPdfLinkBoxes: _showPdfLinkBoxes,
         );
       },
     );
   }
 
-  void _wirePageImageCallbacks(int pageIndex, {EditorCoreInfo? infoOverride}) {
-    final info = infoOverride ?? coreInfo;
-    if (pageIndex < 0 || pageIndex >= info.pages.length) return;
-    final page = info.pages[pageIndex];
+  void _wirePageImageCallbacks(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
+    final page = coreInfo.pages[pageIndex];
     page.backgroundImage?.onMoveImage = onMoveImage;
     page.backgroundImage?.onDeleteImage = onDeleteImage;
     page.backgroundImage?.onMiscChange = () {
@@ -11916,63 +11079,22 @@ class EditorState extends State<Editor>
   }
 
   /// Idle BSON hydrate for upcoming shells. Must not run inside [pageBuilder].
-  ///
-  /// Returns true only when this call made progress (page ready now, or a
-  /// chunked parse was started). An already-in-flight or deferred page
-  /// returns false so the idle sweep neither spins rebuilds while waiting nor
-  /// counts someone else's parse as fresh work.
   bool _tryIdleHydratePage(int index) {
     if (!coreInfo.isLazyShellPage(index)) return false;
-    // Gentle open: while the viewport is settled right after open, stagger
-    // parse starts so the first frames keep the UI isolate (each completion
-    // rebuilds the editor and first-builds a dense page canvas). Motion lifts
-    // the pacing immediately — a scroll needs its band parsed now.
-    final grace = _openGraceUntil;
-    if (grace != null &&
-        DateTime.now().isBefore(grace) &&
-        !PageRasterCacheManager.viewportMoving) {
-      final lastDone = _lastHydrateCompletionAt;
-      if (lastDone != null &&
-          DateTime.now().difference(lastDone) <
-              const Duration(milliseconds: 90)) {
-        return false;
-      }
-      if (coreInfo.hydratingPageCount >= 1) return false;
-    }
-    final outcome = coreInfo.hydratePageSmart(
+    final accepted = coreInfo.tryHydratePageSmart(
       index,
       onAsyncHydrated: (page) => _finishAsyncHydrate(index, page),
-      // Fast pans must not compete with parse slices. Pages the viewport is
-      // about to show (the raster keep-band, ≈ visible ±1) keep converging
-      // at slice speed so arrivals land on painted content; distant
-      // background warmth stretches its yields until motion settles.
-      throttleWhile: () {
-        if (!PageRasterCacheManager.viewportMoving ||
-            PageRasterCacheManager.viewportSlowMotion) {
-          return false;
-        }
-        final bandStart = _lastPageRasterBandStart;
-        final bandEnd = _lastPageRasterBandEnd;
-        if (bandStart == null || bandEnd == null) return true;
-        return index < bandStart - 1 || index > bandEnd + 1;
-      },
     );
-    switch (outcome) {
-      case PageHydrateOutcome.hydratedSync:
-        // Synchronous path (small slice) completed: wire like before.
-        _wirePageImageCallbacks(index);
-        listenToQuillChanges(coreInfo.pages[index].quill, index);
-        _primeVisibleCanvasAssets(coreInfo, index, index, index);
-        return true;
-      case PageHydrateOutcome.startedAsync:
-        // Chunked hydrate started: completion wires via the callback. Counts
-        // as progress so the idle loop can start the next shell.
-        return true;
-      case PageHydrateOutcome.alreadyLoaded:
-      case PageHydrateOutcome.alreadyInFlight:
-      case PageHydrateOutcome.deferred:
-        return false;
+    if (accepted && !coreInfo.isLazyShellPage(index)) {
+      // Synchronous path (small slice) completed: wire like before.
+      _wirePageImageCallbacks(index);
+      listenToQuillChanges(coreInfo.pages[index].quill, index);
+      _primeVisibleCanvasAssets(coreInfo, index, index, index);
+      return true;
     }
+    // Chunked hydrate started (or already in flight): completion wires via
+    // callback; count as progress so the idle loop keeps sweeping.
+    return accepted;
   }
 
   /// Wires a chunked-hydrated page into the live editor. Identity-checked:
@@ -11981,7 +11103,6 @@ class EditorState extends State<Editor>
     if (!mounted) return;
     if (index < 0 || index >= coreInfo.pages.length) return;
     if (!identical(coreInfo.pages[index], page)) return;
-    _lastHydrateCompletionAt = DateTime.now();
     _wirePageImageCallbacks(index);
     listenToQuillChanges(page.quill, index);
     _primeVisibleCanvasAssets(coreInfo, index, index, index);
@@ -11990,37 +11111,10 @@ class EditorState extends State<Editor>
     if (!_hasPdfLinks && page.backgroundImage is PdfEditorImage) {
       _checkForPdfLinks();
     }
-    // Waking the whole editor for a page far outside the viewport costs a
-    // full rebuild (and a first canvas build for dense pages) for pixels
-    // nobody can see; the canvas builds the page when it scrolls in.
-    final bandStart = _lastPageRasterBandStart;
-    final bandEnd = _lastPageRasterBandEnd;
-    final nearViewport =
-        bandStart == null ||
-        bandEnd == null ||
-        (index >= bandStart - 1 && index <= bandEnd + 1);
-    if (nearViewport) _scheduleHydrateRebuild();
-  }
-
-  bool _hydrateRebuildScheduled = false;
-
-  /// Coalesced rebuild after async page hydration.
-  ///
-  /// Several dense pages can finish parsing in the same frame; one rebuild
-  /// per frame mounts them all, instead of each completion paying a full
-  /// editor + page-list build (measured as stacked 10-20 ms builds while the
-  /// user was already panning).
-  void _scheduleHydrateRebuild() {
-    if (_hydrateRebuildScheduled || !mounted) return;
-    _hydrateRebuildScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _hydrateRebuildScheduled = false;
-      if (mounted) setState(() {});
-    });
+    setState(() {});
   }
 
   Widget pageBuilder(BuildContext context, int pageIndex) {
-    PerfProbe.hit('page.builder');
     _wirePageImageCallbacks(pageIndex);
     final page = coreInfo.pages[pageIndex];
 
@@ -12771,9 +11865,6 @@ class EditorState extends State<Editor>
         autosaveAfterDelay();
       }),
       transformationController: _transformationController,
-      tryHydratePage: _tryIdleHydratePage,
-      onPageHydrated: (int pageIndex, page) =>
-          _finishAsyncHydrate(pageIndex, page),
     );
   }
 
@@ -13309,7 +12400,6 @@ class EditorState extends State<Editor>
     _skipTransformClampForExpansion.dispose();
     _suppressTransformClamp.dispose();
 
-    unawaited(coreInfo.releaseLazyRangeReader());
     _cleanUpAsync();
 
     _delayedSaveTimer?.cancel();
@@ -13795,10 +12885,9 @@ class EditorState extends State<Editor>
         final oldStroke = oldStrokes[i];
         final newStroke = newStrokes[i];
         final page = coreInfo.pages[oldStroke.pageIndex];
-        // In-place 1:1 swap: temporal order never moves (undo/redo swap back
-        // the same way, so no position bookkeeping is needed either way).
+        page.removeStrokeFromAnyLayer(oldStroke);
         page.strokeSpatialIndex?.remove(oldStroke);
-        page.replaceStroke(oldStroke, newStroke);
+        page.insertStroke(newStroke);
         page.strokeSpatialIndex?.insert(newStroke);
         pageIndices.add(oldStroke.pageIndex);
       }
@@ -14190,14 +13279,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   int _nextId = 1;
   bool _readyRefreshScheduled = false;
 
-  /// Slot id whose chrome already left the placeholder. The ready refresh is
-  /// one-shot per activation: its post-frame `setState` must not re-arm
-  /// itself from build, or the entire editor subtree rebuilds every frame.
-  int? _chromeReadySlotId;
-
   /// Expected note IDs for tabs restored from the persisted session, keyed
-  /// by slot id. Used to confirm identity on activation (adopting the loaded
-  /// ID) and to scope the missing-file prune to restored tabs only.
+  /// by slot id. Used to drop tabs whose note was moved (same display path
+  /// now holding a different note) or replaced.
   final Map<int, String> _expectedNoteIds = {};
 
   EditorState? get _activeState {
@@ -14275,9 +13359,9 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   }
 
   /// Drops restored tabs whose file no longer exists (deleted or moved to
-  /// another folder). Only entries restored from the persisted session are
-  /// checked; tabs created in this visit are kept. Identity mismatches never
-  /// drop tabs (see _confirmActiveNoteId).
+  /// another folder) and tabs whose loaded note ID differs from the expected
+  /// one (path reused by a different note). Only entries restored from the
+  /// persisted session are validated; tabs created in this visit are kept.
   Future<void> _validateRestoredTabs() async {
     if (!mounted || _tabs.isEmpty) return;
     // File-existence pass (cheap, synchronous IO under the hood).
@@ -14319,22 +13403,16 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       setState(() {});
       _syncSession();
     }
-    // Identity of inactive tabs is confirmed lazily on activation (see
-    // _confirmActiveNoteId): only the mounted editor can report its note
+    // Identity of inactive tabs is verified lazily on activation (see
+    // _validateActiveNoteId): only the mounted editor can report its note
     // ID, and only one editor is ever mounted.
   }
 
-  /// Confirms the active tab's identity once its note finishes loading and
-  /// adopts the loaded ID into the session.
-  ///
-  /// Never drops the tab: a mismatch only means the stored ID went stale
-  /// (legacy note migrated, failed save, read-only note), while the file at
-  /// this path is exactly what the user asked to open. Tapping a tab must
-  /// never close it — tabs disappear only via explicit close, note deletion,
-  /// or a proven-missing file at mount time. Inactive tabs keep their
-  /// expectation until they are activated. No-ops for tabs created in this
-  /// visit.
-  Future<void> _confirmActiveNoteId() async {
+  /// Drops the active tab when its loaded note ID differs from the expected
+  /// one recorded in the persisted session (same display path now holding a
+  /// different note, e.g. after a move). Inactive tabs keep their expectation
+  /// until they are activated. No-ops for tabs created in this visit.
+  Future<void> _validateActiveNoteId() async {
     for (var attempt = 0; attempt < 10; attempt++) {
       if (!mounted || _tabs.isEmpty) return;
       final slot = _tabs[_activeIndex.clamp(0, _tabs.length - 1)];
@@ -14351,14 +13429,19 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         continue;
       }
       _expectedNoteIds.remove(slot.id);
-      if (loadedId != expected) {
-        log.info(
-          'identity adopted ${_displayNameForPath(slot.path)} '
-          '(stored ID went stale)',
-        );
+      if (loadedId == expected || !mounted) return;
+      log.info(
+        'prune identity-mismatch ${_displayNameForPath(slot.path)}',
+      );
+      final index = _tabs.indexOf(slot);
+      if (index < 0) return;
+      if (_tabs.length == 1) {
+        _syncSession();
+        _replaceWithFreshTabOrHome();
+        return;
       }
-      slot.noteId = loadedId;
-      _syncSession();
+      _removeTabAt(index, reason: 'identity-mismatch');
+      _scheduleReadyRefresh();
       return;
     }
   }
@@ -14392,48 +13475,67 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (incoming != null && incoming.isNotEmpty) {
       final idx = _indexOfPath(incoming);
       if (idx >= 0) {
-        _setActiveIndex(idx);
+        unawaited(_setActiveIndex(idx));
       } else {
-        _addTabAndSwitch(
-          path: incoming,
-          initialPageIndex: widget.initialPageIndexOverride,
+        unawaited(
+          _addTabAndSwitch(
+            path: incoming,
+            initialPageIndex: widget.initialPageIndexOverride,
+          ),
         );
       }
       return;
     }
     if (incoming == null) {
-      _addTabAndSwitch(
-        initialPageIndex: widget.initialPageIndexOverride,
+      unawaited(
+        _addTabAndSwitch(
+          initialPageIndex: widget.initialPageIndexOverride,
+        ),
       );
     }
   }
 
-  /// Centralized switch. Synchronous on purpose: the tap mounts the new tab
-  /// immediately with a single setState, so switching never holds the user
-  /// on the old tab. Persistence of the outgoing tab is owned by its
-  /// dispose ([EditorState] saves once if dirty, the same path every tab
-  /// close already uses) and therefore never blocks the switch, runs off
-  /// the critical path, and can never run in parallel for two tabs.
-  void _setActiveIndex(int index) {
+  /// Switch guard: rapid taps resolve last-wins instead of racing saves and
+  /// mounts against each other.
+  int _switchEpoch = 0;
+
+  /// Centralized switch. Only one editor is ever mounted, so this persists
+  /// the outgoing tab first (cheap no-op when clean), then mounts the new
+  /// one. Never saves tabs in parallel and never keeps background canvases.
+  Future<void> _setActiveIndex(int index) async {
     if (index < 0 || index >= _tabs.length || index == _activeIndex) return;
+    final epoch = ++_switchEpoch;
+    // Resolve by slot identity after the save gap: tabs may have been
+    // added/removed/closed while saving, so a raw index may be stale.
     final target = _tabs[index];
+    final outgoing = _activeState;
+    if (outgoing != null) {
+      try {
+        await outgoing.saveIfDirty(updateThumbnail: false);
+      } catch (_) {}
+    }
+    if (!mounted || epoch != _switchEpoch) return;
+    // The list may have shrunk while saving (tab closed, validation
+    // pruned); re-resolve instead of activating a stale index.
+    final freshIndex = _tabs.indexOf(target);
+    if (freshIndex < 0 || freshIndex == _activeIndex) return;
     log.info(
-      'switch ${_displayNameForPath(_tabs[_activeIndex].path)}'
+      'switch ${_displayNameForPath(_tabs[_activeIndex.clamp(0, _tabs.length - 1)].path)}'
       ' -> ${_displayNameForPath(target.path)}',
     );
-    setState(() => _activeIndex = index);
+    setState(() => _activeIndex = freshIndex);
     _syncSession();
     _scheduleReadyRefresh();
-    unawaited(_confirmActiveNoteId());
+    unawaited(_validateActiveNoteId());
   }
 
-  /// Appends a tab and switches to it. The switch itself is synchronous
-  /// (see [_setActiveIndex]); the outgoing tab persists via dispose.
-  void _addTabAndSwitch({
+  /// Appends a tab and switches to it through the standard save-then-switch
+  /// path, so the outgoing tab is persisted before unmounting.
+  Future<void> _addTabAndSwitch({
     String? path,
     String? pdfPath,
     int? initialPageIndex,
-  }) {
+  }) async {
     if (!mounted) return;
     final slot = _BrowserTabSlot(
       id: _nextId++,
@@ -14447,7 +13549,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       'add ${_displayNameForPath(slot.path)} (total ${_tabs.length})',
     );
     _syncSession();
-    _setActiveIndex(_tabs.indexOf(slot));
+    await _setActiveIndex(_tabs.indexOf(slot));
   }
 
   void _bumpChrome() {
@@ -14486,31 +13588,18 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
 
   void _scheduleReadyRefresh() {
     if (_readyRefreshScheduled || _tabs.isEmpty) return;
-    final activeId = _activeIndex >= 0 && _activeIndex < _tabs.length
-        ? _tabs[_activeIndex].id
-        : null;
-    // One-shot per activation. This is called from build, and its post-frame
-    // callback setStates: without the guard the callback re-armed on the
-    // next build and the whole editor subtree rebuilt once per frame,
-    // forever (idle CPU + forced page repaints during pans).
-    if (activeId == null || _chromeReadySlotId == activeId) return;
     _readyRefreshScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyRefreshScheduled = false;
       if (!mounted) return;
-      final id = _activeIndex >= 0 && _activeIndex < _tabs.length
-          ? _tabs[_activeIndex].id
-          : null;
-      if (id == null || _chromeReadySlotId == id) return;
       // The Editor mounts asynchronously; ensures AppBar/toolbar
       // leave the placeholder as soon as the active state exists.
       if (_activeState == null) {
         _scheduleReadyRefresh();
         return;
       }
-      _chromeReadySlotId = id;
       _bumpChrome();
-      unawaited(_confirmActiveNoteId());
+      unawaited(_validateActiveNoteId());
     });
   }
 
@@ -14567,10 +13656,10 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (!mounted || selected == null || selected.isEmpty) return;
     final existing = _indexOfPath(selected);
     if (existing >= 0) {
-      _setActiveIndex(existing);
+      unawaited(_setActiveIndex(existing));
       return;
     }
-    _addTabAndSwitch(path: selected);
+    await _addTabAndSwitch(path: selected);
   }
 
   /// Opens the linked note in another tab (without closing the current one, no back).
@@ -14580,7 +13669,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
     if (target.isEmpty || !mounted) return;
     final idx = _indexOfPath(target);
     if (idx >= 0) {
-      _setActiveIndex(idx);
+      await _setActiveIndex(idx);
       if (!mounted || _activeIndex != idx) return;
       if (pageIndex != null && pageIndex >= 0) {
         // Post-frame so layout is ready after the tab switch.
@@ -14592,11 +13681,11 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
       }
       return;
     }
-    _addTabAndSwitch(path: target, initialPageIndex: pageIndex);
+    await _addTabAndSwitch(path: target, initialPageIndex: pageIndex);
   }
 
   void _switchTab(int index) {
-    _setActiveIndex(index);
+    unawaited(_setActiveIndex(index));
   }
 
   /// Removes the tab at [index] and reveals a neighbor. The closed editor
@@ -14759,14 +13848,14 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
           onPressed: _goToHome,
         ),
         title: const Text('Loading…'),
-        actions: const [], // Removido o _buildNewTabButton()
+        actions: [_buildNewTabButton()],
         bottom: _buildTabStripBottom(context, null),
       );
     }
 
     final inner = activeState._buildEditorAppBar(
       context,
-      leadingActions: const [], // Removido o _buildNewTabButton()
+      leadingActions: [_buildNewTabButton()],
       onBackOverride: _goToHome,
     );
     if (inner is AppBar) {
