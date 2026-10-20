@@ -255,11 +255,13 @@ void main() {
       _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
     }
     expect(cache.recordedTileCount, greaterThan(1));
-    for (
-      var i = 0;
-      i < 12 && !strokes.every((s) => s.hasCachedMesh);
-      i++
-    ) {
+    // Cold tiles record authored paths; spine meshes are triangulated off the
+    // UI thread (mesh worker) and a settled paint swaps them in. Recording
+    // meshes inline here was a 20-56 ms frame per tile on dense pages.
+    expect(cache.debugPathOnlyTileCount, greaterThan(0));
+    _prewarm(page); // the background mesh worker finishing
+    expect(strokes.every((s) => s.hasCachedMesh), isTrue);
+    for (var i = 0; i < 12 && cache.debugPathOnlyTileCount > 0; i++) {
       _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 8);
     }
     expect(cache.debugPathOnlyTileCount, 0);
@@ -272,7 +274,7 @@ void main() {
     page.dispose();
   });
 
-  testWidgets('opening records ballpoint mesh tiles immediately', (
+  testWidgets('opening records path tiles, then upgrades to mesh tiles', (
     tester,
   ) async {
     TiledStrokePictureCache.viewportMoving = false;
@@ -289,21 +291,23 @@ void main() {
       _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 1);
     }
     expect(cache.recordedTileCount, greaterThan(1));
-    for (
-      var i = 0;
-      i < 12 && !strokes.every((s) => s.hasCachedMesh);
-      i++
-    ) {
+    // Opening must not triangulate inline: that was a 20-56 ms frame per tile
+    // on dense pages (the freeze felt when a page first appears). Tiles record
+    // authored paths until the mesh worker has warmed the strokes.
+    expect(cache.debugPathOnlyTileCount, greaterThan(0));
+    expect(strokes.every((s) => s.hasCachedMesh), isFalse);
+
+    _prewarm(page); // the background mesh worker finishing
+    for (var i = 0; i < 12 && cache.debugPathOnlyTileCount > 0; i++) {
       _paintCache(cache, page, strokes: strokes, maxNewTilesPerPaint: 8);
     }
     expect(cache.debugPathOnlyTileCount, 0);
     expect(cache.debugLivePaintedTileCount, 0);
     expect(
-      strokes.any((s) => s.needsTileMeshWarmup),
-      isFalse,
-      reason: 'spine-mesh pens must not wait on path-only warmup',
+      strokes.every((s) => s.hasCachedMesh),
+      isTrue,
+      reason: 'spine-mesh pens upgrade once their meshes are warm',
     );
-    expect(strokes.every((s) => s.hasCachedMesh), isTrue);
 
     page.dispose();
   });

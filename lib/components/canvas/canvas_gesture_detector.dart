@@ -1011,10 +1011,16 @@ class _PagesBuilderState extends State<_PagesBuilder> with WidgetsBindingObserve
   // converging while the app is idle; frame-chained sweeps only advanced
   // while frames were being produced, so pages ahead were still blank
   // shells when a later fling or jump reached them. During the open grace
-  // the cadence doubles: the first fling comes within the first moment and
+  // the cadence halves: the first fling comes within the first moment and
   // must land on warmed pages.
-  static const _warmupPumpPeriod = Duration(milliseconds: 16);
-  static const _warmupPumpGracePeriod = Duration(milliseconds: 8);
+  //
+  // A pass is already frame-bounded (~8 ms of tile recording), so the timer
+  // only has to leave room for the gesture/paint frames between passes.
+  // While the user is driving the viewport it backs off further: gesture
+  // frames get the isolate, and warming resumes the moment input stops.
+  static const _warmupPumpPeriod = Duration(milliseconds: 32);
+  static const _warmupPumpGracePeriod = Duration(milliseconds: 16);
+  static const _warmupPumpInputPeriod = Duration(milliseconds: 48);
 
   final _pageOffsets = <double>[];
   final _pageHeights = <double>[];
@@ -1178,14 +1184,16 @@ class _PagesBuilderState extends State<_PagesBuilder> with WidgetsBindingObserve
         grace != null &&
         DateTime.now().isBefore(grace) &&
         !PageRasterCacheManager.userInputRecent;
-    _warmupPumpTimer = Timer(
-      fastGrace ? _warmupPumpGracePeriod : _warmupPumpPeriod,
-      () {
-        _warmupPumpTimer = null;
-        if (!mounted) return;
-        if (_runWarmupPass()) _ensureWarmupPump();
-      },
-    );
+    final period = fastGrace
+        ? _warmupPumpGracePeriod
+        : PageRasterCacheManager.userInputRecent
+            ? _warmupPumpInputPeriod
+            : _warmupPumpPeriod;
+    _warmupPumpTimer = Timer(period, () {
+      _warmupPumpTimer = null;
+      if (!mounted) return;
+      if (_runWarmupPass()) _ensureWarmupPump();
+    });
   }
 
   bool _hasLazyShells() {
@@ -1252,8 +1260,11 @@ class _PagesBuilderState extends State<_PagesBuilder> with WidgetsBindingObserve
     // until the tiles exist — measured at 55-133 ms for the first paint of a
     // dense page whose tiles were skipped. Raster bakes (toImage) stay
     // deferred by PageRasterCacheManager.
+    final geomBefore = TiledStrokePictureCache.geometryWarmEpoch;
     final warmRecorded =
         widget.onPrefetchNearbyPages?.call(warmStart, warmEnd) ?? 0;
+    final geometryWarmed =
+        TiledStrokePictureCache.geometryWarmEpoch != geomBefore;
     final center = ((visibleStart + visibleEnd) / 2).round().clamp(
       0,
       pageCount - 1,
@@ -1298,7 +1309,7 @@ class _PagesBuilderState extends State<_PagesBuilder> with WidgetsBindingObserve
     // while shells remain: otherwise the pump stopped ~1.3 s after open (all
     // pages parsed) and a fling at 2 s entered pages the 48 ms cadence had
     // not reached yet. A pass that records nothing means the band is warm.
-    return _hasLazyShells() || warmRecorded > 0;
+    return _hasLazyShells() || warmRecorded > 0 || geometryWarmed;
   }
 
   int _findFirstVisiblePageIndex(double viewportTop) {

@@ -636,41 +636,38 @@ class _SidebarStrokeSketchPainter extends CustomPainter {
     if (pageSize.width <= 0 || pageSize.height <= 0 || size.isEmpty) return;
     final sx = size.width / pageSize.width;
     final sy = size.height / pageSize.height;
+    final scale = (sx + sy) / 2.0;
+    
+    canvas.save();
+    canvas.scale(sx, sy);
+
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = false;
-    // Every stroke is drawn. Long strokes keep their ends and a fixed
-    // sample count so a dense page does not drop the later ink.
-    const maxSamples = 24;
+
+    // Fast zero-allocation rendering using precomputed Float32List
     for (final stroke in strokes) {
-      final pts = stroke.pointsForEraser;
-      if (pts.isEmpty) continue;
+      final fastLine = stroke.fastRenderLine;
+      if (fastLine.isEmpty) continue;
+      
       paint.color = invert ? Colors.white : stroke.color;
-      final width = (stroke.options.size * sx).clamp(0.4, 2.8);
-      if (pts.length == 1) {
+      final widthOnScreen = (stroke.options.size * scale).clamp(0.4, 3.0);
+      paint.strokeWidth = widthOnScreen / scale;
+      
+      if (fastLine.length == 2) {
         canvas.drawCircle(
-          Offset(pts.first.x * sx, pts.first.y * sy),
-          width,
-          Paint()
-            ..color = paint.color
-            ..style = PaintingStyle.fill
-            ..isAntiAlias = false,
+          Offset(fastLine[0], fastLine[1]), 
+          paint.strokeWidth / 2, 
+          Paint()..color=paint.color..style=PaintingStyle.fill..isAntiAlias=false
         );
-        continue;
+      } else {
+        canvas.drawRawPoints(ui.PointMode.polygon, fastLine, paint);
       }
-      final stride = pts.length <= maxSamples
-          ? 1
-          : (pts.length / maxSamples).ceil();
-      paint.strokeWidth = width;
-      final offsetList = <Offset>[];
-      for (var i = 0; i < pts.length - 1; i += stride) {
-        offsetList.add(Offset(pts[i].x * sx, pts[i].y * sy));
-      }
-      offsetList.add(Offset(pts.last.x * sx, pts.last.y * sy));
-      canvas.drawPoints(ui.PointMode.polygon, offsetList, paint);
     }
+    
+    canvas.restore();
   }
 
   @override

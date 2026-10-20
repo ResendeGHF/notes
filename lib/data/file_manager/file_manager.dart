@@ -1006,6 +1006,31 @@ class FileManager {
     }
   }
 
+  /// [compute] entry: zlib decode on a background isolate.
+  static Uint8List _decompressNoteBodyInIsolate((Uint8List, String) args) =>
+      _maybeDecompressSbn2Note(args.$1, args.$2);
+
+  /// Decompresses a note body without freezing the UI isolate.
+  ///
+  /// Note bodies are regularly 5-20 MB; inflating one takes 40-150 ms. Doing
+  /// that inline on whatever isolate called [readFile] (usually the UI one,
+  /// during `EditorCoreInfo.loadFromFilePath`) was a visible freeze at the
+  /// open instant. Small/legacy bodies stay inline (microseconds).
+  static Future<Uint8List> _maybeDecompressSbn2NoteAsync(
+    Uint8List data,
+    String filePath,
+  ) async {
+    if (!filePath.endsWith(Editor.extension) || data.isEmpty) return data;
+    if (data.length >= 64 * 1024) {
+      try {
+        return await compute(_decompressNoteBodyInIsolate, (data, filePath));
+      } catch (_) {
+        return _maybeDecompressSbn2Note(data, filePath);
+      }
+    }
+    return _maybeDecompressSbn2Note(data, filePath);
+  }
+
   /// When false, vault reads must not write plaintext to disk (RAM-only mode).
   static bool _vaultReadAllowDiskBackedDecrypt(String relativeVaultPath) =>
       vaultPathAllowsDiskBackedDecrypt(relativeVaultPath);
@@ -1072,7 +1097,7 @@ class FileManager {
               );
             }
           }
-          return _maybeDecompressSbn2Note(result, filePath);
+          return _maybeDecompressSbn2NoteAsync(result, filePath);
         }
 
         if (!suppressLogs && !allowMissing) {
@@ -1119,7 +1144,7 @@ class FileManager {
           }
           result = null;
         } else {
-          result = _maybeDecompressSbn2Note(result, filePath);
+          result = await _maybeDecompressSbn2NoteAsync(result, filePath);
           if (!suppressLogs) {
             log.fine(
               '[FileManager.readFile] Successfully read ${result.length} bytes from disk: $filePath',

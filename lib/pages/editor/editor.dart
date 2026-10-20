@@ -633,7 +633,7 @@ class EditorState extends State<Editor>
           }
           if (attached == 0) return;
           if (!page.strokePictureCache.isDisposed) {
-            page.strokePictureCache.recordGeneration.value++;
+            page.strokePictureCache.notifyRecordGeneration();
           }
           // More slices remain when cold strokes are left; otherwise done.
           if (!_hasColdMeshStrokes(page)) {
@@ -760,14 +760,12 @@ class EditorState extends State<Editor>
     // Bound the wait on the first canvas frame: dense pages converge in a
     // handful of slices; a pathological page stops here and lets the first
     // paint record the rest (bounded by the paint's own budget). Frames are
-    // yielded between slice groups so the loading body keeps painting; the
-    // route transition still covers the screen.
+    // yielded between slices so the route transition keeps full frame rate;
+    // the note appears as soon as the transition ends instead of waiting for
+    // a full tile warm (any remainder converges behind the cheap fallback).
     final stopwatch = Stopwatch()..start();
-    const maxTotalMs = 360;
-    // Increased slices per frame to aggressively pre-record tiles during
-    // note opening, preventing blocks from popping in visually.
-    const maxSlicesPerFrame = 8;
-    var slicesInFrame = 0;
+    const maxTotalMs = 260;
+
     for (final pageIndex in targets) {
       // Shells cannot be warmed: their strokes are still BSON bytes. Parse
       // them here (chunked, yielding between slices) while the route
@@ -799,6 +797,7 @@ class EditorState extends State<Editor>
         if (Pen.currentStroke != null || Eraser.isDragging) return;
         if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) break;
         final before = page.strokePictureCache.pictureCount;
+        final geomBefore = TiledStrokePictureCache.geometryWarmEpoch;
         final recorded = _prefetchNearbyPageContent(
           pageIndex,
           pageIndex,
@@ -808,7 +807,8 @@ class EditorState extends State<Editor>
           'warm.preframe.p$pageIndex',
           'warm.preframe page=$pageIndex recorded=$recorded',
         );
-        final progressed = page.strokePictureCache.pictureCount > before;
+        final progressed = page.strokePictureCache.pictureCount > before ||
+            TiledStrokePictureCache.geometryWarmEpoch != geomBefore;
         if (!progressed && recorded <= 0) {
           // Budget too small for the next tile, or a stale signature: yield
           // and retry once, then stop (the first paint finishes the rest).
@@ -816,10 +816,10 @@ class EditorState extends State<Editor>
         } else {
           stalled = 0;
         }
-        if (++slicesInFrame >= maxSlicesPerFrame) {
-          slicesInFrame = 0;
-          await SchedulerBinding.instance.endOfFrame;
-        }
+        // One frame per slice: each pass is already frame-bounded, so this
+        // keeps the route transition at full frame rate while the warm
+        // converges over the next few frames.
+        await SchedulerBinding.instance.endOfFrame;
       }
     }
   }
@@ -882,18 +882,17 @@ class EditorState extends State<Editor>
     // so gesture frames stay smooth while still converging (fast flings
     // return early above and rely on paint fallback).
     final frameStopwatch = Stopwatch()..start();
-    final pagesPerFrame = slowMoving ? 1 : 2;
-    // During the open grace the viewport is only being placed, so the warmer
-    // may take larger slices on the way to the first paints: the vector work
-    // of a dense page (~130 ms of outline building) either happens here in
-    // slices before the page is visible, or it lands in the first paint as
-    // one visible hitch. Slices stay small enough that the open frames keep
-    // near-60 fps while the pump converges over several passes (a pass runs
-    // every frame during the open, so 12 ms/pass still records ~70% of a
-    // second's worth of tiles per second).
-    final frameBudgetMs = slowMoving ? 16 : 32;
-    final prewarmMaxTiles = slowMoving ? 6 : (openGrace ? 8 : 16);
-    final prewarmBudgetMs = slowMoving ? 8 : (openGrace ? 16 : 24);
+    final pagesPerFrame = 1;
+    // The warmer runs on the UI thread, and a paint cannot yield: any slice
+    // longer than a frame budget is a dropped frame. Right after open the
+    // pump used to take 24-32 ms per pass on an 8 ms cadence, which pinned
+    // the UI isolate at ~20-30 fps exactly while the user starts panning.
+    // Keep every pass inside ~one frame instead. Pages are never blank while
+    // the tiles converge: the paint path draws every stroke with the cheap
+    // path fallback until the recorded tiles replace it.
+    final frameBudgetMs = slowMoving ? 5 : 8;
+    final prewarmMaxTiles = slowMoving ? 1 : 2;
+    final prewarmBudgetMs = slowMoving ? 3 : (openGrace ? 6 : 5);
     var pagesTouched = 0;
     var recordedTotal = 0;
     // Outward from the visible center, bounded by the passed band, then
@@ -989,9 +988,14 @@ class EditorState extends State<Editor>
         if (recorded == 0) {
           PerfProbe.markOnce(
             'prefetch.res0.p$i',
-            'prefetch.res0 page=$i strokes=${page.allStrokesInDrawOrder.length}',
+            'prefetch.res0 page=$i strokes=${page.allStrokesInDrawOrder.length} '
+            'deferred=${page.strokePictureCache.lastPrewarmDeferredTiles}',
           );
-          _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
+          // A pass that only warmed cold tile outlines (deferred > 0) is real
+          // progress: the page is not warm yet, so keep it out of the done set.
+          if (page.strokePictureCache.lastPrewarmDeferredTiles == 0) {
+            _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
+          }
         } else if (recorded > 0) {
           recordedTotal += recorded;
         } else {
@@ -1059,6 +1063,10 @@ class EditorState extends State<Editor>
   set currentTool(Tool tool) {
     if (tool != Select.currentSelect && tool != ShapeTool.currentShapeTool) {
       _autoSwitchBackToShapeTool = false;
+    }
+
+    if (tool is Select && _currentTool is! Select) {
+      _toolBeforeSelect = _currentTool;
     }
 
     if ((tool is Select || tool is Eraser || tool is LaserPointer) &&
@@ -2989,10 +2997,14 @@ class EditorState extends State<Editor>
             image.onDeleteImage = onDeleteImage;
             image.onMiscChange = autosaveAfterDelay;
           }
-          // Keep every idle slice under ~3ms so open stays interactive.
+          // Keep every idle slice under ~3ms so open stays interactive. Yield
+          // a whole frame (not just the microtask queue): a zero-delay yield
+          // let this sweep re-enter immediately and pin the UI isolate while
+          // the user was already panning.
           if (budget.elapsedMilliseconds >= 3) {
             budget.reset();
-            await Future<void>.delayed(Duration.zero);
+            await SchedulerBinding.instance.endOfFrame;
+            if (!mounted || !identical(info, coreInfo)) return;
           }
         }
       });
@@ -3546,10 +3558,10 @@ class EditorState extends State<Editor>
 
     setState(() {
       _clearSelectionPreview();
+      final affectedPageIndices = <int>{};
 
       switch (item!.type) {
         case .draw:
-          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final page = coreInfo.pages[stroke.pageIndex];
             page.removeStrokeFromAnyLayer(stroke);
@@ -3559,9 +3571,6 @@ class EditorState extends State<Editor>
           for (final image in item.images) {
             coreInfo.pages[image.pageIndex].removeImageFromAnyLayer(image);
             affectedPageIndices.add(image.pageIndex);
-          }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
           }
           removeExcessPages();
 
@@ -3582,7 +3591,6 @@ class EditorState extends State<Editor>
           break;
 
         case .erase:
-          final affectedPageIndices = <int>{};
           // Positional restore: reinsert at recorded temporal slots so undo
           // never restacks erased ink on top. Spots absent (legacy items)
           // fall back to append.
@@ -3615,13 +3623,9 @@ class EditorState extends State<Editor>
             image.newImage = true;
             affectedPageIndices.add(idx);
           }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
-          }
           break;
 
         case .areaErase:
-          final affectedPageIndices = <int>{};
           final added = item.strokesAdded!;
           for (final stroke in added) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -3659,13 +3663,9 @@ class EditorState extends State<Editor>
             image.newImage = true;
             affectedPageIndices.add(image.pageIndex);
           }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
-          }
           break;
 
         case .changeStrokeType:
-          final affectedChangePages = <int>{};
           for (var si = 0; si < item.strokes.length; si++) {
             final added = item.strokesAdded!;
             final oldStroke = item.strokes[si];
@@ -3678,17 +3678,14 @@ class EditorState extends State<Editor>
             page.strokeSpatialIndex?.remove(newStroke);
             page.replaceStroke(newStroke, oldStroke);
             page.strokeSpatialIndex?.insert(oldStroke);
-            affectedChangePages.add(idx);
+            affectedPageIndices.add(idx);
           }
           for (final image in item.images) {
             createPage(image.pageIndex);
             coreInfo.pages[image.pageIndex].images.add(image);
             if (coreInfo.isInfinite) image.pageIndex = 0;
             image.newImage = true;
-            affectedChangePages.add(image.pageIndex);
-          }
-          for (final i in affectedChangePages) {
-            coreInfo.pages[i].redrawStrokes();
+            affectedPageIndices.add(image.pageIndex);
           }
           break;
 
@@ -3740,8 +3737,6 @@ class EditorState extends State<Editor>
           final isCurrentSelection =
               select.doneSelecting &&
               item.strokes.any((s) => select.selectResult.strokes.contains(s));
-
-          final affectedPageIndices = <int>{};
 
           if (item.offset != null) {
             final shiftOffset = Offset(-item.offset!.left, -item.offset!.top);
@@ -3860,13 +3855,6 @@ class EditorState extends State<Editor>
               select.selectResult.recomputeBoundsAround(item.centroid!);
             }
           }
-
-          for (final idx in affectedPageIndices) {
-            // Same as paste-apply above: in-place geometry changes must bump
-            // the content revision for the tile spatial grid (and for save).
-            coreInfo.pages[idx].markSaveBinaryDirty();
-            coreInfo.pages[idx].redrawStrokes();
-          }
           break;
 
         case .quillChange:
@@ -3881,15 +3869,27 @@ class EditorState extends State<Editor>
 
         case .changeColor:
           for (final stroke in item.strokes) {
-            stroke.color = item.colorChange![stroke]!.previous;
+            stroke.color = item.colorChange![stroke]!.current;
+            affectedPageIndices.add(stroke.pageIndex);
           }
           break;
+      }
+
+      for (final i in affectedPageIndices) {
+        if (i >= 0 && i < coreInfo.pages.length) {
+          coreInfo.pages[i].markSaveBinaryDirty();
+          coreInfo.pages[i].redrawStrokes();
+          _pageRasterCache.invalidateInk(i, discardStale: true);
+        }
       }
 
       Select.currentSelect.unselect();
     });
 
+    _notifyEmbeddedChromeChanged();
+
     _bumpInteractionRepaint();
+    stows.lastTool.notifyListeners();
 
     Future.delayed(const Duration(milliseconds: 100), () {
       if (mounted) _isUndoRedoInProgress = false;
@@ -3908,10 +3908,10 @@ class EditorState extends State<Editor>
 
     setState(() {
       _clearSelectionPreview();
+      final affectedPageIndices = <int>{};
 
       switch (item.type) {
         case .draw:
-          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             createPage(stroke.pageIndex);
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
@@ -3929,13 +3929,9 @@ class EditorState extends State<Editor>
             image.newImage = true;
             affectedPageIndices.add(idx);
           }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
-          }
           break;
 
         case .erase:
-          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final page = coreInfo.pages[stroke.pageIndex];
             page.removeStrokeFromAnyLayer(stroke);
@@ -3946,21 +3942,16 @@ class EditorState extends State<Editor>
             coreInfo.pages[image.pageIndex].removeImageFromAnyLayer(image);
             affectedPageIndices.add(image.pageIndex);
           }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
-          }
           removeExcessPages();
           break;
 
         case .areaErase:
-          final affectedPageIndices = <int>{};
           for (final stroke in item.strokes) {
             final idx = stroke.pageIndex.clamp(0, coreInfo.pages.length - 1);
             coreInfo.pages[idx].removeStrokeFromAnyLayer(stroke);
             coreInfo.pages[idx].strokeSpatialIndex?.remove(stroke);
             affectedPageIndices.add(idx);
           }
-          // Positional restore of the fragments at their recorded slots.
           final byPageRedo = <int, List<Stroke>>{};
           final byPageRedoSpots = <int, List<(int, int)>>{};
           final addedRedo = item.strokesAdded!;
@@ -3982,13 +3973,9 @@ class EditorState extends State<Editor>
             }
             affectedPageIndices.add(entry.key);
           }
-          for (final i in affectedPageIndices) {
-            coreInfo.pages[i].redrawStrokes();
-          }
           break;
 
         case .changeStrokeType:
-          final affectedRedoChangePages = <int>{};
           for (var si = 0; si < item.strokes.length; si++) {
             final addedRedo = item.strokesAdded!;
             final oldStroke = item.strokes[si];
@@ -3999,10 +3986,7 @@ class EditorState extends State<Editor>
             page.strokeSpatialIndex?.remove(oldStroke);
             page.replaceStroke(oldStroke, newStroke);
             page.strokeSpatialIndex?.insert(newStroke);
-            affectedRedoChangePages.add(idx);
-          }
-          for (final i in affectedRedoChangePages) {
-            coreInfo.pages[i].redrawStrokes();
+            affectedPageIndices.add(idx);
           }
           break;
 
@@ -4056,7 +4040,6 @@ class EditorState extends State<Editor>
           final isCurrentSelection =
               select.doneSelecting &&
               item.strokes.any((s) => select.selectResult.strokes.contains(s));
-          final affectedPageIndices = <int>{};
 
           if (item.offset != null) {
             final shiftOffset = Offset(item.offset!.left, item.offset!.top);
@@ -4170,15 +4153,6 @@ class EditorState extends State<Editor>
               select.selectResult.recomputeBoundsAround(item.centroid!);
             }
           }
-
-          for (final idx in affectedPageIndices) {
-            // Geometry changed in place (shift/rotate/scale): same objects,
-            // same count — bump the content revision for the tile spatial grid
-            // rebuilds instead of serving stale bounds (ghost/missing ink
-            // until the next count change). Also marks the note for save.
-            coreInfo.pages[idx].markSaveBinaryDirty();
-            coreInfo.pages[idx].redrawStrokes();
-          }
           break;
 
         case .quillChange:
@@ -4190,14 +4164,26 @@ class EditorState extends State<Editor>
         case .changeColor:
           for (final stroke in item.strokes) {
             stroke.color = item.colorChange![stroke]!.current;
+            affectedPageIndices.add(stroke.pageIndex);
           }
           break;
+      }
+
+      for (final i in affectedPageIndices) {
+        if (i >= 0 && i < coreInfo.pages.length) {
+          coreInfo.pages[i].markSaveBinaryDirty();
+          coreInfo.pages[i].redrawStrokes();
+          _pageRasterCache.invalidateInk(i, discardStale: true);
+        }
       }
 
       Select.currentSelect.unselect();
     });
 
+    _notifyEmbeddedChromeChanged();
+
     _bumpInteractionRepaint();
+    stows.lastTool.notifyListeners();
 
     Future.delayed(const Duration(milliseconds: 100), () {
       if (mounted) _isUndoRedoInProgress = false;
@@ -4789,8 +4775,8 @@ class EditorState extends State<Editor>
       page.strokeSpatialIndex = null;
       return;
     }
-    if (!page.strokeSpatialIndexCoversActiveLayer) {
-      page.buildSpatialIndex(activeLayerOnly: true);
+    if (page.strokeSpatialIndex == null) {
+      page.buildSpatialIndex();
     }
   }
 
@@ -5933,7 +5919,9 @@ class EditorState extends State<Editor>
         _eraserDeltaAdded = null;
         setState(() {});
         if (eraser.mode.isAreaLike) {
-          page.buildSpatialIndex(activeLayerOnly: true);
+          // DO NOT use activeLayerOnly: true. CanvasPainter uses the QuadTree to cull 
+          // across all layers at once; omitting lower layers makes them vanish completely.
+          page.buildSpatialIndex();
           page.redrawStrokes();
           removeExcessPages();
         }
@@ -6033,6 +6021,7 @@ class EditorState extends State<Editor>
           shouldFitInfiniteCanvas = true;
           // Re-attach the shape back to the main base layer
           _clearSelectionPreview();
+          _exitSelectToolAfterAction();
         } else if (_isScaling) {
             final centroid =
                 committedPreview?.pivot ??
@@ -6054,6 +6043,7 @@ class EditorState extends State<Editor>
                 centroid: centroid,
               ),
             );
+            _exitSelectToolAfterAction();
           } else if (_isRotating) {
             final centroid =
                 committedPreview?.pivot ?? select.selectResult.getCentroid();
@@ -6074,6 +6064,7 @@ class EditorState extends State<Editor>
             _rotationStartPosition = null;
             _rotationStartAngle = 0.0;
             shouldFitInfiniteCanvas = true;
+            _exitSelectToolAfterAction();
           } else if (moveOffset != .zero) {
             _commitSelectionPreview(select.selectResult);
             history.recordChange(
@@ -6093,6 +6084,7 @@ class EditorState extends State<Editor>
             );
             select.selectResult.pageIndexStart = select.selectResult.pageIndex;
             shouldFitInfiniteCanvas = true;
+            _exitSelectToolAfterAction();
           } else {
             _clearSelectionPreview();
           }
@@ -6151,6 +6143,7 @@ class EditorState extends State<Editor>
         );
       }
       autosaveAfterDelay();
+      _notifyEmbeddedChromeChanged();
     }
     resetDrawSessionState();
   }
@@ -12006,7 +11999,24 @@ class EditorState extends State<Editor>
         bandStart == null ||
         bandEnd == null ||
         (index >= bandStart - 1 && index <= bandEnd + 1);
-    if (nearViewport) setState(() {});
+    if (nearViewport) _scheduleHydrateRebuild();
+  }
+
+  bool _hydrateRebuildScheduled = false;
+
+  /// Coalesced rebuild after async page hydration.
+  ///
+  /// Several dense pages can finish parsing in the same frame; one rebuild
+  /// per frame mounts them all, instead of each completion paying a full
+  /// editor + page-list build (measured as stacked 10-20 ms builds while the
+  /// user was already panning).
+  void _scheduleHydrateRebuild() {
+    if (_hydrateRebuildScheduled || !mounted) return;
+    _hydrateRebuildScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _hydrateRebuildScheduled = false;
+      if (mounted) setState(() {});
+    });
   }
 
   Widget pageBuilder(BuildContext context, int pageIndex) {

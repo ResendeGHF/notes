@@ -1353,13 +1353,18 @@ class EditorPage extends ChangeNotifier implements HasSize {
 
   /// Strokes parsed per UI yield in [fromBinaryAsync]. Keeps scroll-hydrate
   /// of dense pages under ~10ms slices so 120Hz scrolling never freezes.
-  static const _kHydrateYieldEveryStrokes = 400;
+  static const _kHydrateYieldEveryStrokes = 250;
 
   /// Parse-time slice budget for [fromBinaryAsync]. A yield also happens every
   /// [_kHydrateYieldEveryStrokes] strokes, so cheap pages still slice at a
   /// predictable cadence while unusually heavy strokes (huge point counts)
   /// cannot stretch one slice past a couple of milliseconds.
-  static const _kHydrateSliceBudgetUs = 2500;
+  ///
+  /// At 120 Hz a frame is 8.3 ms and the canvas paint already uses most of it
+  /// right after open; a 2.5 ms parse slice per in-flight page (two pages
+  /// concurrent) was enough to push frames over budget while the first pan
+  /// crossed cold pages. 1.5 ms keeps two parses under a third of a frame.
+  static const _kHydrateSliceBudgetUs = 1500;
 
   /// Extra pause after each yield while a fast viewport motion is in flight
   /// (see `throttleWhile` in [fromBinaryAsync]). The parse keeps converging —
@@ -1450,17 +1455,26 @@ class EditorPage extends ChangeNotifier implements HasSize {
     double marginBottomRead = 0;
     var strokesSinceYield = 0;
     final sliceWatch = Stopwatch()..start();
+    // Built as strokes are parsed: the index inserts then ride the existing
+    // parse slices instead of landing later as one uninterruptible ~10-30 ms
+    // hit per dense page (the deferred sweep started 600 ms after open, right
+    // when the first pan begins). A parsed page is immediately queryable, so
+    // tile lookup and the fallback paint stop scanning every stroke linearly.
+    final spatialIndex = QuadTree<Stroke>(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      capacity: 10,
+    );
 
     Future<List<Stroke>> readStrokeArray(int count) async {
       final out = <Stroke>[];
       for (int i = 0; i < count; i++) {
-        out.add(
-          Stroke.fromBinary(
-            reader,
-            fileVersion: fileVersion,
-            page: HasSize(size),
-          ),
+        final stroke = Stroke.fromBinary(
+          reader,
+          fileVersion: fileVersion,
+          page: HasSize(size),
         );
+        out.add(stroke);
+        spatialIndex.insert(stroke);
         strokesSinceYield++;
         if (strokesSinceYield >= _kHydrateYieldEveryStrokes ||
             sliceWatch.elapsedMicroseconds >= _kHydrateSliceBudgetUs) {
@@ -1665,6 +1679,9 @@ class EditorPage extends ChangeNotifier implements HasSize {
         page.activeLayerIndex = activeLayerRead;
       }
     }
+    // Every stroke above was inserted into [spatialIndex] as it was parsed.
+    page.strokeSpatialIndex = spatialIndex;
+    page._strokeSpatialIndexLayerIndex = null;
     return page;
   }
 

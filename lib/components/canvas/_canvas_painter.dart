@@ -181,7 +181,6 @@ class CanvasPainter extends CustomPainter {
   final bool scaleAgnosticRepaint;
 
   static final _reusableQueryBuffer = <Stroke>[];
-  static final _reusableStrokeSet = <Stroke>{};
 
   /// Snapshots a selection into one bitmap for raster-drag: a single blit per
   /// frame replaces the full vector replay while transforming hundreds of

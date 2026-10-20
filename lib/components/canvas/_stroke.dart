@@ -902,6 +902,31 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   }
 
   Float32List? _packedPoints;
+  Float32List? _fastRenderLine;
+
+  /// Cached aggressively decimated Float32List for zero-allocation ultra-fast hardware rendering.
+  Float32List get fastRenderLine {
+    if (_fastRenderLine != null) return _fastRenderLine!;
+    final pts = points;
+    if (pts.isEmpty) return _fastRenderLine = Float32List(0);
+    
+    final step = pts.length > 50 ? (pts.length / 25).ceil() : 1;
+    int count = 0;
+    for (int i = 0; i < pts.length; i += step) count++;
+    if ((pts.length - 1) % step != 0) count++;
+    
+    final arr = Float32List(count * 2);
+    int idx = 0;
+    for (int i = 0; i < pts.length; i += step) {
+      arr[idx++] = pts[i].x;
+      arr[idx++] = pts[i].y;
+    }
+    if ((pts.length - 1) % step != 0) {
+      arr[idx++] = pts.last.x;
+      arr[idx++] = pts.last.y;
+    }
+    return _fastRenderLine = arr;
+  }
 
   void _ensurePackedPoints() {
     // Vertices mesh must not include stroke-prediction tail: that extra vertex
@@ -1349,6 +1374,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _detachMeshFromGlobalCache();
     points.shift(offset);
     _packedPoints = null;
+    _fastRenderLine = null;
     _lowQualityPolygon?.shift(offset);
     _highQualityPolygon?.shift(offset);
     _exportPolygon = null;
@@ -1386,6 +1412,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       points[i] = PointVector(newX, newY, point.pressure);
     }
     _packedPoints = null;
+    _fastRenderLine = null;
 
     void rotatePolygon(List<Offset>? polygon) {
       if (polygon == null) return;
@@ -1440,6 +1467,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedVerticesHash = null;
     _packedPoints = null;
     _neonInnerPath = null;
+    _fastRenderLine = null;
     _invalidateVectorFillPicture();
     if (!preserveBounds) {
       _invalidateSpatialData();
@@ -2855,6 +2883,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedVerticesHash = null;
     _packedPoints = null;
     _neonInnerPath = null;
+    _fastRenderLine = null;
     _invalidateVectorFillPicture();
     if (nullBounds) _invalidateSpatialData();
     _dropLiveTailCache();
@@ -3859,6 +3888,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       }
     }
     _packedPoints = null;
+    _fastRenderLine = null;
   }
 
   @protected

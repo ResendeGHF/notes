@@ -20,6 +20,7 @@ import 'package:saber/components/canvas/_shape_stroke.dart';
 import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/image/editor_image.dart';
+import 'package:saber/components/canvas/mesh_warmup_worker.dart';
 import 'package:saber/components/canvas/page_raster_cache.dart';
 import 'package:saber/components/canvas/selection_handles_overlay.dart';
 import 'package:saber/components/canvas/shape_control_points_overlay.dart';
@@ -29,6 +30,7 @@ import 'package:saber/data/editor/editor_core_info.dart';
 import 'package:saber/data/editor/page.dart';
 import 'package:saber/data/editor/quill_styles.dart';
 import 'package:saber/data/editor/stroke_paint_image_cache.dart';
+import 'package:saber/data/extensions/color_extensions.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
@@ -985,8 +987,34 @@ class InnerCanvasState extends State<InnerCanvas> {
       _lastLayerOrderHash = layerOrderHash;
 
       final bool contentChanged = quickStrokeCount != _lastStrokeCount;
-      final bool revisionChanged =
+    final bool revisionChanged =
       page.saveBinaryRevision != _lastObservedSaveBinaryRevision;
+
+    if (!pageChanged &&
+      !strokeFinished &&
+      !eraserFinished &&
+      !selectionCleared &&
+      !invertChanged &&
+      !revisionChanged &&
+      quickStrokeCount == _lastStrokeCount &&
+      layerOrderHash == _lastLayerOrderHash &&
+      page.laserStrokes.isEmpty &&
+      oldWidget.currentSelection == widget.currentSelection &&
+      oldWidget.selectionPreview == widget.selectionPreview &&
+      oldWidget.width == widget.width &&
+      oldWidget.height == widget.height &&
+      oldWidget.imageCropState == widget.imageCropState &&
+      oldWidget.doneSelecting == widget.doneSelecting &&
+      oldWidget.lineHeight == widget.lineHeight &&
+      oldWidget.lineThickness == widget.lineThickness &&
+      oldWidget.lineColor == widget.lineColor &&
+      oldWidget.textEditing == widget.textEditing &&
+      oldWidget.isPreview == widget.isPreview &&
+      oldWidget.isPrint == widget.isPrint &&
+      identical(oldWidget.eraserDeltaRemoved, widget.eraserDeltaRemoved) &&
+      identical(oldWidget.eraserDeltaAdded, widget.eraserDeltaAdded)) {
+      return;
+    }
 
       if (pageChanged) {
         _clearPendingInk();
@@ -1942,7 +1970,7 @@ class _PageRasterBgLayerPainter extends CustomPainter {
           lowQualityFilter: isMoving || !cacheSharp,
         );
       } else {
-        if (bgParams.backgroundPattern != CanvasBackgroundPattern.none || bgParams.backgroundColor.alpha > 0) {
+        if (bgParams.backgroundPattern != CanvasBackgroundPattern.none || bgParams.backgroundColor.a > 0) {
             fallback.paint(canvas, size);
         }
       }
@@ -1952,7 +1980,7 @@ class _PageRasterBgLayerPainter extends CustomPainter {
     // Only paint the expensive vector fallback if it's actually doing something visible.
     // PDF-backed pages (which use 'none' and 'white/transparent') should bypass this entirely
     // so we don't render a pure-white rect over and over.
-    if (bgParams.backgroundPattern != CanvasBackgroundPattern.none || bgParams.backgroundColor.alpha > 0) {
+    if (bgParams.backgroundPattern != CanvasBackgroundPattern.none || bgParams.backgroundColor.a > 0) {
         fallback.paint(canvas, size);
     }
   }
@@ -2116,9 +2144,14 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       // like every other slice (≈ one frame); the cheap path-fill fallback
       // covers the not-yet-recorded tiles meanwhile and convergence finishes
       // via the chained follow-up paints plus the warm-up pump.
+      // A paint cannot yield, so a recording slice longer than a frame
+      // budget is a dropped frame. At 120 Hz that is 8.3 ms; the budgets
+      // below stay under it and let the vector fallback (which draws every
+      // stroke, just with cheaper outlines) keep the page complete while the
+      // remaining tiles converge over the next frames.
       final budget = isInitialLoad
-          ? 32
-          : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 16);
+          ? 8
+          : (idleFill ? TiledStrokePictureCache.idleTileBudgetMs : 6);
 
       tiledCache.paint(
         canvas: canvas,
@@ -2138,7 +2171,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         lineColor: lineColor,
         deferRaster: Eraser.isDragging || Pen.currentStroke != null,
         tileRecordBudgetMs: budget,
-        maxNewTilesPerPaint: isInitialLoad ? 16 : (idleFill ? 16 : 8),
+        maxNewTilesPerPaint: isInitialLoad ? 2 : (idleFill ? 2 : 1),
       );
     } else {
       final stale = !pageRasterCacheResCoversTarget(entry!.res, idealRes);
@@ -2307,16 +2340,16 @@ class TiledStrokePictureCache {
   // Settled-only budgets (never used mid-gesture): the viewport is static so
   // a longer slice is imperceptible, and cold-fill suppression keeps partial
   // work invisible. Larger slices finish dense pages in far fewer frames.
-  static const idleTileBudgetMs = 40;
-  static const idleRasterBudgetMs = 30;
+  static const idleTileBudgetMs = 12;
+  static const idleRasterBudgetMs = 20;
 
   /// Slow-pan recording caps: bounded tiles and milliseconds per gesture
   /// frame, so content streams in while reading-scroll without stutter.
   /// Kept to ~one tile: a slow-pan frame still composites, handles input
   /// and paints fallback inside ~8ms; more tiles converge over the next
   /// frames via chaining instead of blocking this one.
-  static const _slowMovingMaxTiles = 8;
-  static const _slowMovingBudgetMs = 12;
+  static const _slowMovingMaxTiles = 1;
+  static const _slowMovingBudgetMs = 4;
 
   /// Absolute ceiling for a single tile bitmap.
   static const maxRasterEdgePx = 4096;
@@ -2449,9 +2482,45 @@ class TiledStrokePictureCache {
   var _probeMissingLogged = false;
   var _visibleStrokeCount = RasterLodTuning.mediumStrokeCount;
 
+  /// Bumped whenever [_warmTileGeometry] builds new cheap outlines.
+  ///
+  /// Tiles are deferred until their outlines are cached, so a pass can do
+  /// real work while recording nothing. Pump/warm loops treat a bump as
+  /// progress instead of concluding the band is already warm.
+  static int geometryWarmEpoch = 0;
+
+  /// Tiles skipped by the last [prewarmTiles] call because their outlines
+  /// were still warming. Callers only mark a page warm-complete when this is
+  /// zero and no tile was recorded.
+  int lastPrewarmDeferredTiles = 0;
+
   /// Bumped when a paint left unrecorded visible tiles so the next frame
   /// can record one more without blocking the current frame.
   final recordGeneration = ValueNotifier<int>(0);
+
+  bool _recordNotifyScheduled = false;
+
+  /// Coalesced [recordGeneration] bump.
+  ///
+  /// Tile records, tile raster bakes (one per tile) and mesh adoptions all
+  /// used to bump the notifier immediately. Each bump rebuilds the page's
+  /// canvas widget, whose build re-splits the page's stroke lists (the
+  /// documented dominant cost on dense pages). A nine-page band could bump
+  /// dozens of times per second — measured as multi-second rebuild storms
+  /// after open that kept frames at 20-90 ms. One rebuild per frame is enough
+  /// for every consumer (they repaint from the same caches), so coalesce.
+  void notifyRecordGeneration() {
+    if (_disposed || _recordNotifyScheduled) return;
+    _recordNotifyScheduled = true;
+    // The callback only runs at the end of a frame, so make sure one exists:
+    // a prewarm slice can record tiles from a timer between frames, and the
+    // new pictures must reach the screen without waiting for user input.
+    SchedulerBinding.instance.scheduleFrame();
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _recordNotifyScheduled = false;
+      if (!_disposed) recordGeneration.value++;
+    });
+  }
 
   int get recordedTileCount => _pictures.length;
 
@@ -2613,6 +2682,23 @@ class TiledStrokePictureCache {
     final pageRect = Offset.zero & size;
     final visible = canvas.getLocalClipBounds().intersect(pageRect);
     if (visible.isEmpty) return;
+
+    final Map<Stroke, int>? strokeOrderMap;
+    final List<Stroke>? nonFiniteStrokes;
+    if (strokes.length > 200) {
+      strokeOrderMap = {};
+      nonFiniteStrokes = [];
+      for (var i = 0; i < strokes.length; i++) {
+        final s = strokes[i];
+        strokeOrderMap[s] = i;
+        if (!s.bounds.isFinite) {
+          nonFiniteStrokes.add(s);
+        }
+      }
+    } else {
+      strokeOrderMap = null;
+      nonFiniteStrokes = null;
+    }
 
     _visibleStrokeCount = _countVisibleStrokes(visible, strokes, page);
     if (_visibleStrokeCount <= 0) {
@@ -2847,24 +2933,6 @@ tileRect,
             drawTileGated(key, tileRect, existing);
             continue;
         }
-        final tileStrokes = _strokesForTile(tileRect, strokes, page);
-        if (tileStrokes.isEmpty) {
-          continue;
-        }
-        final needsMesh = _tileNeedsMeshBuild(tileStrokes);
-        // Eager refill records dirtied visible tiles in this same paint so the
-        // change is visible this frame: the live overlay is already gone on
-        // pen-up, so any deferred tile would blink through a
-        // fallback/progressive refill — most visible at low zoom where a very
-        // long stroke dirties many tiles. Stroke/erase scopes (non-null dirty
-        // rect) bypass budgets entirely and complete synchronously; whole-page
-        // scopes (null, e.g. theme flip) stay budgeted and converge via the
-        // fallback so a full-page rebuild never freezes the UI.
-        // Unchanged tiles never sit blank across progressive refills (the
-        // erase flicker). Applies even while the viewport is moving (erase
-        // during pan inertia): only explicitly dirtied tiles re-record, so
-        // the blit-only-while-moving cost stays bounded, and no raster bakes
-        // are scheduled (allowRaster stays false while moving).
         final inEagerScope =
             _eagerDirtyRect == null ||
             _eagerDirtyRect!.overlaps(tileRect);
@@ -2873,34 +2941,12 @@ tileRect,
         final bool countOk;
         final bool timeOk;
         if (eagerRefill && inEagerScope && _eagerDirtyRect != null) {
-          // Pen-up / erase correctness first: dirtied tiles complete as fast
-          // as possible so fresh ink never blinks (the live overlay is
-          // already gone), but BOUNDED per paint. Uncapped, a long stroke at
-          // low zoom dirtying 10+ dense tiles re-recorded every stroke in
-          // those tiles synchronously (~29ms measured) — multi-frame jank
-          // exactly on pen-up, so the NEXT stroke starts behind the pen.
-          // Capped at 6 (covers text strokes at 1-2 tiles and the
-          // erase-drag refill the tile tests pin down, all fully
-          // synchronous with zero blink); longer scopes cover the rest with
-          // the cheap spine fallback this same frame and converge via
-          // chaining on the next settled frames. The paint time budget still
-          // applies as a backstop for pathologically dense tiles.
           countOk = recordedThisPaint < 6;
           timeOk = !overTime;
         } else if (slowMoving) {
           countOk = recordedThisPaint < _slowMovingMaxTiles;
           timeOk = !overTime && !movingOverTime;
         } else {
-          // Live input preemption: this paint may have started settled with
-          // a generous budget, but a pen-down or fling can land mid-paint on
-          // the same vsync (typical right after open, when every tile is
-          // cold). Cached budgets would then record up to 8 tiles behind the
-          // pen/finger — a ~20ms UI block that queues input and reads as
-          // tip lag behind the pen and pan stutter. Re-check live per tile
-          // and clamp to a small bound the moment input appears (the
-          // caller-provided cap still applies below that); unrecorded tiles
-          // stay visible through the cheap spine fallback and converge via
-          // chaining on the next settled frames.
           if (Pen.currentStroke != null || Eraser.isDragging) {
             final liveCap = tileBudget < 4 ? tileBudget : 4;
             countOk = recordedThisPaint < liveCap;
@@ -2927,7 +2973,37 @@ tileRect,
           fallbackRects.add(tileRect);
           continue;
         }
-final pathOnly = needsMesh;
+
+        // MOVIDO PARA CÁ: Só pesquisa a grade espacial SE TIVERMOS ORÇAMENTO.
+        // Isso elimina dezenas de milhares de checagens inúteis por frame no fast pan!
+        final tileStrokes = _strokesForTile(tileRect, strokes, page, strokeOrderMap, nonFiniteStrokes);
+        if (tileStrokes.isEmpty) {
+          continue;
+        }
+        final needsMesh = _tileNeedsMeshBuild(tileStrokes);
+        if (needsMesh) {
+          // Cold tile: warm its outlines in a bounded slice and defer the
+          // recording until they are cached. The fallback below draws every
+          // stroke in the tile meanwhile, so nothing is missing — the tile
+          // just lands a few frames later instead of blocking one frame for
+          // 20-56 ms (the freeze felt on a page's first appearance).
+          final spent = budgetWatch?.elapsedMilliseconds ?? 0;
+          // No time budget means the caller expects this paint to converge
+          // (tests, unbudgeted paths): warm the whole tile instead of
+          // slicing, otherwise the tile would defer forever.
+          final remaining = budgetMs == null
+              ? 0x7fffffff
+              : (budgetMs - spent).clamp(0, 3).toInt();
+          if (!_warmTileGeometry(tileStrokes, remaining)) {
+            PerfProbe.hit('tile.geom');
+            missingTiles = true;
+            fallbackTiles++;
+            fallbackRects.add(tileRect);
+            continue;
+          }
+        }
+
+        final pathOnly = needsMesh;
         final picture = _recordTile(
           tileRect: tileRect,
           tileStrokes: tileStrokes,
@@ -2988,44 +3064,110 @@ final pathOnly = needsMesh;
       // small per-frame budget and draw only the strokes that are ready: the
       // rest appear over the next frames (tile recording builds the same
       // geometry for its strokes, so the two converge together).
+      
       final fallbackBounds = fallbackRects.length == 1
           ? fallbackRects.first
           : fallbackRects.reduce((a, b) => a.expandToInclude(b));
       final geometryWatch = Stopwatch()..start();
-      final geometryBudgetMs = moving ? 24 : 48;
+      // Zero budget during movement forces ALL uncached strokes directly into the
+      // ultra-fast zero-allocation path, completely bypassing the UI thread lock.
+      // Settled frames get a slice, not a full build: the recorded tiles build
+      // the same geometry (see _warmTileGeometry) and replace this fallback
+      // within a few frames, so a longer slice would only turn one frame into
+      // a visible hitch on top of the tile warm's own budget.
+      final geometryBudgetMs = moving ? 4 : 8;
       final drawableStrokes = <Stroke>[];
-      for (final stroke in strokes) {
+      final cheapStrokes = <Stroke>[];
+      
+      bool outOfBudget = geometryBudgetMs == 0;
+
+      final Iterable<Stroke> strokesToCheck;
+      if (strokeOrderMap != null) {
+        final cands = page.strokeSpatialIndex != null ? page.strokeSpatialIndex!.query(fallbackBounds) : strokes.where((s) => s.bounds.overlaps(fallbackBounds)).toList();
+        if (nonFiniteStrokes != null && nonFiniteStrokes.isNotEmpty) {
+           final cSet = cands.toSet();
+           for (final s in nonFiniteStrokes) {
+             if (!cSet.contains(s)) cands.add(s);
+           }
+        }
+        cands.sort((a, b) {
+          final oa = strokeOrderMap![a];
+          final ob = strokeOrderMap![b];
+          if (oa != null && ob != null) return oa.compareTo(ob);
+          return 0;
+        });
+        strokesToCheck = cands;
+      } else {
+        strokesToCheck = strokes.where((s) => !s.bounds.isFinite || s.bounds.overlaps(fallbackBounds));
+      }
+
+      for (final stroke in strokesToCheck) {
         if (stroke.hasCachedFallbackGeometry) {
           drawableStrokes.add(stroke);
           continue;
         }
-        if (geometryWatch.elapsedMilliseconds >= geometryBudgetMs) continue;
-        final bounds = stroke.bounds;
-        if (bounds.isFinite && !bounds.overlaps(fallbackBounds)) continue;
+        
+        if (!outOfBudget) {
+          if (geometryWatch.elapsedMilliseconds >= geometryBudgetMs) {
+            outOfBudget = true;
+          }
+        }
+
+        if (outOfBudget) {
+          cheapStrokes.add(stroke);
+          continue;
+        }
+
         final polygon = stroke.lowQualityPolygon;
         if (polygon.isEmpty) continue;
         drawableStrokes.add(stroke);
       }
-      CanvasPainter(
-        invert: invert,
-        strokes: drawableStrokes,
-        quadTree: page.strokeSpatialIndex,
-        laserStrokes: const [],
-        currentStroke: null,
-        currentSelection: null,
-        primaryColor: primaryColor,
-        page: page,
-        showPageIndicator: false,
-        pageIndex: pageIndex,
-        totalPages: totalPages,
-        currentScale: currentScale,
-        defaultTextStyle: defaultTextStyle,
-        lineHeight: lineHeight,
-        lineThickness: lineThickness?.toDouble(),
-        lineColor: lineColor,
-        doneSelecting: true,
-        preferPathFill: true,
-      ).paint(canvas, size);
+
+      if (drawableStrokes.isNotEmpty) {
+        CanvasPainter(
+          invert: invert,
+          strokes: drawableStrokes,
+          quadTree: page.strokeSpatialIndex,
+          laserStrokes: const [],
+          currentStroke: null,
+          currentSelection: null,
+          primaryColor: primaryColor,
+          page: page,
+          showPageIndicator: false,
+          pageIndex: pageIndex,
+          totalPages: totalPages,
+          currentScale: currentScale,
+          defaultTextStyle: defaultTextStyle,
+          lineHeight: lineHeight,
+          lineThickness: lineThickness?.toDouble(),
+          lineColor: lineColor,
+          doneSelecting: true,
+          preferPathFill: true,
+        ).paint(canvas, size);
+      }
+
+      // Renders the rest using a ZERO Dart-object allocation path.
+      // drawRawPoints directly sends a Float32List to the C++ engine.
+      if (cheapStrokes.isNotEmpty) {
+        final cheapPaint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+          
+        for (final stroke in cheapStrokes) {
+          final fastLine = stroke.fastRenderLine;
+          if (fastLine.isEmpty) continue;
+          
+          cheapPaint.color = stroke.color.withInversion(invert);
+          cheapPaint.strokeWidth = stroke.options.size;
+          
+          if (fastLine.length == 2) {
+            canvas.drawCircle(Offset(fastLine[0], fastLine[1]), cheapPaint.strokeWidth / 2, Paint()..color=cheapPaint.color..style=PaintingStyle.fill);
+          } else {
+            canvas.drawRawPoints(ui.PointMode.polygon, fastLine, cheapPaint);
+          }
+        }
+      }
 
       canvas.restore();
       if (partsFallWatch != null) {
@@ -3117,6 +3259,35 @@ final pathOnly = needsMesh;
   /// repaint and show them: without this, pictures warmed idly on a visible
   /// page would sit undrawn until an unrelated repaint. Off-screen pages
   /// have no listeners, so the bump is a no-op for them.
+  /// Builds the cheap fallback outline (bounds + low-quality polygon) for
+  /// [strokes] until [budgetMs] is spent. Returns true when every stroke in
+  /// the list already has its outline cached.
+  ///
+  /// A cold dense tile builds 100+ outlines inside its first recording —
+  /// measured 20-56 ms for a single tile on a dense page, which is one
+  /// unhideable frame gap right when the page first arrives. Warming the
+  /// geometry in slices and deferring the tile until it is ready keeps every
+  /// frame bounded; the paint fallback draws the same strokes meanwhile.
+  bool _warmTileGeometry(List<Stroke> strokes, int budgetMs) {
+    if (budgetMs <= 0) return false;
+    final watch = Stopwatch()..start();
+    var built = false;
+    for (var i = 0; i < strokes.length; i++) {
+      final stroke = strokes[i];
+      if (!stroke.hasCachedFallbackGeometry) {
+        stroke.bounds;
+        stroke.lowQualityPolygon;
+        built = true;
+      }
+      if (watch.elapsedMilliseconds >= budgetMs && i + 1 < strokes.length) {
+        if (built) geometryWarmEpoch++;
+        return false;
+      }
+    }
+    if (built) geometryWarmEpoch++;
+    return true;
+  }
+
   int prewarmTiles({
     required Rect targetRect,
     required Iterable<Stroke> strokes,
@@ -3152,7 +3323,7 @@ final pathOnly = needsMesh;
       PerfProbe.markOnce(
         'prewarm.sigmiss.p$pageIndex',
         'prewarm.sigmiss.p$pageIndex $_visualSignature != $signature '
-        'lh=$lineHeight lt=$lineThickness lc=${lineColor?.value} '
+        'lh=$lineHeight lt=$lineThickness lc=${lineColor?.toARGB32()} '
         'inv=$invert sz=${size.width.toStringAsFixed(0)}'
         'x${size.height.toStringAsFixed(0)}',
       );
@@ -3180,6 +3351,7 @@ final pathOnly = needsMesh;
     var iterated = 0;
     var emptyTiles = 0;
     var haveTiles = 0;
+    lastPrewarmDeferredTiles = 0;
     for (var ty = startY; ty <= endY; ty++) {
       for (var tx = startX; tx <= endX; tx++) {
         if (watch != null && watch.elapsedMilliseconds >= budgetMs) {
@@ -3211,6 +3383,19 @@ final pathOnly = needsMesh;
           continue;
         }
         final coldTile = _tileNeedsMeshBuild(tileStrokes);
+        if (coldTile) {
+          final spent = watch?.elapsedMilliseconds ?? 0;
+          // budgetMs <= 0 means "no budget": warm the whole tile so the
+          // prewarm call converges instead of deferring every pass.
+          final remaining = budgetMs <= 0
+              ? 0x7fffffff
+              : (budgetMs - spent).clamp(0, 4).toInt();
+          if (!_warmTileGeometry(tileStrokes, remaining)) {
+            PerfProbe.hit('prewarm.geom');
+            lastPrewarmDeferredTiles++;
+            continue;
+          }
+        }
         final picture = _recordTile(
           tileRect: tileRect,
           tileStrokes: tileStrokes,
@@ -3239,7 +3424,7 @@ final pathOnly = needsMesh;
     if (recorded > 0 && !_disposed) {
       // New pictures are drawable now; wake any live view of this page.
       PerfProbe.hit('recordgen.prewarm');
-      recordGeneration.value++;
+      notifyRecordGeneration();
     } else if (recorded == 0) {
       PerfProbe.hit('prewarm.zero');
       PerfProbe.markOnce(
@@ -3399,7 +3584,14 @@ final pathOnly = needsMesh;
             _rasterScales[key] = bakeScale;
             if (!_disposed) {
               PerfProbe.hit('recordgen.raster');
-              recordGeneration.value++;
+              // Deliberately no repaint here. The tile picture this raster
+              // was baked from is already on screen, so waking the page for
+              // every completed bake only re-rasterized the same ink as
+              // vectors: a band of pages bakes dozens of tiles, and each
+              // wake cost a full-page vector frame (measured 50-75 ms on the
+              // raster thread, pinning the whole UI at 20-25 fps for
+              // seconds after open). The bitmap is picked up by the next
+              // paint that happens anyway (pan, ink, band change).
             }
       } catch (_) {
         // Keep the previous raster (if any). A later paint can enqueue again.
@@ -3644,8 +3836,8 @@ final pathOnly = needsMesh;
       PerfProbe.hit('sig.wipe');
       PerfProbe.markOnce(
         'sig.wipe.${page.hashCode}',
-        'sig.wipe ${_visualSignature} -> $signature '
-        'lh=$lineHeight lt=$lineThickness lc=${lineColor?.value} '
+        'sig.wipe $_visualSignature -> $signature '
+        'lh=$lineHeight lt=$lineThickness lc=${lineColor?.toARGB32()} '
         'inv=$invert sz=${size.width.toStringAsFixed(0)}'
         'x${size.height.toStringAsFixed(0)}',
       );
@@ -3782,46 +3974,62 @@ final pathOnly = needsMesh;
     if (strokes.isEmpty) return 0;
     final query = visible.inflate(_cullPadding);
     if (page.strokeSpatialIndex != null) {
-      final candidates = page.strokeSpatialIndex!.query(query);
-      if (candidates.isEmpty) return 0;
-      final candidateSet = candidates.toSet();
-      var n = 0;
-      for (final stroke in strokes) {
-        if (candidateSet.contains(stroke) && stroke.bounds.overlaps(query)) {
-          n++;
-        }
-      }
-      return n;
-    } else {
-      var n = 0;
-      for (final stroke in strokes) {
-        if (stroke.bounds.overlaps(query)) n++;
-      }
-      return n;
+      return page.strokeSpatialIndex!.query(query).length;
     }
+    var n = 0;
+    for (final stroke in strokes) {
+      if (!stroke.bounds.isFinite || stroke.bounds.overlaps(query)) {
+        n++;
+      }
+    }
+    return n;
   }
 
-  List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page) {
+  List<Stroke> _strokesForTile(Rect tileRect, List<Stroke> strokes, EditorPage page, [Map<Stroke, int>? strokeOrderMap, List<Stroke>? nonFiniteStrokes]) {
     final queryRect = tileRect.inflate(_cullPadding);
     if (page.strokeSpatialIndex != null) {
       final candidates = page.strokeSpatialIndex!.query(queryRect);
-      if (candidates.isEmpty) return const <Stroke>[];
-      final candidateSet = candidates.toSet();
-      final tileStrokes = <Stroke>[];
-      for (final stroke in strokes) {
-        if (candidateSet.contains(stroke) && stroke.bounds.overlaps(queryRect)) {
-          tileStrokes.add(stroke);
+      if (strokeOrderMap != null) {
+        if (nonFiniteStrokes != null && nonFiniteStrokes.isNotEmpty) {
+          final candidateSet = candidates.toSet();
+          for (final s in nonFiniteStrokes) {
+            if (!candidateSet.contains(s)) {
+              candidates.add(s);
+            }
+          }
         }
+        if (candidates.isEmpty) return const <Stroke>[];
+        candidates.sort((a, b) {
+          final oa = strokeOrderMap[a];
+          final ob = strokeOrderMap[b];
+          if (oa != null && ob != null) return oa.compareTo(ob);
+          return 0;
+        });
+        return candidates;
+      } else {
+        final candidateSet = candidates.toSet();
+        final tileStrokes = <Stroke>[];
+        for (final stroke in strokes) {
+          if ((candidateSet.contains(stroke) && stroke.bounds.overlaps(queryRect)) || !stroke.bounds.isFinite) {
+            tileStrokes.add(stroke);
+          }
+        }
+        return tileStrokes;
       }
-      return tileStrokes;
     } else {
-      return strokes.where((s) => s.bounds.overlaps(queryRect)).toList();
+      return strokes.where((s) => !s.bounds.isFinite || s.bounds.overlaps(queryRect)).toList();
     }
   } 
   
+          // A tile is "cold" while any stroke still lacks its spine mesh.
+          // Note: [Stroke.needsTileMeshWarmup] is a permanent false stub, so
+          // the old check never fired and every first recording triangulated
+          // 100+ strokes inline (measured 20-56 ms per tile — the freeze on a
+          // page's first appearance). [strokeNeedsMeshWarmup] is the same cheap
+          // predicate the background mesh worker uses.
           static bool _tileNeedsMeshBuild(List<Stroke> tileStrokes) {
             for (final stroke in tileStrokes) {
-              if (stroke.needsTileMeshWarmup) return true;
+              if (strokeNeedsMeshWarmup(stroke)) return true;
             }
             return false;
           }

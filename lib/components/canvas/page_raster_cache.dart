@@ -1089,7 +1089,13 @@ final class PageRasterCacheManager {
         _pendingBg.remove(job.pageIndex);
       }
       _bumpRepaint();
-      await Future<void>.delayed(Duration.zero);
+      // One bake per frame: the picture recording below runs on the UI
+      // isolate, so chaining jobs back-to-back with a zero-delay yield kept
+      // the isolate busy for the whole band (hundreds of ms after every pan)
+      // and showed up as 20-40 ms frames right after opening. Letting a frame
+      // render between jobs keeps the scale sharpening gradual instead of
+      // stalling the gesture that just ended.
+      await SchedulerBinding.instance.endOfFrame;
     }
     _jobRunning = false;
   }
@@ -1144,9 +1150,11 @@ final class PageRasterCacheManager {
         }
         if (sliceWatch.elapsedMilliseconds >=
             _warmupSliceBudget.inMilliseconds) {
-          // Yield the event loop so frames / pointer samples can run, then
-          // re-check preemption before the next slice.
-          await Future<void>.delayed(Duration.zero);
+          // Yield a whole frame, not just the microtask queue: this loop
+          // builds geometry for every uncached stroke of a page, and a
+          // zero-delay yield let it re-enter immediately, pinning the UI
+          // isolate for hundreds of milliseconds after a pan settled.
+          await SchedulerBinding.instance.endOfFrame;
           if (!debugForceSyncRaster &&
               _preempted(
                 contentEpochAtStart: contentEpochAtStart,
