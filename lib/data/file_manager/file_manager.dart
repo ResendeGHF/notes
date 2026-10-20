@@ -4776,9 +4776,17 @@ class FileManager {
     if (!success) {
       final screenshotter = ScreenshotController();
       final double previewHeight = page.previewHeight();
+      final double pageWidth = page.size.width;
 
-      if (previewHeight > 0 && page.size.width > 0) {
-        final thumbnailSize = Size(360, 360 * previewHeight / page.size.width);
+      // Guard the capture against degenerate page data: a non-finite size
+      // would propagate into the painter and crash `width ~/ lineHeight`.
+      if (previewHeight.isFinite &&
+          previewHeight > 0 &&
+          pageWidth.isFinite &&
+          pageWidth > 0) {
+        final double thumbnailHeight = (360 * previewHeight / pageWidth)
+            .clamp(1.0, 4096.0);
+        final thumbnailSize = Size(360, thumbnailHeight);
 
         try {
           final thumbnailBytes = await screenshotter.captureFromWidget(

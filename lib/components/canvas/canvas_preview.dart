@@ -30,7 +30,21 @@ class CanvasPreview extends StatelessWidget implements PreferredSizeWidget {
   late final pageSize =
       coreInfo.pages.getOrNull(pageIndex)?.size ?? EditorPage.defaultSize;
   @override
-  late final preferredSize = Size(pageSize.width, height ?? pageSize.height);
+  late final preferredSize = (() {
+    // Defensive: an infinite/NaN page size or height (degenerate note data)
+    // would lay out the preview with a non-finite extent, which crashes the
+    // background pattern painter. Fall back to sane page defaults.
+    final double width = pageSize.width.isFinite && pageSize.width > 0
+        ? pageSize.width
+        : EditorPage.defaultWidth;
+    final double requested = height ?? pageSize.height;
+    final double resolved = requested.isFinite && requested > 0
+        ? requested
+        : (pageSize.height.isFinite && pageSize.height > 0
+              ? pageSize.height
+              : EditorPage.defaultHeight);
+    return Size(width, resolved);
+  })();
 
   @override
   Widget build(BuildContext context) {

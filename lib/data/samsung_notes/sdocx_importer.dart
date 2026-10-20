@@ -133,7 +133,7 @@ class SamsungNotesImporter {
           final page = coreInfo.createPageWithDefaults(size: Size(pageW, pageH));
           
           final scale = pageW / EditorPage.defaultWidth;
-          page.lineHeight = (page.lineHeight * scale).round();
+          page.lineHeight = math.max(1, (page.lineHeight * scale).round());
           page.lineThickness *= scale;
           if (page.hasLocalMargins) {
             page.marginLeft *= scale;
@@ -155,6 +155,11 @@ class SamsungNotesImporter {
           }
           page.id ??= coreInfo.allocatePageId();
         }
+
+        // Pages the user adds to this note later must come out exactly like
+        // the imported ones (same colors, pattern, line spacing/thickness and
+        // margins).
+        applyImportedPageDefaults(coreInfo);
 
         onImportProgress?.call(0.70, 'Saving');
         final fullSavePath = FileManager.getFilePath(
@@ -203,6 +208,55 @@ class SamsungNotesImporter {
       log.severe('Samsung import failed: $e', e, stack);
       return false;
     }
+  }
+
+  /// Copies the imported pages' appearance into the note's document defaults
+  /// ([EditorCoreInfo.noteDefaultPattern], `noteDefaultLineColor`, margins,
+  /// …) so pages the user adds later (`Editor.insertPageBefore`/`After` and
+  /// `EditorCoreInfo.createPageWithDefaults`) come out exactly like the pages
+  /// imported from the `.sdocx`.
+  ///
+  /// The first imported page without a PDF/artwork background is the
+  /// reference — its values are already scaled to the Samsung page geometry,
+  /// which is also what new pages use. The background pattern prefers the
+  /// first non-blank pattern among such pages, so a blank Samsung note stays
+  /// blank instead of inheriting the user's global default pattern; notes made
+  /// only of PDF pages keep the global pattern.
+  static void applyImportedPageDefaults(EditorCoreInfo coreInfo) {
+    if (coreInfo.pages.isEmpty) return;
+
+    var reference = coreInfo.pages.first;
+    for (final page in coreInfo.pages) {
+      if (page.backgroundImage == null) {
+        reference = page;
+        break;
+      }
+    }
+
+    var pattern = coreInfo.backgroundPattern;
+    for (final page in coreInfo.pages) {
+      if (page.backgroundImage != null) continue;
+      final pagePattern = page.backgroundPattern;
+      if (pagePattern == null) continue;
+      pattern = pagePattern;
+      if (pagePattern != CanvasBackgroundPattern.none) break;
+    }
+
+    coreInfo.noteDefaultPattern = pattern;
+    coreInfo.noteDefaultPageColor = reference.backgroundColor.toARGB32();
+    coreInfo.noteDefaultLineColor = reference.lineColor.toARGB32();
+    coreInfo.noteDefaultLineHeight = reference.lineHeight;
+    coreInfo.noteDefaultLineThickness = reference.lineThickness;
+    coreInfo.noteDefaultMarginLeft = reference.marginLeft;
+    coreInfo.noteDefaultMarginRight = reference.marginRight;
+    coreInfo.noteDefaultMarginTop = reference.marginTop;
+    coreInfo.noteDefaultMarginBottom = reference.marginBottom;
+    // Imported pages never carry a note margin color: leave it unset so new
+    // pages fall back to their background color exactly like the imported
+    // ones do.
+    coreInfo.noteDefaultBorderColor = reference.hasLocalBorderColor
+        ? reference.borderColor.toARGB32()
+        : null;
   }
 
   static Map<String, Uint8List> _unzipSdocx(Uint8List bytes) {
@@ -268,7 +322,7 @@ class SamsungNotesImporter {
         final page = coreInfo.createPageWithDefaults(size: Size(pageW, pageH));
         
         final scale = pageW / EditorPage.defaultWidth;
-        page.lineHeight = (page.lineHeight * scale).round();
+        page.lineHeight = math.max(1, (page.lineHeight * scale).round());
         page.lineThickness *= scale;
         if (page.hasLocalMargins) {
           page.marginLeft *= scale;
@@ -371,10 +425,15 @@ class SamsungNotesImporter {
     }
 
     // Scale patterns and margins to fit the imported page dimensions uniformly
+    // (applyImportedPageDefaults later adopts these scaled values as the note
+    // defaults, so pages the user adds later match the imported ones).
     final scale = pageW / EditorPage.defaultWidth;
     coreInfo.ensureDocumentDefaultsFromGlobal();
 
-    page.lineHeight = ((coreInfo.noteDefaultLineHeight ?? coreInfo.lineHeight) * scale).round();
+    page.lineHeight = math.max(
+      1,
+      ((coreInfo.noteDefaultLineHeight ?? coreInfo.lineHeight) * scale).round(),
+    );
     page.lineThickness = (coreInfo.noteDefaultLineThickness ?? coreInfo.lineThickness) * scale;
     page.hasLocalLineHeight = true;
     page.hasLocalLineThickness = true;

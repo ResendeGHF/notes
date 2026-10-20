@@ -24,77 +24,93 @@ Stroke _livePencil() {
       isComplete: false,
     ),
     pageIndex: 0,
-    page: HasSize(EditorPage.defaultSize),
+    page: const HasSize(EditorPage.defaultSize),
     toolId: ToolId.pencil,
-  )..paint = StrokePaint.pencilNoiseDefault().copyWith(
-    pressureMapsToCoverage: true,
-  );
+  )..paint = StrokePaint.pencilNoiseDefault();
+}
+
+void _drawWave(Stroke stroke, int from, int to) {
+  for (var i = from; i < to; i++) {
+    stroke.addPoint(
+      Offset(20.0 + i * 1.7, 120.0 + math.sin(i * 0.18) * 45.0),
+      0.5,
+    );
+  }
 }
 
 void main() {
-  test('already-drawn pencil grain does not reorient or change coverage', () {
+  test('live pencil stages path-only chunks', () {
     final stroke = _livePencil();
+    _drawWave(stroke, 0, 520);
 
-    for (var i = 0; i < 80; i++) {
-      stroke.addPoint(
-        Offset(20.0 + i * 4.0, 90.0 + (i % 5) * 0.3),
-        0.35,
-      );
-    }
+    expect(stroke.hasLiveStaging, isTrue);
+    expect(stroke.debugLiveChunkCount, greaterThan(0));
 
-    final chunks = stroke.pencilDrawChunks;
-    expect(chunks, isNotNull);
+    final chunks = stroke.liveStagedChunks;
     expect(chunks, isNotEmpty);
-    expect(stroke.debugFrozenPencilChunkCount, greaterThan(0));
-
-    final frozenXY = stroke.debugFirstFrozenPencilSpineXY;
-    final frozenPr = stroke.debugFirstFrozenPencilPressure;
-    expect(frozenXY, isNotEmpty);
-    expect(frozenPr, isNotEmpty);
-
-    for (var i = 80; i < 160; i++) {
-      stroke.addPoint(
-        Offset(20.0 + i * 4.0, 40.0 + (i % 9) * 1.2),
-        0.95,
-      );
+    for (final chunk in chunks) {
+      // The grain is drawn as one union path fill: outlines are all the
+      // renderer needs, so chunks never bake a spine mesh.
+      expect(chunk.path, isNotNull);
+      expect(chunk.mesh, isNull);
+      expect(chunk.bounds, isNotNull);
+      expect(chunk.bounds!.isEmpty, isFalse);
     }
 
-    expect(stroke.pencilDrawChunks, isNotEmpty);
-    expect(stroke.debugFirstFrozenPencilSpineXY, frozenXY);
-    expect(stroke.debugFirstFrozenPencilPressure, frozenPr);
+    // Adjacent chunks overlap (union fill shades the overlap once) so a butt
+    // joint can never open a hairline crack mid-stroke.
+    for (var i = 0; i + 1 < chunks.length; i++) {
+      expect(chunks[i].bounds!.overlaps(chunks[i + 1].bounds!), isTrue);
+    }
   });
 
-  test('pen-up rebuilds a continuous committed pencil ribbon', () {
+  test('already-frozen pencil chunks do not reorient or change coverage', () {
     final stroke = _livePencil();
-    for (var i = 0; i < 90; i++) {
-      stroke.addPoint(Offset(16.0 + i * 3.5, 70.0), 0.4 + (i % 4) * 0.1);
-    }
-    expect(stroke.pencilDrawChunks, isNotEmpty);
-    expect(stroke.debugFrozenPencilChunkCount, greaterThan(0));
+    _drawWave(stroke, 0, 520);
+    expect(stroke.debugLiveChunkCount, greaterThan(0));
+
+    final frozen = stroke.liveStagedChunks.first;
+    final frozenPath = frozen.path;
+    final frozenBounds = frozen.bounds;
+
+    _drawWave(stroke, 520, 1040);
+
+    final after = stroke.liveStagedChunks.first;
+    // Same Path instance: frozen chunks are never rebuilt, so ink already on
+    // screen cannot move or remap its grain.
+    expect(identical(after.path, frozenPath), isTrue);
+    expect(after.bounds, frozenBounds);
+    expect(stroke.debugLiveChunkCount, greaterThan(1));
+  });
+
+  test('pen-up clears staging and rebuilds one committed outline', () {
+    final stroke = _livePencil();
+    _drawWave(stroke, 0, 420);
+    expect(stroke.hasLiveStaging, isTrue);
 
     stroke.finishLiveGeometry();
+
     expect(stroke.options.isComplete, isTrue);
-    expect(stroke.pencilDrawChunks, isNotEmpty);
-    expect(stroke.debugFrozenPencilChunkCount, 0);
+    expect(stroke.hasLiveStaging, isFalse);
+    expect(stroke.debugLiveChunkCount, 0);
+    final bounds = stroke.highQualityPath.getBounds();
+    expect(bounds.isEmpty, isFalse);
+    expect(bounds.left, lessThan(30));
+    expect(bounds.right, greaterThan(20.0 + 419 * 1.7 - 30));
   });
 
-  test('mid-stroke frozen pencil chunks do not taper open joins', () {
+  test('mid-stroke frozen pencil chunks keep non-empty coverage', () {
     final stroke = _livePencil();
     stroke.setLodScale(0.5);
-    for (var i = 0; i < 120; i++) {
-      stroke.addPoint(
-        Offset(10.0 + i * 3.0, 80.0 + math.sin(i * 0.2) * 12.0),
-        0.45 + (i % 5) * 0.08,
-      );
-    }
-    final chunks = stroke.pencilDrawChunks;
-    expect(chunks, isNotNull);
-    expect(chunks!.length, greaterThan(1));
+    _drawWave(stroke, 0, 600);
+
+    final chunks = stroke.liveStagedChunks;
+    expect(chunks.length, greaterThan(1));
 
     // Open joins keep non-empty coverage along the stroke; a tapered mid
     // chunk would collapse toward a near-empty bounds at the seam.
     for (final chunk in chunks) {
-      final b = chunk.outline.getBounds();
+      final b = chunk.path!.getBounds();
       expect(b.width * b.height, greaterThan(4.0));
     }
   });

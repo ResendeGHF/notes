@@ -488,7 +488,10 @@ class EditorPage extends ChangeNotifier implements HasSize {
   double previewHeight() {
     assert(size.height != 0);
     assert(size.width != 0);
-    if (size.height == 0 || size.width == 0) {
+    if (size.width == 0 ||
+        size.height == 0 ||
+        !size.width.isFinite ||
+        !size.height.isFinite) {
       return 0;
     }
 
@@ -498,10 +501,15 @@ class EditorPage extends ChangeNotifier implements HasSize {
 
     double maxY = 0;
     for (final stroke in allStrokesInDrawOrder) {
-      maxY = math.max(maxY, stroke.maxY);
+      // Defensive: one NaN coordinate (bad import, corrupt file) must not
+      // poison `math.max` into returning NaN, which would propagate into
+      // thumbnail layout/paint as a non-finite size.
+      final double strokeMaxY = stroke.maxY;
+      if (strokeMaxY.isFinite) maxY = math.max(maxY, strokeMaxY);
     }
     for (final image in allImagesInDrawOrder) {
-      maxY = math.max(maxY, image.dstRect.bottom);
+      final double imageBottom = image.dstRect.bottom;
+      if (imageBottom.isFinite) maxY = math.max(maxY, imageBottom);
     }
     if (!quill.controller.document.isEmpty()) {
       int linesOfText = quill.controller.document
@@ -1347,19 +1355,41 @@ class EditorPage extends ChangeNotifier implements HasSize {
   /// of dense pages under ~10ms slices so 120Hz scrolling never freezes.
   static const _kHydrateYieldEveryStrokes = 400;
 
+  /// Parse-time slice budget for [fromBinaryAsync]. A yield also happens every
+  /// [_kHydrateYieldEveryStrokes] strokes, so cheap pages still slice at a
+  /// predictable cadence while unusually heavy strokes (huge point counts)
+  /// cannot stretch one slice past a couple of milliseconds.
+  static const _kHydrateSliceBudgetUs = 2500;
+
+  /// Extra pause after each yield while a fast viewport motion is in flight
+  /// (see `throttleWhile` in [fromBinaryAsync]). The parse keeps converging —
+  /// roughly one slice per frame — without competing with gesture frames.
+  static const _kHydrateMovingThrottle = Duration(milliseconds: 16);
+
   /// Chunked twin of [fromBinary]: identical bytes in, identical page out,
   /// but yields to the event loop every [_kHydrateYieldEveryStrokes] strokes
-  /// (plus once after images/quill). Used to hydrate dense lazy pages
-  /// without dropping frames. Any format change MUST be mirrored here (and
-  /// in [fromBinary]); `page_binary_parity_test` guards the equivalence.
+  /// or [_kHydrateSliceBudgetUs] of parse time (plus once after images/quill).
+  /// Used to hydrate dense lazy pages without dropping frames. Any format
+  /// change MUST be mirrored here (and in [fromBinary]);
+  /// `page_binary_parity_test` guards the equivalence.
+  ///
+  /// [throttleWhile] lets the caller stretch yields while the user is panning
+  /// fast: those frames must stay free of parse work, and the page converges
+  /// again as soon as motion settles.
   static Future<EditorPage> fromBinaryAsync(
     BinaryReader reader, {
     required bool readOnly,
     required int fileVersion,
     required String sbnPath,
     required AssetCacheAll assetCacheAll,
+    bool Function()? throttleWhile,
   }) async {
-    Future<void> yieldToUI() => Future<void>.delayed(Duration.zero);
+    Future<void> yieldToUI() async {
+      await Future<void>.delayed(Duration.zero);
+      if (throttleWhile?.call() ?? false) {
+        await Future<void>.delayed(_kHydrateMovingThrottle);
+      }
+    }
 
     int key;
     int? pageIdRead;
@@ -1419,6 +1449,7 @@ class EditorPage extends ChangeNotifier implements HasSize {
     double marginTopRead = 0;
     double marginBottomRead = 0;
     var strokesSinceYield = 0;
+    final sliceWatch = Stopwatch()..start();
 
     Future<List<Stroke>> readStrokeArray(int count) async {
       final out = <Stroke>[];
@@ -1431,8 +1462,10 @@ class EditorPage extends ChangeNotifier implements HasSize {
           ),
         );
         strokesSinceYield++;
-        if (strokesSinceYield >= _kHydrateYieldEveryStrokes) {
+        if (strokesSinceYield >= _kHydrateYieldEveryStrokes ||
+            sliceWatch.elapsedMicroseconds >= _kHydrateSliceBudgetUs) {
           strokesSinceYield = 0;
+          sliceWatch.reset();
           await yieldToUI();
         }
       }

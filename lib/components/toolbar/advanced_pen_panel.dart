@@ -343,13 +343,6 @@ class _AdvancedPenSettingsState extends State<AdvancedPenSettings> {
           max: 100.0,
           onChanged: (v) { _opts.ropePull = v; _persist(); },
         ),
-        _slider(
-          label: 'Surface Friction (Jitter)',
-          value: _opts.surfaceFriction,
-          min: 0.0,
-          max: 1.0,
-          onChanged: (v) { _opts.surfaceFriction = v; _persist(); },
-        ),
         sectionTitle('Topology (Dash)'),
         _slider(
           label: 'Dash Length',

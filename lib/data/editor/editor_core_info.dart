@@ -32,6 +32,7 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/note_open_store.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:saber/services/vault_blob_crypto.dart';
 import 'package:saber/services/vault_worker.dart';
@@ -588,6 +589,25 @@ class _SbnHeader {
 }
 
 
+/// Outcome of a smart lazy-page hydration attempt
+/// ([EditorCoreInfo.hydratePageSmart]).
+enum PageHydrateOutcome {
+  /// Not a lazy shell (already materialized): nothing to do.
+  alreadyLoaded,
+
+  /// Small slice: parsed and swapped synchronously; callers may rebuild now.
+  hydratedSync,
+
+  /// A chunked parse was just started; completion arrives via callback.
+  startedAsync,
+
+  /// A chunked parse for this page is already running.
+  alreadyInFlight,
+
+  /// Not started (concurrent-parse cap saturated); retry after a completion.
+  deferred,
+}
+
 class EditorCoreInfo extends ChangeNotifier {
   static final log = Logger('EditorCoreInfo');
 
@@ -799,13 +819,33 @@ class EditorCoreInfo extends ChangeNotifier {
     return !isLazyShellPage(index);
   }
 
-  /// Slices bigger than this hydrate chunked-async (yields to the UI loop)
-  /// instead of one synchronous parse. ~256KB is a few hundred strokes.
-  static const _kChunkedHydrateByteThreshold = 256 * 1024;
+  /// Slices at or below this parse synchronously from [hydratePageSmart].
+  /// ~4KB (a few dozen strokes) parses in well under a millisecond, so the
+  /// page swap is visually instant and can never stall a transform frame.
+  /// Anything bigger goes through the chunked async path: the old 256KB fast
+  /// path could run a 10-25ms parse on a transform or idle frame — exactly
+  /// the page-transition freeze this design must prevent. Kept deliberately
+  /// small: the sync path runs inline on whatever frame calls it (pan
+  /// transform, idle callback), so only slices that are provably trivial
+  /// qualify.
+  static const _kSyncHydrateByteThreshold = 4 * 1024;
+
+  /// Pages parsing concurrently. Each in-flight parse yields on a small time
+  /// slice, so many interleaved parses would sum their slices into every
+  /// frame. Two keeps a ready queue without starving input.
+  static const _kMaxConcurrentHydrateParses = 2;
 
   /// Pages with a chunked hydrate in flight. Collapses duplicate work when
   /// idle frames overlap a slow dense page.
   final Set<int> _hydratingIndices = <int>{};
+
+  /// True while a chunked hydrate for [index] is running. Callers use this
+  /// to avoid counting an in-flight page as fresh progress.
+  bool isHydratingPage(int index) => _hydratingIndices.contains(index);
+
+  /// Number of chunked page parses currently in flight (concurrency-paced by
+  /// the open-grace scheduler in the editor).
+  int get hydratingPageCount => _hydratingIndices.length;
 
   Future<void> hydratePageAtIndexAsync(int index) async {
     await hydratePageChunked(index);
@@ -813,13 +853,25 @@ class EditorCoreInfo extends ChangeNotifier {
 
   /// Chunked hydrate: parses a lazy page slice with UI yields between stroke
   /// batches so dense pages never freeze scrolling. Returns the new page, or
-  /// null when aborted (index invalid, page replaced mid-flight).
+  /// null when aborted (index invalid, page replaced mid-flight, concurrent
+  /// parse cap reached).
   /// Safe to fire-and-forget: concurrent calls for one page collapse.
-  Future<EditorPage?> hydratePageChunked(int index) async {
+  ///
+  /// [throttleWhile] stretches the yields while it returns true (fast pans):
+  /// the parse converges one slice per frame instead of competing with
+  /// gestures, and speeds back up when motion settles.
+  Future<EditorPage?> hydratePageChunked(
+    int index, {
+    bool Function()? throttleWhile,
+  }) async {
     final lazy = _lazyPages;
     if (lazy == null || !lazy.unhydratedIndices.contains(index)) return null;
     if (index < 0 || index >= pages.length) return null;
-    if (!_hydratingIndices.add(index)) return null;
+    if (_hydratingIndices.contains(index)) return null;
+    if (_hydratingIndices.length >= _kMaxConcurrentHydrateParses) return null;
+    _hydratingIndices.add(index);
+    final _hydrateWatch = PerfProbe.enabled ? (Stopwatch()..start()) : null;
+    PerfProbe.mark('hydrate.start i=$index');
     try {
       final slice = lazy.residentSlice(index) ?? await lazy.sliceAsync(index);
       final old = pages[index];
@@ -830,6 +882,7 @@ class EditorCoreInfo extends ChangeNotifier {
         fileVersion: lazy.fileVersion,
         sbnPath: filePath,
         assetCacheAll: assetCacheAll,
+        throttleWhile: throttleWhile,
       );
       if (index >= pages.length || !identical(pages[index], old)) return null;
       pages[index] = page;
@@ -838,45 +891,78 @@ class EditorCoreInfo extends ChangeNotifier {
       if (lazy.unhydratedIndices.isEmpty) {
         _lazyPages = null;
       }
+      PerfProbe.mark(
+        'hydrate.done i=$index ms=${_hydrateWatch?.elapsedMilliseconds} '
+        'strokes=${page.strokes.length} bytes=${slice.length}',
+      );
       return page;
     } finally {
       _hydratingIndices.remove(index);
     }
   }
 
-  /// Smart hydrate for scroll/idle paths: small slices parse synchronously
-  /// (instant), dense slices hydrate chunked without freezing the UI.
+  /// Outcome of a [hydratePageSmart] attempt. The idle/scroll sweeps use the
+  /// distinction between "started" and "already in flight" to keep exactly one
+  /// new parse in flight per frame without spinning rebuilds while waiting.
+  PageHydrateOutcome hydratePageSmart(
+    int index, {
+    void Function(EditorPage page)? onAsyncHydrated,
+    bool Function()? throttleWhile,
+  }) {
+    final lazy = _lazyPages;
+    if (lazy == null || !lazy.unhydratedIndices.contains(index)) {
+      return PageHydrateOutcome.alreadyLoaded;
+    }
+    if (index < 0 || index >= pages.length) {
+      return PageHydrateOutcome.alreadyLoaded;
+    }
+    if (_hydratingIndices.contains(index)) {
+      return PageHydrateOutcome.alreadyInFlight;
+    }
+    final resident = lazy.residentSlice(index);
+    if (resident != null) {
+      final sliceBytes =
+          lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
+      if (sliceBytes <= _kSyncHydrateByteThreshold) {
+        final _sw = PerfProbe.enabled ? (Stopwatch()..start()) : null;
+        _hydratePageAtIndex(index);
+        PerfProbe.mark(
+          'hydrate.sync i=$index ms=${_sw?.elapsedMilliseconds} bytes=$sliceBytes',
+        );
+        return isLazyShellPage(index)
+            ? PageHydrateOutcome.deferred
+            : PageHydrateOutcome.hydratedSync;
+      }
+    }
+    if (_hydratingIndices.length >= _kMaxConcurrentHydrateParses) {
+      return PageHydrateOutcome.deferred;
+    }
+    unawaited(
+      hydratePageChunked(index, throttleWhile: throttleWhile).then((page) {
+        if (page != null) onAsyncHydrated?.call(page);
+      }),
+    );
+    return PageHydrateOutcome.startedAsync;
+  }
+
+  /// Smart hydrate for scroll/idle paths: tiny slices parse synchronously
+  /// (instant), everything else hydrates chunked without freezing the UI.
   /// Returns true when the page is ready, already in flight, or a chunked
   /// hydrate started — [onAsyncHydrated] fires on async completion so the UI
   /// can wire callbacks and rebuild.
   bool tryHydratePageSmart(
     int index, {
     void Function(EditorPage page)? onAsyncHydrated,
+    bool Function()? throttleWhile,
   }) {
-    final lazy = _lazyPages;
-    if (lazy == null || !lazy.unhydratedIndices.contains(index)) return false;
-    if (index < 0 || index >= pages.length) return false;
-    if (_hydratingIndices.contains(index)) return true;
-    if (lazy.residentSlice(index) == null) {
-      unawaited(
-        hydratePageChunked(index).then((page) {
-          if (page != null) onAsyncHydrated?.call(page);
-        }),
-      );
-      return true;
-    }
-    final sliceBytes =
-        lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
-    if (sliceBytes <= _kChunkedHydrateByteThreshold) {
-      _hydratePageAtIndex(index);
-      return !isLazyShellPage(index);
-    }
-    unawaited(
-      hydratePageChunked(index).then((page) {
-        if (page != null) onAsyncHydrated?.call(page);
-      }),
+    final outcome = hydratePageSmart(
+      index,
+      onAsyncHydrated: onAsyncHydrated,
+      throttleWhile: throttleWhile,
     );
-    return true;
+    return outcome == PageHydrateOutcome.hydratedSync ||
+        outcome == PageHydrateOutcome.startedAsync ||
+        outcome == PageHydrateOutcome.alreadyInFlight;
   }
 
   /// Materializes every page that was skipped during lazy BSON load.
@@ -1578,6 +1664,8 @@ class EditorCoreInfo extends ChangeNotifier {
     String path, {
     bool readOnly = false,
     bool onlyFirstPage = false,
+    int? restoredPageIndex,
+    int? restoredPageIndexEnd,
   }) async {
     log.info(
       '[EditorCoreInfo.loadFromFilePath] Loading file: $path (readOnly: $readOnly)',
@@ -1727,6 +1815,34 @@ class EditorCoreInfo extends ChangeNotifier {
           ).toInt();
           final span = directory.spans[center];
           final pageBytes = await session.slice(span.start, span.end);
+          int? restoreIdx = restoredPageIndex;
+          if (restoreIdx != null &&
+              (restoreIdx < 0 ||
+                  restoreIdx >= directory.pageCount ||
+                  restoreIdx == center)) {
+            restoreIdx = null;
+          }
+          // Parse the whole restored viewport up front (bounded): the first
+          // painted frame after a reopen must show content on every visible
+          // page, not blank placeholders.
+          int? restoreEnd = restoreIdx == null
+              ? null
+              : (restoredPageIndexEnd ?? restoreIdx).clamp(
+                  restoreIdx,
+                  math.min(directory.pageCount - 1, restoreIdx + 2),
+                );
+          Map<int, Uint8List>? extraEagerBytes;
+          if (restoreIdx != null) {
+            extraEagerBytes = <int, Uint8List>{};
+            for (var i = restoreIdx; i <= (restoreEnd ?? restoreIdx); i++) {
+              if (i == center) continue;
+              final restoreSpan = directory.spans[i];
+              extraEagerBytes[i] = await session.slice(
+                restoreSpan.start,
+                restoreSpan.end,
+              );
+            }
+          }
           final coreInfo = await EditorCoreInfo.fromBinaryAsync(
             buffer: headerBytes,
             filePath: path,
@@ -1735,6 +1851,8 @@ class EditorCoreInfo extends ChangeNotifier {
             pageDirectory: directory,
             trustPageDirectory: true,
             eagerPageBytes: pageBytes,
+            restoredPageIndex: restoreIdx,
+            extraEagerPageBytes: extraEagerBytes,
           );
           coreInfo.attachLazyRangeReader(
             length: session.length,
@@ -1780,6 +1898,7 @@ class EditorCoreInfo extends ChangeNotifier {
           onlyFirstPage: onlyFirstPage,
           preferEagerAllPages: hasPdfAsset0,
           pageDirectory: pageDirectory,
+          restoredPageIndex: restoredPageIndex,
         );
         log.info(
           'PDFTIMING coreInfo.parseBody elapsed=${DateTime.now().difference(tParse0).inMilliseconds}ms',
@@ -1889,6 +2008,7 @@ class EditorCoreInfo extends ChangeNotifier {
     required bool onlyFirstPage,
     bool preferEagerAllPages = false,
     NotePageDirectory? pageDirectory,
+    int? restoredPageIndex,
   }) async {
     EditorCoreInfo coreInfo;
     try {
@@ -1903,6 +2023,7 @@ class EditorCoreInfo extends ChangeNotifier {
         onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
         pageDirectory: pageDirectory,
+        restoredPageIndex: restoredPageIndex,
       );
 
       final bool customBinary =
@@ -1992,6 +2113,7 @@ class EditorCoreInfo extends ChangeNotifier {
     int? lineHeightFallback,
     int? lineThicknessFallback,
     NotePageDirectory? pageDirectory,
+    int? restoredPageIndex,
   }) async {
     final dynamic json;
     final bool isBinaryFile;
@@ -2049,6 +2171,7 @@ class EditorCoreInfo extends ChangeNotifier {
         onlyFirstPage: onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
         pageDirectory: pageDirectory,
+        restoredPageIndex: restoredPageIndex,
       );
     }
   }
@@ -2095,6 +2218,8 @@ class EditorCoreInfo extends ChangeNotifier {
     NotePageDirectory? pageDirectory,
     bool trustPageDirectory = false,
     Uint8List? eagerPageBytes,
+    int? restoredPageIndex,
+    Map<int, Uint8List>? extraEagerPageBytes,
   }) async {
     final reader = BinaryReader(buffer);
 
@@ -2146,15 +2271,16 @@ class EditorCoreInfo extends ChangeNotifier {
     if (key == SBNBinaryKeys.pages) {
       final int count = reader.readIntNoKey();
       final directory = pageDirectory;
+      final int landingCenter = initialPageIndex
+          .clamp(0, math.max(0, count - 1))
+          .toInt();
       late final Set<int> eagerIndices;
       if (onlyFirstPage) {
         eagerIndices = count > 0 ? {0} : {};
       } else if (count <= 2) {
         eagerIndices = Set<int>.from(List.generate(count, (i) => i));
       } else {
-        final center = initialPageIndex
-            .clamp(0, math.max(0, count - 1))
-            .toInt();
+        final center = landingCenter;
         final indexedLandingOnly = pageDirectory != null &&
             pageDirectory.pageCount == count;
         if (indexedLandingOnly) {
@@ -2172,6 +2298,24 @@ class EditorCoreInfo extends ChangeNotifier {
           ) {
             eagerIndices.add(i);
           }
+        }
+        // The canvas may restore a saved viewport (per-note transform cache)
+        // that is not the header's landing page. Parsing those pages eagerly
+        // too keeps the first painted frame from showing a blank lazy-shell
+        // placeholder until their background parses arrive.
+        if (extraEagerPageBytes != null) {
+          for (final i in extraEagerPageBytes.keys) {
+            if (i >= 0 && i < count && i != center) eagerIndices.add(i);
+          }
+        } else if (restoredPageIndex != null &&
+            restoredPageIndex >= 0 &&
+            restoredPageIndex < count &&
+            restoredPageIndex != center) {
+          // Without eagerPageBytes the Dart reader holds the whole buffer,
+          // so the restored page can always be materialized here. With it
+          // (indexed load), a restore page needs its own slice, which the
+          // caller supplies through [extraEagerPageBytes].
+          if (eagerPageBytes == null) eagerIndices.add(restoredPageIndex);
         }
       }
 
@@ -2197,7 +2341,10 @@ class EditorCoreInfo extends ChangeNotifier {
           lazyState?.pageByteOffsets[i] = span.start;
           if (eagerIndices.contains(i)) {
             final BinaryReader pageReader;
-            if (eagerPageBytes != null) {
+            final Uint8List? restoreBytes = extraEagerPageBytes?[i];
+            if (restoreBytes != null) {
+              pageReader = BinaryReader(restoreBytes);
+            } else if (eagerPageBytes != null && i == landingCenter) {
               pageReader = BinaryReader(eagerPageBytes);
             } else {
               reader.offset = span.start;

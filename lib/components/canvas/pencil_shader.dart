@@ -3,22 +3,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:logging/logging.dart';
 import 'package:saber/components/canvas/pencil_grain_atlas.dart';
 import 'package:saber/data/editor/stroke_paint.dart';
-import 'package:saber/data/stroke_geometry/point_vector.dart';
 
 final _log = Logger('PencilShader');
 
-/// pencil grain via [FragmentProgram] (`shaders/pencil.frag`).
+/// Graphite grain via [FragmentProgram] (`shaders/pencil.frag`).
 ///
-/// Path-oriented, page-anchored grain. Live and committed use the same
-/// painter with zoom LOD. One [ui.FragmentShader] per page; stays off tiles.
-/// Noise is sampled from [PencilGrainAtlas] (Skia image samplers).
+/// The grain is painted by filling ONE union path per stroke — live and
+/// committed alike. A path fill shades every covered pixel exactly once, so
+/// self-overlap at curves/joins can never double-darken and there are no mesh
+/// triangle seams to hide. Geometry (spine outlines) and uniforms are shared
+/// with the committed render, so the live stroke and the committed stroke
+/// evaluate the identical page-anchored field.
+///
+/// One [ui.FragmentShader] per page; stays off tiles. Noise is sampled from
+/// [PencilGrainAtlas] (two packed 256×256 tiles, hardware-sampled).
 class PencilShader {
   PencilShader._();
 
@@ -82,54 +86,85 @@ class PencilShader {
     return 2;
   }
 
-  static double stampWidthFor(double size, double maxSizeRatio) =>
-      size * maxSizeRatio.clamp(0.5, 3.0) * 1.35;
+  /// Page pixels covered by one noise tile for [cfg].
+  ///
+  /// The default grain scale maps the atlas 1:1: 256 page px per tile, 1 atlas
+  /// texel = 1 page pixel. Grain is never sampled *finer* than that here:
+  /// sub-page-pixel content shimmers when the canvas shifts by a fraction of a
+  /// pixel (pan) or when a cached picture is resampled, so tip size shapes the
+  /// deposit structure instead of the frequency (see [tipMixFor]).
+  /// [StrokePaint.noiseGrainScale] multiplies the tile size on top - styles
+  /// that ask for finer grain trade that stability for crispness.
+  static double grainTilePagePxFor(StrokePaint cfg) {
+    final g = cfg.noiseGrainScale.clamp(0.01, 0.25);
+    return (_grainTilePagePx * (g / PencilNoiseDefaults.grainScale))
+        .clamp(64.0, 640.0);
+  }
 
-  static double stampMinSegLen(double size) => math.max(2.4, size * 0.32);
+  /// Deposit-structure blend for a tip of [size] page px: 0 = fine tip (fine
+  /// speckle, no broad blotches), 1 = broad tip (full lump/tooth drift, the
+  /// reference look at size >= ~72).
+  static double tipMixFor(double size) =>
+      ((size - 12.0) / 60.0).clamp(0.0, 1.0);
 
-  static const double stampMinDirDot = 0.96;
+  /// Page pixels covered by one noise tile at the default grain scale, at
+  /// which 1 atlas texel maps to 1 page pixel (no minification aliasing).
+  static const _grainTilePagePx = 256.0;
 
+  /// Shader LOD: 0 while the grain is sub-pixel (cheap fetch path), fading to
+  /// 1 as soon as one page pixel maps to one screen pixel (full grain), so the
+  /// level of detail never steps visibly while zooming.
+  static double qualityForScale(double currentScale) =>
+      ((currentScale - 0.70) / 0.35).clamp(0.0, 1.0);
+
+  /// Darkest deposit alpha (and fallback mean alpha scale) for [cfg].
+  static double opacityMaxFor(StrokePaint cfg) {
+    final threshold = cfg.noiseThreshold.clamp(0.05, 0.92);
+    return (0.96 - 0.62 * threshold).clamp(0.30, 0.90);
+  }
+
+  /// Uploads the per-draw uniforms.
+  ///
+  /// No canvas transform is involved on purpose: the shader evaluates
+  /// FlutterFragCoord() (local to the drawing command - page space for every
+  /// pencil draw path), so the grain stays page-anchored no matter how the
+  /// canvas is panned, zoomed, rasterized or replayed from a cached picture.
   static void configureBase(
     ui.FragmentShader shader,
     Color color, {
     required StrokePaint cfg,
-    Offset coordOffset = Offset.zero,
+    required double size,
     double seed = 0,
     double quality = 1.0,
     bool castShadow = false,
   }) {
-    final g = cfg.noiseGrainScale.clamp(0.01, 0.25);
-    final freq = (0.06 / g).clamp(0.2, 3.0);
-    final opacityMax = (1.0 - cfg.noiseThreshold.clamp(0.05, 0.95) * 0.35)
-        .clamp(0.35, 0.9);
+    final freq = 1.0 / grainTilePagePxFor(cfg);
+    final threshold = cfg.noiseThreshold.clamp(0.05, 0.92);
     final contrast = cfg.noiseContrast.clamp(0.35, 2.5);
     final fineMix = cfg.noiseFineMix.clamp(0.0, 1.0);
-    final threshold = cfg.noiseThreshold.clamp(0.05, 0.92);
 
     shader
       ..setFloat(0, color.r)
       ..setFloat(1, color.g)
       ..setFloat(2, color.b)
       ..setFloat(3, freq)
-      ..setFloat(4, opacityMax)
+      ..setFloat(4, opacityMaxFor(cfg))
       ..setFloat(5, seed)
       ..setFloat(6, contrast)
       ..setFloat(7, fineMix)
       ..setFloat(8, threshold)
-      ..setFloat(9, coordOffset.dx)
-      ..setFloat(10, coordOffset.dy)
-      ..setFloat(11, quality.clamp(0.0, 1.0))
-      ..setFloat(12, castShadow ? 1.0 : 0.0);
+      ..setFloat(9, quality.clamp(0.0, 1.0))
+      ..setFloat(10, castShadow ? 1.0 : 0.0)
+      ..setFloat(11, tipMixFor(size));
     bindAtlas(shader);
   }
 
-  static final Paint _stampPaint = Paint()
-    ..style = PaintingStyle.stroke
-    ..strokeCap = StrokeCap.round
-    ..strokeJoin = StrokeJoin.round
-    ..color = const Color(0xFFFFFFFF);
+  static final _grainPaint = Paint()
+    ..style = PaintingStyle.fill
+    ..isAntiAlias = true
+    ..blendMode = BlendMode.srcOver;
 
-  static final Paint _shadowPaint = Paint()
+  static final _shadowPaint = Paint()
     ..style = PaintingStyle.fill
     ..strokeCap = StrokeCap.round
     ..strokeJoin = StrokeJoin.round
@@ -204,32 +239,36 @@ class PencilShader {
     canvas.restore();
   }
 
-  static void paintIsotropicStroke({
+  /// Graphite kernel: optional contact shadow, then ONE union-path fill.
+  ///
+  /// [outline] must be the full stroke outline as a single non-zero fill path
+  /// (or the exact union of staged chunks), never a triangle mesh: a fill
+  /// shades each pixel once, which is what makes overlap-safe translucent
+  /// grain possible.
+  static void paintGrainPath({
     required Canvas canvas,
     required ui.FragmentShader shader,
     required Color color,
     required StrokePaint cfg,
     required Path outline,
-    ui.Vertices? mesh,
-    required double stampWidth,
+    required double currentScale,
+    required int visibleCount,
+    required double? strokeSize,
     bool configureBaseUniforms = true,
-    Offset coordOffset = Offset.zero,
-    double currentScale = 1.0,
-    int visibleCount = 1,
-    double? strokeSize,
     // Interior staged chunks skip the contact shadow: a butt joint would
     // otherwise cast a hairline across the stroke interior.
     bool includeShadow = true,
   }) {
-    final double quality = currentScale < 0.82 ? 0.0 : 1.0;
+    final quality = qualityForScale(currentScale);
+    final size = strokeSize ?? 4.0;
 
     if (configureBaseUniforms) {
       configureBase(
         shader,
         color,
         cfg: cfg,
+        size: size,
         quality: quality,
-        coordOffset: coordOffset,
         castShadow: cfg.pencilShadow,
       );
     }
@@ -238,7 +277,7 @@ class PencilShader {
       canvas: canvas,
       outline: outline,
       strokeColor: color,
-      size: strokeSize ?? stampWidth / 1.35,
+      size: size,
       currentScale: currentScale,
       visibleCount: visibleCount,
       quality: quality,
@@ -246,79 +285,80 @@ class PencilShader {
       enabled: includeShadow && cfg.pencilShadow,
     );
 
-    if (mesh != null) {
-      final bounds = outline.getBounds();
-      if (bounds.isEmpty) return;
-
-      // Infla a área para acomodar o anti-aliasing da malha
-      final safeBounds = bounds.inflate(4.0);
-
-      // Isola a camada para realizar o recorte perfeito (Masking)
-      canvas.saveLayer(safeBounds, Paint());
-
-      // 1. Pinta a malha em branco primeiro (a cor do vértice com Alpha multiplicará o branco)
-      _stampPaint
-        ..isAntiAlias = quality > 0.5
-        ..shader = null
-        ..color = const Color(0xFFFFFFFF)
-        ..style = PaintingStyle.fill
-        ..blendMode = BlendMode.srcOver;
-      
-      // BlendMode.modulate funde os Alpha dos Vértices na Tinta Branca
-      canvas.drawVertices(mesh, BlendMode.modulate, _stampPaint);
-
-      // 2. Preenche com o Shader de Ruído usando BlendMode.srcIn
-      // Isso transfere a textura hiper-realista restritamente para as áreas opacas da malha desenhada acima.
-      _stampPaint
-        ..shader = shader
-        ..blendMode = BlendMode.srcIn;
-      canvas.drawRect(safeBounds, _stampPaint);
-
-      canvas.restore();
-      
-      // Restaura os padrões de pintura para as próximas chamadas
-      _stampPaint.shader = null;
-      _stampPaint.blendMode = BlendMode.srcOver;
-    } else {
-      fillOutline(
-        canvas: canvas,
-        shader: shader,
-        outline: outline,
-        quality: quality,
-      );
-    }
-  }
-
-  static void fillOutline({
-    required Canvas canvas,
-    required ui.FragmentShader shader,
-    required Path outline,
-    required double quality,
-  }) {
-    _stampPaint
-      ..isAntiAlias = quality > 0.5
+    _grainPaint
       ..shader = shader
-      ..style = PaintingStyle.fill;
-    canvas.drawPath(outline, _stampPaint);
-    _stampPaint.shader = null;
+      ..colorFilter = null
+      ..maskFilter = null
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true
+      ..blendMode = BlendMode.srcOver;
+    canvas.drawPath(outline, _grainPaint);
+    _grainPaint.shader = null;
   }
 
-  /// True when [color]/[cfg]/[quality] match the last [configure] inputs.
+  /// Shader-less fallback: one flat translucent fill of the same union path
+  /// (mean graphite alpha), so live and committed still agree pixel-for-pixel
+  /// on machines where the program failed to load.
+  static void paintGrainFallback({
+    required Canvas canvas,
+    required Color color,
+    required StrokePaint cfg,
+    required Path outline,
+    required double currentScale,
+    required int visibleCount,
+    required double? strokeSize,
+    bool includeShadow = true,
+  }) {
+    final quality = qualityForScale(currentScale);
+
+    paintCastShadow(
+      canvas: canvas,
+      outline: outline,
+      strokeColor: color,
+      size: strokeSize ?? 4.0,
+      currentScale: currentScale,
+      visibleCount: visibleCount,
+      quality: quality,
+      lodTier: lodTierForScale(currentScale),
+      enabled: includeShadow && cfg.pencilShadow,
+    );
+
+    final alpha = (opacityMaxFor(cfg) * 0.6).clamp(0.05, 0.9);
+    _grainPaint
+      ..shader = null
+      ..colorFilter = null
+      ..maskFilter = null
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true
+      ..blendMode = BlendMode.srcOver
+      ..color = color.withValues(alpha: alpha);
+    canvas.drawPath(outline, _grainPaint);
+  }
+
+  /// True when [color]/[cfg]/[quality]/[size] match the last [configure]
+  /// inputs. Tip size participates because it scales the grain field.
   static bool sameConfig({
     required Color color,
     required StrokePaint cfg,
     required double quality,
+    required double size,
     required Color? lastColor,
     required StrokePaint? lastCfg,
     required double? lastQuality,
+    required double? lastSize,
   }) {
-    if (lastColor == null || lastCfg == null || lastQuality == null) {
+    if (lastColor == null ||
+        lastCfg == null ||
+        lastQuality == null ||
+        lastSize == null) {
       return false;
     }
 
     if (lastColor != color) return false;
 
     if ((lastQuality - quality).abs() > 0.01) return false;
+
+    if ((lastSize - size).abs() > 0.01) return false;
 
     if (identical(lastCfg, cfg)) return true;
 

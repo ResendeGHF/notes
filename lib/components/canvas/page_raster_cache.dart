@@ -19,6 +19,7 @@ import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/services/display_ink_feel.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:saber/components/canvas/inner_canvas.dart' show buildOrderedMeshBatches;
 
 /// One baked bitmap layer for a page (ink or background).
@@ -970,17 +971,48 @@ final class PageRasterCacheManager {
   /// full-page toImage work.
   static DateTime? deferBakesUntil;
 
+  /// Timestamp set when an editor freshly opens a note. While it is in the
+  /// future, the page band builder keeps only the pages actually on screen
+  /// mounted: the first paint of a cold dense page records the whole page
+  /// (~60-130 ms), and paying that once per invisible neighbor made the
+  /// open instant hit three heavy frames in a row. The band mounts again as
+  /// soon as the viewport moves; the warm-up pump (which runs in budgeted
+  /// slices from the first frame) records the neighbors' tiles meanwhile, so
+  /// they blit instead of re-recording when they appear.
+  static DateTime? openGraceUntil;
+
+  /// Wall-clock of the last user input on the canvas (pointer down, pen
+  /// sample, pan start). The open-grace orders (band clamp, pump waiver) only
+  /// describe a viewport that is being placed programmatically; the moment
+  /// the user drives it, they must be released — and raster bakes must not
+  /// start (or keep running) under the first touch either: one bake holds the
+  /// raster thread for 10-150 ms per page, which is exactly the "pan is
+  /// stuck right after opening" stall on dense notes.
+  static DateTime? lastUserInputAt;
+
+  static void noteUserInput() => lastUserInputAt = DateTime.now();
+
+  static bool get userInputRecent {
+    final at = lastUserInputAt;
+    return at != null &&
+        DateTime.now().difference(at) < const Duration(milliseconds: 800);
+  }
+
   Future<void> _processQueue() async {
     _jobRunning = true;
     while (_jobQueue.isNotEmpty && !_disposed) {
       // Never run CanvasPainter + toImage on the UI isolate mid-stroke —
       // that is the classic cause of dropped pointer samples / square ink.
       // Same for viewport motion: pinch-zoom frames must stay at composite
-      // cost, so bakes queue up and run once the viewport settles.
+      // cost, so bakes queue up and run once the viewport settles. Same for
+      // the quiet window right after any canvas input: a bake started in that
+      // window is in flight (10-150 ms of raster thread) when the next pan
+      // frame lands, which reads as the pan stalling right after open.
       final deferUntil = deferBakesUntil;
       if (!debugForceSyncRaster &&
           (inkInputBusy ||
               viewportMoving ||
+              userInputRecent ||
               (deferUntil != null && DateTime.now().isBefore(deferUntil)))) {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
@@ -1020,7 +1052,13 @@ final class PageRasterCacheManager {
         continue;
       }
 
+      PerfProbe.mark('raster.start page=${job.pageIndex} ink=${job.isInk}');
+      final _bakeWatch = PerfProbe.enabled ? (Stopwatch()..start()) : null;
       final image = await _buildJob(job);
+      PerfProbe.mark(
+        'raster.bake page=${job.pageIndex} ink=${job.isInk} '
+        'ms=${_bakeWatch?.elapsedMilliseconds} ok=${image != null}',
+      );
       if (_disposed || job.cacheGen != _cacheGen) {
         image?.dispose();
         _clearPending(job);
@@ -1231,6 +1269,7 @@ final class PageRasterCacheManager {
   }
 
   void _bumpRepaint() {
+    PerfProbe.hit('raster.bump');
     repaintEpoch.value++;
     onRepaintRequested?.call();
   }

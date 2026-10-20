@@ -33,6 +33,7 @@ import 'package:saber/pages/home/vault_pdf_load_overrides_page.dart';
 import 'package:saber/pages/logs.dart';
 import 'package:saber/pages/vault_login.dart';
 import 'package:saber/services/background_operation_queue.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:worker_manager/worker_manager.dart';
@@ -106,6 +107,8 @@ Future<void> appRunner(List<String> args) async {
 
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
+
+  PerfProbe.install();
 
   if (!kDebugMode) {
     final errorLogger = Logger('ErrorLogger');

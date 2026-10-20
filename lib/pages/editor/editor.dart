@@ -44,6 +44,7 @@ import 'package:saber/components/canvas/canvas.dart' show Canvas;
 import 'package:saber/components/canvas/canvas_background_preview.dart';
 import 'package:saber/components/canvas/canvas_context_menu_feel.dart';
 import 'package:saber/components/canvas/canvas_gesture_detector.dart';
+import 'package:saber/components/canvas/canvas_transform_cache.dart';
 import 'package:saber/components/canvas/canvas_image.dart';
 import 'package:saber/components/canvas/canvas_preview.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -119,6 +120,7 @@ import 'package:saber/services/display_ink_feel.dart';
 import 'package:saber/services/math_solver_service.dart';
 import 'package:saber/services/online/online_transcription_service.dart';
 import 'package:saber/services/pdf_viewport.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/recognition_service.dart';
 import 'package:saber/services/vlm/page_image_renderer.dart';
 import 'package:saber/services/vlm/page_latex_vlm_service.dart';
@@ -386,8 +388,41 @@ class EditorState extends State<Editor>
   int? _lastPageRasterBandStart;
   int? _lastPageRasterBandEnd;
 
+  /// Post-open window where shell parses start gently: the first frames own
+  /// the UI isolate, so background hydration paces itself instead of running
+  /// the whole note's sweep inside the open second. Any viewport motion lifts
+  /// the pacing (an actual scroll needs its pages now).
+  DateTime? _openGraceUntil;
+
+  /// Wall-clock of the last completed background page parse; used to stagger
+  /// parse starts during the open grace so two dense completions never land
+  /// in one frame.
+  DateTime? _lastHydrateCompletionAt;
+
+  bool _probeSetStateTraced = false;
+
+  @override
+  void setState(VoidCallback fn) {
+    if (PerfProbe.enabled) {
+      PerfProbe.hit('editor.setState');
+      if (!_probeSetStateTraced) {
+        _probeSetStateTraced = true;
+        final trace = StackTrace.current.toString().replaceAll('\n', ' | ');
+        PerfProbe.mark(
+          'setState.trace ${trace.length > 1500 ? trace.substring(0, 1500) : trace}',
+        );
+      }
+    }
+    super.setState(fn);
+  }
+
   void _onPageRasterRepaint() {
-    if (mounted) setState(() {});
+    // The page painters already listen to PageRasterCacheManager.repaintEpoch
+    // (merged into their CustomPaint `repaint` listenables), so a completed
+    // bake repaints its page without touching the widget tree. A full editor
+    // rebuild here used to fire once per bake — during the post-open bake
+    // storm that meant ~20 rebuilds/second, each re-building and re-painting
+    // every visible dense page (~40 ms per frame).
   }
 
   double _canvasDevicePixelRatio() {
@@ -415,6 +450,7 @@ class EditorState extends State<Editor>
   /// The renderer debounces and early-outs on unchanged rects, so per-tick
   /// cost here is a single epoch bump.
   void _onCanvasTransformTick() {
+    PerfProbe.hit('xform.tick');
     PdfViewportBus.tick();
     _pokeCanvasHud();
   }
@@ -454,6 +490,7 @@ class EditorState extends State<Editor>
     bool forceSchedule = false,
     double? scale,
   }) {
+    PerfProbe.hit('band.maint');
     if (coreInfo.pages.isEmpty) return;
     _lastPageRasterBandStart = bandStart;
     _lastPageRasterBandEnd = bandEnd;
@@ -515,7 +552,7 @@ class EditorState extends State<Editor>
 
   /// Background mesh workers in flight (bounded CPU: triangulation is pure
   /// ALU, but more workers than this starves the UI thread on small SoCs).
-  static const int _kMeshWarmConcurrency = 2;
+  static const int _kMeshWarmConcurrency = 4;
   int _meshWarmInFlight = 0;
   final Set<EditorPage> _meshWarmPages = <EditorPage>{};
 
@@ -554,9 +591,8 @@ class EditorState extends State<Editor>
         if (dist > 0) visibleCenter + dist,
       }) {
         if (i < bandStart || i > bandEnd || i < 0 || i >= pageCount) continue;
-        // Disjoint by construction: near pages belong to the UI paint and
-        // tile prewarm (instant, demand-driven); the worker warms ahead.
-        if ((i - visibleCenter).abs() < 3) continue;
+        // We no longer skip near pages; let the background worker triangulate 
+        // EVERYTHING it can to avoid blocking the UI thread on demand.
         final page = coreInfo.pages[i];
         if (page.isLazyShell) continue;
         if (_meshWarmPages.contains(page)) continue;
@@ -647,26 +683,191 @@ class EditorState extends State<Editor>
     return false;
   }
 
-  int _prefetchNearbyPageContent(int bandStart, int bandEnd) {
-    if (coreInfo.pages.isEmpty) return 0;
+  /// Seeds the opening viewport before the first canvas frame, so the note
+  /// never paints the top of the document and then jumps to the landing page
+  /// (the jump also re-mounted the look-ahead band, whose cold first paints
+  /// were the open hitch). Restores the exact previous viewport when
+  /// available, else the note's saved landing page. The detector re-asserts
+  /// the same values in initState/didUpdateWidget and its identity checks
+  /// make this idempotent.
+  void _seedOpeningTransform(EditorCoreInfo info) {
+    if (!_transformationController.value.isIdentity()) return;
+    final restored = CanvasTransformCache.get(info.filePath);
+    if (restored != null) {
+      _transformationController.value = restored.transform;
+      return;
+    }
+    if (info.pages.isEmpty) return;
+    final landing = (widget.initialPageIndexOverride ??
+            info.initialPageIndex ??
+            0)
+        .clamp(0, info.pages.length - 1);
+    final width = _pageLayoutWidthOverride ?? _currentViewportWidth();
+    if (width <= 0) return;
+    final offsets = _generatePageOffsets(info.pages, width);
+    final top = -CanvasGestureDetector.getTopOfPage(
+      pageIndex: landing,
+      pageOffsets: offsets,
+    );
+    // Flush with the page top (no peek of the page above): the open instant
+    // then mounts exactly one page, so a dense neighbor can never pay a cold
+    // full-page paint over the first frames.
+    _transformationController.value = Matrix4.translationValues(0, top, 0);
+    PageRasterCacheManager.endProgrammaticViewportJump();
+  }
+
+  /// Records the tile pictures of every page visible at the seeded landing
+  /// transform in bounded slices, before the first canvas frame of a freshly
+  /// opened note.
+  ///
+  /// A cold page's first paint records its whole page on the UI thread
+  /// (measured 60-130 ms) regardless of how much of it is on screen — the
+  /// page canvas clip is the page bounds. Without this warm the open instant
+  /// pays that cost once per mounted page as a visible hitch. The slices run
+  /// while the route transition still covers the screen; each is bounded by
+  /// the warmer's own time/tile caps (see [_prefetchNearbyPageContent]) and
+  /// the whole loop by [maxTotalMs], so the open never stalls on the warm.
+  Future<void> _warmLandingTilesBeforeFirstFrame({
+    EditorCoreInfo? infoOverride,
+  }) async {
+    final info = infoOverride ?? coreInfo;
+    if (info.pages.isEmpty) return;
+    final landing = (widget.initialPageIndexOverride ??
+            info.initialPageIndex ??
+            0)
+        .clamp(0, info.pages.length - 1);
+    // Landing first, then the rest of the pages on screen (the seeded
+    // placement leaves a peek of the page above).
+    final targets = <int>[landing];
+    final transform = _transformationController.value;
+    final scale = transform.approxScale;
+    final viewportHeight =
+        _canvasGestureDetectorKey.currentState?.containerBounds.maxHeight ?? 0;
+    final width = _pageLayoutWidthOverride ?? _currentViewportWidth();
+    if (scale > 0 && viewportHeight > 0 && width > 0) {
+      final offsets = _generatePageOffsets(info.pages, width);
+      final contentTop = -transform.getTranslation().y / scale;
+      final contentBottom = contentTop + viewportHeight / scale;
+      for (var i = 0; i < info.pages.length; i++) {
+        final page = info.pages[i];
+        if (offsets[i] >= contentBottom) break;
+        final pageWidth = math.min(page.size.width, width);
+        final height = page.size.height * (pageWidth / page.size.width);
+        if (offsets[i] + height <= contentTop) continue;
+        if (!targets.contains(i)) targets.add(i);
+      }
+    }
+    // Bound the wait on the first canvas frame: dense pages converge in a
+    // handful of slices; a pathological page stops here and lets the first
+    // paint record the rest (bounded by the paint's own budget). Frames are
+    // yielded between slice groups so the loading body keeps painting; the
+    // route transition still covers the screen.
+    final stopwatch = Stopwatch()..start();
+    const maxTotalMs = 360;
+    // Increased slices per frame to aggressively pre-record tiles during
+    // note opening, preventing blocks from popping in visually.
+    const maxSlicesPerFrame = 8;
+    var slicesInFrame = 0;
+    for (final pageIndex in targets) {
+      // Shells cannot be warmed: their strokes are still BSON bytes. Parse
+      // them here (chunked, yielding between slices) while the route
+      // transition still covers the screen; bounded like the rest of the
+      // warm. The first paint finishes anything that does not fit.
+      var page = info.pages[pageIndex];
+      if (page.isLazyShell) {
+        for (var attempt = 0; attempt < 3; attempt++) {
+          if (!mounted || stopwatch.elapsedMilliseconds >= maxTotalMs) break;
+          final hydrated = await info.hydratePageChunked(pageIndex);
+          if (hydrated != null) {
+            page = hydrated;
+            _wirePageImageCallbacks(pageIndex, infoOverride: info);
+            break;
+          }
+          if (!info.isLazyShellPage(pageIndex)) {
+            page = info.pages[pageIndex];
+            break;
+          }
+          // Concurrent-parse cap saturated: give the in-flight parse a turn.
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+        if (!mounted) return;
+        if (page.isLazyShell) continue;
+      }
+      var stalled = 0;
+      while (stopwatch.elapsedMilliseconds < maxTotalMs) {
+        if (!mounted) return;
+        if (Pen.currentStroke != null || Eraser.isDragging) return;
+        if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) break;
+        final before = page.strokePictureCache.pictureCount;
+        final recorded = _prefetchNearbyPageContent(
+          pageIndex,
+          pageIndex,
+          infoOverride: infoOverride,
+        );
+        PerfProbe.markOnce(
+          'warm.preframe.p$pageIndex',
+          'warm.preframe page=$pageIndex recorded=$recorded',
+        );
+        final progressed = page.strokePictureCache.pictureCount > before;
+        if (!progressed && recorded <= 0) {
+          // Budget too small for the next tile, or a stale signature: yield
+          // and retry once, then stop (the first paint finishes the rest).
+          if (++stalled >= 2) break;
+        } else {
+          stalled = 0;
+        }
+        if (++slicesInFrame >= maxSlicesPerFrame) {
+          slicesInFrame = 0;
+          await SchedulerBinding.instance.endOfFrame;
+        }
+      }
+    }
+  }
+
+  int _prefetchNearbyPageContent(
+    int bandStart,
+    int bandEnd, {
+    EditorCoreInfo? infoOverride,
+  }) {
+    PerfProbe.hit('prefetch');
+    // [infoOverride] lets the pre-first-frame warm run against a freshly
+    // loaded coreInfo that is not published to the widget tree yet.
+    final info = infoOverride ?? coreInfo;
+    if (info.pages.isEmpty) return 0;
     if (Pen.currentStroke != null || Eraser.isDragging) return 0;
     // Fast motion records nothing here (the paint path draws synchronous
     // fallback vectors instead, so pages are never blank). A slow reading
     // pan keeps a tight prewarm slice so neighbors converge to cached tiles
     // while content stays visible.
+    //
+    // Exception: the open grace window. There the viewport only "moves"
+    // because the landing transform is being placed programmatically; the
+    // first paint of every dense page would otherwise fall back to vectors
+    // (measured 55-160 ms per page) because no tiles exist yet. The moment
+    // the user drives the viewport (pan with a finger / S Pen, pen down)
+    // that exception ends: the pump then bails on fast motion or shrinks to
+    // the slow-pan slice like any other frame, so the user's own frames are
+    // never queued behind a 20 ms warm slice.
+    final openGrace =
+        _openGraceUntil != null &&
+            DateTime.now().isBefore(_openGraceUntil!) &&
+            !PageRasterCacheManager.userInputRecent;
     final moving = TiledStrokePictureCache.viewportMoving;
     final slowMoving =
         moving && PageRasterCacheManager.viewportSlowMotion;
-    if (moving && !slowMoving) return 0;
+    if (moving && !slowMoving && !openGrace) {
+      PerfProbe.hit('prefetch.moving');
+      return 0;
+    }
     // Meshes first (off-thread): tile recording below then finds them warm.
     // Skipped on fast motion: DTO assembly runs on the UI thread and the
     // fallback paint path needs no meshes.
-    if (!moving) _meshWarmupStep(bandStart, bandEnd);
-    final pageCount = coreInfo.pages.length;
+    if (!moving && infoOverride == null) _meshWarmupStep(bandStart, bandEnd);
+    final pageCount = info.pages.length;
     final visibleCenter = _visibleBandCenter(pageCount, bandStart, bandEnd);
     final theme = _cachedTheme ?? ThemeData.light();
     final invert = theme.brightness == Brightness.dark
-        ? getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath)
+        ? getEffectiveNoteInvertInDarkModeForFile(info.filePath)
         : false;
     final scale = _transformationController.value.approxScale;
     final currentScale = scale > 0 ? scale : 1.0;
@@ -682,16 +883,29 @@ class EditorState extends State<Editor>
     // return early above and rely on paint fallback).
     final frameStopwatch = Stopwatch()..start();
     final pagesPerFrame = slowMoving ? 1 : 2;
-    final frameBudgetMs = slowMoving ? 6 : 12;
-    final prewarmMaxTiles = slowMoving ? 2 : 4;
-    final prewarmBudgetMs = slowMoving ? 4 : 8;
+    // During the open grace the viewport is only being placed, so the warmer
+    // may take larger slices on the way to the first paints: the vector work
+    // of a dense page (~130 ms of outline building) either happens here in
+    // slices before the page is visible, or it lands in the first paint as
+    // one visible hitch. Slices stay small enough that the open frames keep
+    // near-60 fps while the pump converges over several passes (a pass runs
+    // every frame during the open, so 12 ms/pass still records ~70% of a
+    // second's worth of tiles per second).
+    final frameBudgetMs = slowMoving ? 16 : 32;
+    final prewarmMaxTiles = slowMoving ? 6 : (openGrace ? 8 : 16);
+    final prewarmBudgetMs = slowMoving ? 8 : (openGrace ? 16 : 24);
     var pagesTouched = 0;
     var recordedTotal = 0;
-    // Outward from the visible center, bounded by the passed band.
+    // Outward from the visible center, bounded by the passed band, then
+    // coldest-first: a page with no recorded tiles paints every stroke as
+    // vectors on each frame it is visible (measured 55-160 ms per paint), so
+    // it must beat a page that merely lacks refinements. Distance order is
+    // kept for equal coldness.
     final maxDist = math.max(
       visibleCenter - bandStart,
       bandEnd - visibleCenter,
     );
+    final ordered = <int>[];
     for (var dist = 0; dist <= maxDist; dist++) {
       for (final i in {
         visibleCenter - dist,
@@ -699,6 +913,18 @@ class EditorState extends State<Editor>
       }) {
         if (i < bandStart || i > bandEnd) continue;
         if (i < 0 || i >= pageCount) continue;
+        if (!ordered.contains(i)) ordered.add(i);
+      }
+    }
+    final order = List<int>.generate(ordered.length, (k) => k);
+    order.sort((a, b) {
+      final ca = info.pages[ordered[a]].strokePictureCache.pictureCount;
+      final cb = info.pages[ordered[b]].strokePictureCache.pictureCount;
+      return ca != cb ? ca - cb : a - b;
+    });
+    for (final oi in order) {
+      final i = ordered[oi];
+      {
         // Input preemption inside the slice: a pen-down or fling landing
         // mid-warmer must not wait behind neighbor prewarming. The paint
         // path draws synchronous fallback vectors, so pages are never blank;
@@ -707,16 +933,21 @@ class EditorState extends State<Editor>
           return recordedTotal;
         }
         if (TiledStrokePictureCache.viewportMoving &&
-            !PageRasterCacheManager.viewportSlowMotion) {
+            !PageRasterCacheManager.viewportSlowMotion &&
+            !openGrace) {
           return recordedTotal;
         }
         if (pagesTouched >= pagesPerFrame) return recordedTotal;
         if (frameStopwatch.elapsedMilliseconds >= frameBudgetMs) {
           return recordedTotal;
         }
-        final page = coreInfo.pages[i];
-        if (page.isLazyShell) continue;
+        final page = info.pages[i];
+        if (page.isLazyShell) {
+          PerfProbe.hit('prefetch.shell');
+          continue;
+        }
         if (_tilePrewarmDoneRevision[page] == page.saveBinaryRevision) {
+          PerfProbe.hit('prefetch.done');
           continue;
         }
         if (page.allStrokesInDrawOrder.isEmpty) continue;
@@ -740,20 +971,34 @@ class EditorState extends State<Editor>
           defaultTextStyle: defaultTextStyle,
           lineHeight: page.hasLocalLineHeight
               ? page.lineHeight
-              : coreInfo.lineHeight,
+              : info.lineHeight,
+          // Must mirror _pageChild's widget params exactly — it truncates the
+          // thickness to int before the painter converts it back to double —
+          // or the tile cache visual signature mismatches and every prewarm
+          // call is rejected as stale.
           lineThickness: page.hasLocalLineThickness
-              ? page.lineThickness.toDouble()
-              : coreInfo.lineThickness.toDouble(),
+              ? page.lineThickness.toInt().toDouble()
+              : info.lineThickness.toDouble(),
           lineColor: page.lineColor,
           maxTiles: prewarmMaxTiles,
           budgetMs: prewarmBudgetMs,
+          ignoreMovingCap: openGrace,
         );
-        // 0 = nothing left to warm at this revision; -1 = skipped on
-        // signature mismatch (retry next frame, keep unmarked).
+        // 0 = nothing left to warm at this revision; <0 = skipped (stale
+        // signature or budget exhausted — retry next frame, keep unmarked).
         if (recorded == 0) {
+          PerfProbe.markOnce(
+            'prefetch.res0.p$i',
+            'prefetch.res0 page=$i strokes=${page.allStrokesInDrawOrder.length}',
+          );
           _tilePrewarmDoneRevision[page] = page.saveBinaryRevision;
         } else if (recorded > 0) {
           recordedTotal += recorded;
+        } else {
+          PerfProbe.markOnce(
+            'prefetch.resm.p$i',
+            'prefetch.resm page=$i rec=$recorded',
+          );
         }
       }
     }
@@ -837,6 +1082,7 @@ class EditorState extends State<Editor>
       Eraser.isDragging = false;
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
+      _lastRestingRawSampleTimestamp = null;
       _lastInteractionBumpedStroke = null;
     }
     _bumpInteractionRepaint();
@@ -1323,13 +1569,15 @@ class EditorState extends State<Editor>
     final from = (target - neighborWindow).clamp(0, coreInfo.pages.length - 1);
     final to = (target + neighborWindow).clamp(0, coreInfo.pages.length - 1);
 
+    // Warm the landing window without ever parsing BSON on the UI thread:
+    // tiny slices still complete synchronously inside the smart hydrate;
+    // dense pages parse chunked and wire through their completion callback.
+    // The background pump has usually pre-hydrated these already, and the
+    // jump animation covers any parse still running.
+    _tryIdleHydratePage(target);
     for (var i = from; i <= to; i++) {
-      if (coreInfo.isLazyShellPage(i)) {
-        coreInfo.ensurePageHydrated(i);
-        _wirePageImageCallbacks(i);
-      } else {
-        _wirePageImageCallbacks(i);
-      }
+      if (i != target) _tryIdleHydratePage(i);
+      if (!coreInfo.isLazyShellPage(i)) _wirePageImageCallbacks(i);
     }
     _maintainPageRasterBand(from, to);
 
@@ -2175,6 +2423,7 @@ class EditorState extends State<Editor>
   }
 
   void _initAsync() async {
+    PerfProbe.mark('editor.initAsync');
     log.info('PDFTIMING editor._initAsync start');
     coreInfo.filePath = await widget.initialPath;
     _lastInvertBool = getEffectiveNoteInvertInDarkModeForFile(coreInfo.filePath);
@@ -2229,19 +2478,76 @@ class EditorState extends State<Editor>
         await pending;
       }
       log.info('PDFTIMING editor.loadFromFilePath start');
-      coreInfo = await EditorCoreInfo.loadFromFilePath(coreInfo.filePath);
-      log.info('PDFTIMING editor.loadFromFilePath done pages=${coreInfo.pages.length}');
-      // Restaura o toggle por-nota; o listener ignora quando igual (sem autosave espurio).
-      _showPdfLinkBoxes.value = coreInfo.showPdfLinkBoxes;
-      coreInfo.ensureNoteId();
-      _lastWrittenThumbnailHash = coreInfo.firstPageHash ?? '';
-      _recoveryJournal = EditorRecoveryJournal(
+      // The canvas restores its saved viewport (per-note transform cache)
+      // when this note reopens in the same session; parse the pages that
+      // viewport shows now so the first painted frame is real content, not a
+      // blank lazy-shell placeholder waiting on a background parse.
+      final cacheItem = CanvasTransformCache.get(coreInfo.filePath);
+      final int? restoredPageIndex = cacheItem?.pageIndex;
+      final int? restoredPageIndexEnd = cacheItem?.pageIndexEnd;
+      // Load into a local and only publish it after the warm below: the
+      // route transition (or a re-shown tab) rebuilds this widget during the
+      // awaits, and any rebuild between "pages assigned" and "tiles
+      // recorded" mounts cold pages whose first paint records the whole page
+      // on the UI thread (measured 45-130 ms per page).
+      final loadedCoreInfo = await EditorCoreInfo.loadFromFilePath(
         coreInfo.filePath,
-        noteId: coreInfo.noteId,
+        restoredPageIndex: restoredPageIndex,
+        restoredPageIndexEnd: restoredPageIndexEnd,
       );
-      final recovered = await _recoveryJournal!.replayInto(coreInfo);
-      final shouldPersistId = coreInfo.noteIdWasAssigned;
-      if ((recovered || shouldPersistId) && !coreInfo.readOnly) {
+      log.info(
+        'PDFTIMING editor.loadFromFilePath done pages=${loadedCoreInfo.pages.length}',
+      );
+      PerfProbe.mark(
+        'editor.loaded pages=${loadedCoreInfo.pages.length} '
+        'landing=${(loadedCoreInfo.initialPageIndex ?? 0).clamp(0, loadedCoreInfo.pages.isEmpty ? 0 : loadedCoreInfo.pages.length - 1)}',
+      );
+      // Restaura o toggle por-nota; o listener ignora quando igual (sem autosave espurio).
+      _showPdfLinkBoxes.value = loadedCoreInfo.showPdfLinkBoxes;
+      loadedCoreInfo.ensureNoteId();
+      _lastWrittenThumbnailHash = loadedCoreInfo.firstPageHash ?? '';
+      _recoveryJournal = EditorRecoveryJournal(
+        loadedCoreInfo.filePath,
+        noteId: loadedCoreInfo.noteId,
+      );
+      final recovered = await _recoveryJournal!.replayInto(loadedCoreInfo);
+      // First paint with strokes as soon as the body is parsed (low-quality
+      // paths). Opening chrome stays until this frame can schedule.
+      // Full-page raster bakes wait out the first ~0.9 s: the warm-up pump
+      // records the visible band's tiles in that window (tiles, not rasters,
+      // are what a pan blits), and a bake is 10-150 ms of raster thread per
+      // page — starting them under the user's first touch is the "pan stalls
+      // right after opening" report. The old 1600 ms grace left the whole
+      // early-scroll window with no rasters at all, so this stays well under
+      // it; a quiet canvas still bakes the band before the user gets far.
+      PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
+        const Duration(milliseconds: 900),
+      );
+      _openGraceUntil = DateTime.now().add(
+        const Duration(milliseconds: 1200),
+      );
+      PageRasterCacheManager.openGraceUntil = _openGraceUntil;
+      // Seed the landing viewport BEFORE the first canvas frame, so the note
+      // never paints the top of the document and then jumps to the landing
+      // page (the jump also re-mounted the look-ahead band, whose cold first
+      // paints were the open hitch). Restores the exact previous viewport
+      // when available, else the note's saved landing page. The detector
+      // re-asserts the same values in initState/didUpdateWidget and its
+      // identity checks make this idempotent.
+      _seedOpeningTransform(loadedCoreInfo);
+      // Record the tiles of every page the seeded viewport shows BEFORE the
+      // first canvas frame. The canvas can only blit what is already cached;
+      // without this the first paint of a dense page records the whole
+      // page's strokes on the UI thread (measured 45-130 ms), the visible
+      // hitch right as the note opens. The slices run while the route
+      // transition still covers the screen, so the note itself appears with
+      // its pixels already warm.
+      await _warmLandingTilesBeforeFirstFrame(infoOverride: loadedCoreInfo);
+      // Publish last: the first rebuild after this finds every visible
+      // page's tiles recorded and blits them.
+      coreInfo = loadedCoreInfo;
+      final shouldPersistId = loadedCoreInfo.noteIdWasAssigned;
+      if ((recovered || shouldPersistId) && !loadedCoreInfo.readOnly) {
         savingState.value = SavingState.waitingToSave;
         unawaited(
           saveToFile(force: true, updateThumbnail: false).catchError((e) {
@@ -2249,14 +2555,8 @@ class EditorState extends State<Editor>
           }),
         );
       }
-      // First paint with strokes as soon as the body is parsed (low-quality
-      // paths). Opening chrome stays until this frame can schedule.
-      // Full-page raster bakes wait out the open grace window so tiled
-      // recording and first frames own the UI isolate.
-      PageRasterCacheManager.deferBakesUntil = DateTime.now().add(
-        const Duration(milliseconds: 1600),
-      );
       if (mounted) setState(() {});
+      PerfProbe.mark('editor.firstSetState');
       await Future<void>.delayed(Duration.zero);
     } finally {
       // Setup complete
@@ -2329,6 +2629,19 @@ class EditorState extends State<Editor>
 
     if (mounted) {
       setState(() {});
+      // The embedded (tab host) chrome builds the shared toolbar from this
+      // state. The placeholder coreInfo used while loading reports
+      // readOnly=true, so without this rebuild the host keeps a disabled
+      // toolbar (all tool buttons' onTap null) until some unrelated chrome
+      // refresh happens. Announce readiness now that the real coreInfo,
+      // tool settings and history are in place.
+      if (widget.onEmbeddedChromeChanged != null) {
+        PerfProbe.mark('editor.chromeReadyNotify');
+        _notifyEmbeddedChromeChanged();
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        PerfProbe.mark('editor.bodyPainted');
+      });
     }
 
     final landing = coreInfo.pages.isEmpty
@@ -2353,7 +2666,15 @@ class EditorState extends State<Editor>
     for (var i = from; i <= to; i++) {
       if (!mounted) return;
       if (!coreInfo.isLazyShellPage(i)) continue;
-      final page = await coreInfo.hydratePageChunked(i);
+      // Retry briefly when the concurrent-parse cap is saturated: navigation
+      // neighbors must land warm, not wait a full background sweep cycle.
+      EditorPage? page;
+      for (var attempt = 0; attempt < 4 && page == null; attempt++) {
+        page = await coreInfo.hydratePageChunked(i);
+        if (page == null && coreInfo.isLazyShellPage(i)) {
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+      }
       if (page == null) continue;
       _wirePageImageCallbacks(i);
       changed = true;
@@ -2454,7 +2775,14 @@ class EditorState extends State<Editor>
       final to = (safeTargetPage + 1).clamp(0, coreInfo.pages.length - 1);
       for (var i = from; i <= to; i++) {
         if (coreInfo.isLazyShellPage(i)) {
-          await coreInfo.hydratePageAtIndexAsync(i);
+          // Retry briefly when the concurrent-parse cap is saturated (idle
+          // sweeps may be mid-parse): the jump must land on warm neighbors.
+          for (var attempt = 0; attempt < 4; attempt++) {
+            final page = await coreInfo.hydratePageChunked(i);
+            if (page != null) break;
+            if (!coreInfo.isLazyShellPage(i)) break;
+            await Future<void>.delayed(const Duration(milliseconds: 40));
+          }
           _wirePageImageCallbacks(i);
         }
       }
@@ -4093,8 +4421,14 @@ class EditorState extends State<Editor>
 
   static const double _rawDrawSampleMinDistSq = 0.25;
   static const double _rawDrawSampleMinDistSqLowRefresh = 0.09;
+
+  /// Sub-threshold raw moves are still forwarded (throttled to this clock)
+  /// when the live brush runs time-based physics that advances while the tip
+  /// rests (ink pooling / bristle stiffness).
+  static const Duration _restingRawSampleInterval = Duration(milliseconds: 8);
   bool _rawPenSampleSeenThisStroke = false;
   Duration? _lastRawPenSampleTimestamp;
+  Duration? _lastRestingRawSampleTimestamp;
   // Tracks which live stroke already mounted its overlay via
   // [_bumpInteractionRepaint]. The live overlay holds the same [Stroke]
   // object and repaints through `page.redrawStrokes()` (a repaint-listenable,
@@ -4109,6 +4443,11 @@ class EditorState extends State<Editor>
 
   void _markCanvasInputActivity({bool cancelPendingAutosave = false}) {
     _lastUserActivityForAutosave = DateTime.now();
+    // Releases the open-grace heuristics (band clamp, pump waiver) and holds
+    // raster bakes off: from the first touch on, the canvas takes the normal
+    // input-priority path instead of finishing open-time work under the
+    // user's finger.
+    PageRasterCacheManager.noteUserInput();
     if (cancelPendingAutosave &&
         savingState.value == SavingState.waitingToSave) {
       _delayedSaveTimer?.cancel();
@@ -4609,6 +4948,7 @@ class EditorState extends State<Editor>
     if (currentTool is Pen) {
       _rawPenSampleSeenThisStroke = false;
       _lastRawPenSampleTimestamp = null;
+      _lastRestingRawSampleTimestamp = null;
       _lastInteractionBumpedStroke = null;
       _lastPenDragUpdatePosition = position;
       _lastPenSignificantMoveAt = DateTime.now();
@@ -5255,7 +5595,19 @@ class EditorState extends State<Editor>
     final minDistSq = DisplayInkFeel.instance.isLowRefresh
         ? _rawDrawSampleMinDistSqLowRefresh
         : _rawDrawSampleMinDistSq;
-    if (dx * dx + dy * dy < minDistSq) return;
+    if (dx * dx + dy * dy < minDistSq) {
+      // Time-based brush physics (Ink Pooling, Bristle Stiffness) keeps
+      // consuming samples while the tip rests, so sub-threshold moves cannot
+      // simply be dropped — a stylus held still would never pool. Forward
+      // them on a ~120 Hz clock instead: the brush modeler absorbs
+      // coincident points, so a resting stylus stays cheap.
+      if (!stroke.wantsRestingSamples) return;
+      final previous = _lastRestingRawSampleTimestamp;
+      if (previous != null && timestamp - previous < _restingRawSampleInterval) {
+        return;
+      }
+      _lastRestingRawSampleTimestamp = timestamp;
+    }
 
     _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
     previousPosition = position;
@@ -10406,6 +10758,19 @@ class EditorState extends State<Editor>
 
   @override
   Widget build(BuildContext context) {
+    PerfProbe.hit('editor.build');
+    if (!PerfProbe.enabled) return _buildImpl(context);
+    final buildWatch = Stopwatch()..start();
+    final result = _buildImpl(context);
+    buildWatch.stop();
+    final buildMs = buildWatch.elapsedMicroseconds / 1000.0;
+    if (buildMs > 40) {
+      PerfProbe.mark('editor.buildSlow ms=${buildMs.toStringAsFixed(1)}');
+    }
+    return result;
+  }
+
+  Widget _buildImpl(BuildContext context) {
     ColorScheme.of(context);
     final isToolbarVertical =
         stows.editorToolbarAlignment.value == AxisDirection.left ||
@@ -11537,9 +11902,10 @@ class EditorState extends State<Editor>
     );
   }
 
-  void _wirePageImageCallbacks(int pageIndex) {
-    if (pageIndex < 0 || pageIndex >= coreInfo.pages.length) return;
-    final page = coreInfo.pages[pageIndex];
+  void _wirePageImageCallbacks(int pageIndex, {EditorCoreInfo? infoOverride}) {
+    final info = infoOverride ?? coreInfo;
+    if (pageIndex < 0 || pageIndex >= info.pages.length) return;
+    final page = info.pages[pageIndex];
     page.backgroundImage?.onMoveImage = onMoveImage;
     page.backgroundImage?.onDeleteImage = onDeleteImage;
     page.backgroundImage?.onMiscChange = () {
@@ -11557,22 +11923,63 @@ class EditorState extends State<Editor>
   }
 
   /// Idle BSON hydrate for upcoming shells. Must not run inside [pageBuilder].
+  ///
+  /// Returns true only when this call made progress (page ready now, or a
+  /// chunked parse was started). An already-in-flight or deferred page
+  /// returns false so the idle sweep neither spins rebuilds while waiting nor
+  /// counts someone else's parse as fresh work.
   bool _tryIdleHydratePage(int index) {
     if (!coreInfo.isLazyShellPage(index)) return false;
-    final accepted = coreInfo.tryHydratePageSmart(
+    // Gentle open: while the viewport is settled right after open, stagger
+    // parse starts so the first frames keep the UI isolate (each completion
+    // rebuilds the editor and first-builds a dense page canvas). Motion lifts
+    // the pacing immediately — a scroll needs its band parsed now.
+    final grace = _openGraceUntil;
+    if (grace != null &&
+        DateTime.now().isBefore(grace) &&
+        !PageRasterCacheManager.viewportMoving) {
+      final lastDone = _lastHydrateCompletionAt;
+      if (lastDone != null &&
+          DateTime.now().difference(lastDone) <
+              const Duration(milliseconds: 90)) {
+        return false;
+      }
+      if (coreInfo.hydratingPageCount >= 1) return false;
+    }
+    final outcome = coreInfo.hydratePageSmart(
       index,
       onAsyncHydrated: (page) => _finishAsyncHydrate(index, page),
+      // Fast pans must not compete with parse slices. Pages the viewport is
+      // about to show (the raster keep-band, ≈ visible ±1) keep converging
+      // at slice speed so arrivals land on painted content; distant
+      // background warmth stretches its yields until motion settles.
+      throttleWhile: () {
+        if (!PageRasterCacheManager.viewportMoving ||
+            PageRasterCacheManager.viewportSlowMotion) {
+          return false;
+        }
+        final bandStart = _lastPageRasterBandStart;
+        final bandEnd = _lastPageRasterBandEnd;
+        if (bandStart == null || bandEnd == null) return true;
+        return index < bandStart - 1 || index > bandEnd + 1;
+      },
     );
-    if (accepted && !coreInfo.isLazyShellPage(index)) {
-      // Synchronous path (small slice) completed: wire like before.
-      _wirePageImageCallbacks(index);
-      listenToQuillChanges(coreInfo.pages[index].quill, index);
-      _primeVisibleCanvasAssets(coreInfo, index, index, index);
-      return true;
+    switch (outcome) {
+      case PageHydrateOutcome.hydratedSync:
+        // Synchronous path (small slice) completed: wire like before.
+        _wirePageImageCallbacks(index);
+        listenToQuillChanges(coreInfo.pages[index].quill, index);
+        _primeVisibleCanvasAssets(coreInfo, index, index, index);
+        return true;
+      case PageHydrateOutcome.startedAsync:
+        // Chunked hydrate started: completion wires via the callback. Counts
+        // as progress so the idle loop can start the next shell.
+        return true;
+      case PageHydrateOutcome.alreadyLoaded:
+      case PageHydrateOutcome.alreadyInFlight:
+      case PageHydrateOutcome.deferred:
+        return false;
     }
-    // Chunked hydrate started (or already in flight): completion wires via
-    // callback; count as progress so the idle loop keeps sweeping.
-    return accepted;
   }
 
   /// Wires a chunked-hydrated page into the live editor. Identity-checked:
@@ -11581,6 +11988,7 @@ class EditorState extends State<Editor>
     if (!mounted) return;
     if (index < 0 || index >= coreInfo.pages.length) return;
     if (!identical(coreInfo.pages[index], page)) return;
+    _lastHydrateCompletionAt = DateTime.now();
     _wirePageImageCallbacks(index);
     listenToQuillChanges(page.quill, index);
     _primeVisibleCanvasAssets(coreInfo, index, index, index);
@@ -11589,10 +11997,20 @@ class EditorState extends State<Editor>
     if (!_hasPdfLinks && page.backgroundImage is PdfEditorImage) {
       _checkForPdfLinks();
     }
-    setState(() {});
+    // Waking the whole editor for a page far outside the viewport costs a
+    // full rebuild (and a first canvas build for dense pages) for pixels
+    // nobody can see; the canvas builds the page when it scrolls in.
+    final bandStart = _lastPageRasterBandStart;
+    final bandEnd = _lastPageRasterBandEnd;
+    final nearViewport =
+        bandStart == null ||
+        bandEnd == null ||
+        (index >= bandStart - 1 && index <= bandEnd + 1);
+    if (nearViewport) setState(() {});
   }
 
   Widget pageBuilder(BuildContext context, int pageIndex) {
+    PerfProbe.hit('page.builder');
     _wirePageImageCallbacks(pageIndex);
     final page = coreInfo.pages[pageIndex];
 
@@ -13762,6 +14180,11 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
   int _nextId = 1;
   bool _readyRefreshScheduled = false;
 
+  /// Slot id whose chrome already left the placeholder. The ready refresh is
+  /// one-shot per activation: its post-frame `setState` must not re-arm
+  /// itself from build, or the entire editor subtree rebuilds every frame.
+  int? _chromeReadySlotId;
+
   /// Expected note IDs for tabs restored from the persisted session, keyed
   /// by slot id. Used to confirm identity on activation (adopting the loaded
   /// ID) and to scope the missing-file prune to restored tabs only.
@@ -14053,16 +14476,29 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
 
   void _scheduleReadyRefresh() {
     if (_readyRefreshScheduled || _tabs.isEmpty) return;
+    final activeId = _activeIndex >= 0 && _activeIndex < _tabs.length
+        ? _tabs[_activeIndex].id
+        : null;
+    // One-shot per activation. This is called from build, and its post-frame
+    // callback setStates: without the guard the callback re-armed on the
+    // next build and the whole editor subtree rebuilt once per frame,
+    // forever (idle CPU + forced page repaints during pans).
+    if (activeId == null || _chromeReadySlotId == activeId) return;
     _readyRefreshScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyRefreshScheduled = false;
       if (!mounted) return;
+      final id = _activeIndex >= 0 && _activeIndex < _tabs.length
+          ? _tabs[_activeIndex].id
+          : null;
+      if (id == null || _chromeReadySlotId == id) return;
       // The Editor mounts asynchronously; ensures AppBar/toolbar
       // leave the placeholder as soon as the active state exists.
       if (_activeState == null) {
         _scheduleReadyRefresh();
         return;
       }
+      _chromeReadySlotId = id;
       _bumpChrome();
       unawaited(_confirmActiveNoteId());
     });

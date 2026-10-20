@@ -24,6 +24,7 @@ import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/routes.dart';
 import 'package:saber/i18n/strings.g.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/pdf_native_texture.dart';
 import 'package:saber/services/thumbnail_cache.dart';
@@ -494,6 +495,7 @@ class _PreviewCardState extends State<PreviewCard> {
     }
 
     void openAction() async {
+      PerfProbe.mark('home.tapOpen');
       // Warm the vault decrypt for body (+ conventional first PDF asset)
       // while navigation + editor build runs (~0.8s): shared prefetch
       // futures the opener consumes with zero duplication. No-ops off-vault.

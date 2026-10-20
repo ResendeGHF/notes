@@ -25,6 +25,7 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/pages/editor/editor.dart';
+import 'package:saber/services/perf_probe.dart';
 import 'package:vector_math/vector_math_64.dart';
 
 class CanvasGestureDetector extends StatefulWidget {
@@ -488,10 +489,14 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   void onTransformChanged() {
     if (_isClamping) return;
 
-    // Synchronous fail-safe: hydrate any on-screen lazy shell right here, in
-    // the transform listener, before the frame builds. The idle hydrate loop
-    // lags a frame behind, so without this a fast pan could render a shell
-    // placeholder for one frame. Cheap: binary search over page offsets.
+    // Async fail-safe: kick hydration for every on-screen lazy shell (plus
+    // one page beyond each edge, so an entering page is already parsing
+    // before its pixels scroll in). This listener must NEVER parse page
+    // bytes synchronously — a single dense page parse blocks the frame for
+    // 10-25ms, which is exactly the freeze felt when transitioning pages.
+    // The lazy loader time-slices the parse and defers under load; the
+    // hydrated page rebuilds through its completion callback. Cost here is
+    // a handful of page-state lookups per transform frame.
     if (Pen.currentStroke == null &&
         !(Eraser.isDragging ?? false) &&
         _pageVerticalOffsets.isNotEmpty &&
@@ -512,31 +517,27 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
           scrollY: contentBottom,
           pageOffsets: _pageVerticalOffsets,
         );
-        final firstClamped =
-            first.clamp(0, widget.pages.length - 1);
-        final lastClamped =
-            last.clamp(0, widget.pages.length - 1);
-            
+        final hydrateStart = (first - 1).clamp(0, widget.pages.length - 1);
+        final hydrateEnd = (last + 1).clamp(0, widget.pages.length - 1);
+
         var hydratedSync = false;
-        for (var i = firstClamped; i <= lastClamped; i++) {
+        for (var i = hydrateStart; i <= hydrateEnd; i++) {
           if (widget.pages[i].isLazyShell &&
               widget.tryHydratePage != null) {
             widget.tryHydratePage!(i);
-            // A synchronous replacement still shows the placeholder until
-            // the page list rebuilds, so request one below.
+            // A synchronous replacement (tiny slice) still shows the
+            // placeholder until the page list rebuilds; request one below.
             if (!widget.pages[i].isLazyShell) hydratedSync = true;
           }
         }
-        
+
         // Prebuild one page beyond each viewport edge so the entering page
         // widget (and its first paint) exists before its pixels scroll in.
-        final liveStart = firstClamped;
-        final liveEnd = lastClamped;
         if (hydratedSync ||
-            _liveRangeStart != liveStart ||
-            _liveRangeEnd != liveEnd) {
-          _liveRangeStart = liveStart;
-          _liveRangeEnd = liveEnd;
+            _liveRangeStart != hydrateStart ||
+            _liveRangeEnd != hydrateEnd) {
+          _liveRangeStart = hydrateStart;
+          _liveRangeEnd = hydrateEnd;
           if (mounted) setState(() {});
         }
       }
@@ -707,6 +708,7 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   Widget build(BuildContext context) {
+    PerfProbe.hit('gdet.build');
     final Size screenSize = MediaQuery.sizeOf(context);
 
     return Stack(
@@ -811,6 +813,24 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                     PageRasterCacheManager.setViewportScale(
                       widget._transformationController.value.approxScale,
                     );
+                    // Exact on-screen content rect from the live transform.
+                    // [viewport] is bucket-floored and rebuild-throttled, so
+                    // it can include a sliver of the page above (or miss the
+                    // bottom of the page below); the open-instant band clamp
+                    // needs the pages that are really on screen.
+                    double? liveContentTop;
+                    double? liveContentBottom;
+                    if (containerBounds.maxHeight > 0) {
+                      final transform =
+                          widget._transformationController.value;
+                      final scale = transform.approxScale;
+                      if (scale > 0) {
+                        final translateY = transform.getTranslation().y;
+                        liveContentTop = -translateY / scale;
+                        liveContentBottom =
+                            (-translateY + containerBounds.maxHeight) / scale;
+                      }
+                    }
                     return _PagesBuilder(
                       pages: widget.pages,
                       pageBuilder: widget.pageBuilder,
@@ -824,6 +844,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
                       onPrefetchNearbyPages: widget.onPrefetchNearbyPages,
                       forcedStartPage: _liveRangeStart,
                       forcedEndPage: _liveRangeEnd,
+                      liveContentTop: liveContentTop,
+                      liveContentBottom: liveContentBottom,
                     );
                   },
                 );
@@ -862,10 +884,34 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
 
   @override
   void dispose() {
+    // Compute the page range the saved transform actually shows (the same
+    // math [onTransformChanged] uses, without the prebuild margins): the
+    // loader parses these pages up front so the first painted frame after a
+    // reopen is real content, not a blank lazy-shell placeholder.
+    final transform = widget._transformationController.value;
+    final scale = transform.approxScale;
+    final offsets = _pageVerticalOffsets;
+    int? landingStart;
+    int? landingEnd;
+    if (scale > 0 && offsets.isNotEmpty && containerBounds.maxHeight > 0) {
+      final translateY = transform.getTranslation().y;
+      final contentTop = -translateY / scale;
+      final contentBottom = (-translateY + containerBounds.maxHeight) / scale;
+      landingStart = CanvasGestureDetector.getPageIndex(
+        scrollY: contentTop,
+        pageOffsets: offsets,
+      );
+      landingEnd = CanvasGestureDetector.getPageIndex(
+        scrollY: contentBottom,
+        pageOffsets: offsets,
+      );
+    }
     // ignore: invalid_use_of_visible_for_testing_member
     CanvasTransformCache.add(
       widget.filePath,
-      widget._transformationController.value,
+      transform,
+      pageIndex: landingStart,
+      pageIndexEnd: landingEnd,
     );
     widget._transformationController.removeListener(onTransformChanged);
     widget._transformationController.dispose();
@@ -903,6 +949,8 @@ class _PagesBuilder extends StatefulWidget {
     this.onPrefetchNearbyPages,
     this.forcedStartPage,
     this.forcedEndPage,
+    this.liveContentTop,
+    this.liveContentBottom,
   });
 
   final List<EditorPage> pages;
@@ -924,11 +972,17 @@ class _PagesBuilder extends StatefulWidget {
   final int? forcedStartPage;
   final int? forcedEndPage;
 
+  /// Exact content-space viewport rect from the live transform (unlike
+  /// [boundingBox], which is bucket-floored). Only used by the open-instant
+  /// band clamp.
+  final double? liveContentTop;
+  final double? liveContentBottom;
+
   @override
   State<_PagesBuilder> createState() => _PagesBuilderState();
 }
 
-class _PagesBuilderState extends State<_PagesBuilder> {
+class _PagesBuilderState extends State<_PagesBuilder> with WidgetsBindingObserver {
   static const _renderCacheExtent = 500.0;
   // PDF notes prebuild ~one page ahead. Two mechanical reasons this must
   // exceed one page:
@@ -944,13 +998,23 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   // logic inside the PDF page renderer.
   static const _pdfRenderCacheExtent = 1000.0;
   static const _minHydrateRadius = 1;
-  static const _maxShellsPerIdleFrame = 1;
+  // Max new shell parses started per warm-up pass while the viewport is
+  // settled. The loader's concurrency cap keeps the total bounded.
+  static const _maxShellsPerWarmPass = 3;
   // Parse-ahead horizon for the aggressive warmer: scrolls land inside it.
-  static const _warmHydrateRadius = 2;
-  // Far-horizon pacing: one slice per tick, no vsync storm while waiting.
-  // Fast enough that a freshly opened note converges in about a second;
-  // each tick still yields, so opening stays interactive.
-  static const _trickleIntervalMs = 500;
+  static const _warmHydrateRadius = 5;
+  // Lead pages hydrated beyond the warm band in the direction of travel
+  // while the viewport is moving, so arrivals land on painted content.
+  static const _motionLeadPages = 6;
+
+  // Background warm-up pacing. The pump is Timer-driven so hydration keeps
+  // converging while the app is idle; frame-chained sweeps only advanced
+  // while frames were being produced, so pages ahead were still blank
+  // shells when a later fling or jump reached them. During the open grace
+  // the cadence doubles: the first fling comes within the first moment and
+  // must land on warmed pages.
+  static const _warmupPumpPeriod = Duration(milliseconds: 16);
+  static const _warmupPumpGracePeriod = Duration(milliseconds: 8);
 
   final _pageOffsets = <double>[];
   final _pageHeights = <double>[];
@@ -961,20 +1025,21 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   var _totalHeight = 0.0;
   var _idleWorkScheduled = false;
   var _hasPdfBackedPages = false;
-  var _viewportMovingBlockedFrames = 0;
-  // Persistent whole-note warmer: the aggressive loop chains frame callbacks
-  // while making progress (nearest-first), then sleeps; any build kick
-  // (scroll/edit/theme) wakes it. A slow trickle covers pages beyond the
-  // aggressive horizon so waiting really warms everything over time.
-  var _warming = false;
+  // Persistent whole-note warmer. Build kicks run an immediate pass so
+  // scrolls warm in realtime; the pump guarantees progress when the app is
+  // idle and no frames are being produced.
+  Timer? _warmupPumpTimer;
   var _lastVisibleStart = 0;
   var _lastVisibleEnd = 0;
-  Timer? _trickleTimer;
+  var _lastPassVisibleStart = -1;
+  var _travelDirection = 0;
+  final _probeShellPages = <int>{};
 
   @override
   void dispose() {
-    _trickleTimer?.cancel();
-    _trickleTimer = null;
+    WidgetsBinding.instance.removeObserver(this);
+    _warmupPumpTimer?.cancel();
+    _warmupPumpTimer = null;
     super.dispose();
   }
 
@@ -1002,7 +1067,17 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _recalculateLayout();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The pump sleeps while backgrounded; restart it on resume — there may
+    // be no other rebuild (scroll/edit/theme) to kick it.
+    if (state == AppLifecycleState.resumed) {
+      _scheduleIdlePageWork(_lastVisibleStart, _lastVisibleEnd);
+    }
   }
 
   void _recalculateLayout() {
@@ -1053,130 +1128,113 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     final child = page.isLazyShell
         ? widget.placeholderPageBuilder(context, pageIndex)
         : widget.pageBuilder(context, pageIndex);
+    if (PerfProbe.enabled) {
+      if (page.isLazyShell) {
+        if (_probeShellPages.add(pageIndex)) {
+          PerfProbe.mark('shell.enter i=$pageIndex');
+        }
+      } else if (_probeShellPages.remove(pageIndex)) {
+        PerfProbe.mark('shell.exit i=$pageIndex');
+      }
+    }
     return RepaintBoundary(child: child);
   }
 
   void _scheduleIdlePageWork(int startIndex, int endIndex) {
     if (widget.pages.isEmpty) return;
+    PerfProbe.hit('idle.sched');
     _lastVisibleStart = startIndex.clamp(0, widget.pages.length - 1);
     _lastVisibleEnd = endIndex.clamp(0, widget.pages.length - 1);
-    final deferUntil = PageRasterCacheManager.deferBakesUntil;
-    if (deferUntil != null && DateTime.now().isBefore(deferUntil)) {
-      final wait = deferUntil.difference(DateTime.now()) +
-          const Duration(milliseconds: 40);
-      _trickleTimer?.cancel();
-      _trickleTimer = Timer(wait, () {
-        _trickleTimer = null;
-        if (!mounted) return;
-        _scheduleIdlePageWork(_lastVisibleStart, _lastVisibleEnd);
-      });
-      return;
-    }
-    _kickTrickle();
-    if (_warming || _idleWorkScheduled) return;
-    _warming = true;
+    _ensureWarmupPump();
+    if (_idleWorkScheduled) return;
     _idleWorkScheduled = true;
     SchedulerBinding.instance.scheduleFrameCallback((_) {
       _idleWorkScheduled = false;
-      if (!mounted) {
-        _warming = false;
-        return;
-      }
+      if (!mounted) return;
       // Use the latest visible range, not the one captured at kick time:
       // flings move several pages between kick and callback.
-      _runIdlePageWork(_lastVisibleStart, _lastVisibleEnd);
+      _runWarmupPass();
     });
   }
 
-  /// Slow far-horizon sweep (one slice per tick): warms pages beyond the
-  /// aggressive band so waiting on any page eventually warms the whole note.
-  /// Progress-tracked; stops when done. Skipped while drawing/moving/hidden.
-  void _kickTrickle() {
-    if (_trickleTimer != null || !mounted || widget.pages.isEmpty) return;
-    if (_warming) return;
-    _trickleTimer = Timer(const Duration(milliseconds: _trickleIntervalMs), () {
-      _trickleTimer = null;
-      if (!mounted || _warming) return;
-      _runTrickle();
-    });
+  /// Frame-independent warm-up pump: a Timer-driven pass while lazy shells
+  /// remain. The old frame-chained sweep could only advance while frames
+  /// were being produced — an idle app (no scroll, no animation) stopped
+  /// warming entirely, so a page reached later by a fling or jump was still
+  /// a blank shell and had to parse on arrival. The pump keeps hydration
+  /// converging in the background; build kicks still run an immediate pass
+  /// so scrolls warm in realtime.
+  void _ensureWarmupPump() {
+    if (_warmupPumpTimer != null || !mounted || widget.pages.isEmpty) return;
+    // Open grace: the viewport is where the user will start panning within
+    // the first moment, so the band must be warm before they touch it. Run
+    // the pump at ~2x cadence while the grace lasts (each pass is bounded by
+    // the editor's per-frame warm budget, so frames stay inside ~one frame);
+    // once the grace ends or the user takes over, the normal idle cadence
+    // resumes. Without this the first fling entered pages the 48 ms pump
+    // period had not reached yet and paid the cold-page geometry build.
+    final grace = PageRasterCacheManager.openGraceUntil;
+    final fastGrace =
+        grace != null &&
+        DateTime.now().isBefore(grace) &&
+        !PageRasterCacheManager.userInputRecent;
+    _warmupPumpTimer = Timer(
+      fastGrace ? _warmupPumpGracePeriod : _warmupPumpPeriod,
+      () {
+        _warmupPumpTimer = null;
+        if (!mounted) return;
+        if (_runWarmupPass()) _ensureWarmupPump();
+      },
+    );
   }
 
-  void _runTrickle() {
-    if (!mounted || _warming) return;
-    if (Pen.currentStroke != null || Eraser.isDragging) return;
-    // Fast flings pause the far-horizon sweep (paint fallback keeps those
-    // pages visible); slow pans and settled frames keep converging.
-    if (PageRasterCacheManager.viewportMoving &&
-        !PageRasterCacheManager.viewportSlowMotion) {
-      _kickTrickle();
-      return;
+  bool _hasLazyShells() {
+    for (final page in widget.pages) {
+      if (page.isLazyShell) return true;
     }
-    if (SchedulerBinding.instance.lifecycleState != AppLifecycleState.resumed) {
-      return;
-    }
-    final pageCount = widget.pages.length;
-    if (pageCount == 0) return;
-    final center = ((_lastVisibleStart + _lastVisibleEnd) / 2)
-        .round()
-        .clamp(0, pageCount - 1);
-    var hydrated = 0;
-    final horizon = _warmHydrateRadius + 1;
-    final lo = (center - horizon).clamp(0, pageCount - 1);
-    final hi = (center + horizon).clamp(0, pageCount - 1);
-    if (widget.tryHydratePage != null) {
-      // Nearest shells just outside the warm band. Scanning the whole note
-      // and parsing it in the background is what kept the UI busy after open.
-      var nearest = -1;
-      var bestDist = horizon + 1;
-      for (var i = lo; i <= hi; i++) {
-        if (!widget.pages[i].isLazyShell) continue;
-        final dist = (i - center).abs();
-        if (dist < bestDist) {
-          bestDist = dist;
-          nearest = i;
-        }
-      }
-      if (nearest >= 0 && widget.tryHydratePage!(nearest)) {
-        hydrated++;
-      }
-    }
-    // Only the near horizon. A whole-note sweep records tiles for every
-    // hydrated page and keeps the UI busy after open.
-    final prewarmed = widget.onPrefetchNearbyPages?.call(lo, hi) ?? 0;
-    if (hydrated > 0 && mounted) setState(() {});
-    if (hydrated > 0 || prewarmed > 0) {
-      _kickTrickle();
-    }
-    // Else fully warm: sleep until the next build kick.
+    return false;
   }
 
-  void _runIdlePageWork(int visibleStart, int visibleEnd) {
+  /// One warm-up pass: maintain the raster keep-band, prewarm tiles/meshes
+  /// near the viewport, and start bounded lazy-page parses.
+  ///
+  /// Hydration order is nearest-first from the viewport center across the
+  /// whole note when settled (so pages are materialized before a fling
+  /// reaches them); while moving it stays in the warm band plus a lead of
+  /// [_motionLeadPages] pages in the travel direction, so arrivals land on
+  /// painted content without queuing parses for pages the pan will never
+  /// reach. Parse slices are bounded (a couple of ms, capped at a small
+  /// number of concurrent parses), so background warmth never becomes a
+  /// freeze.
+  ///
+  /// Returns true when lazy shells remain and another pass should run.
+  bool _runWarmupPass() {
+    PerfProbe.hit('warm.pass');
     if (Pen.currentStroke != null || Eraser.isDragging) {
-      // Drawing has priority; the loop sleeps and the next build kick
-      // (pen-up always rebuilds) resumes it.
-      _warming = false;
-      _trickleTimer?.cancel();
-      _trickleTimer = null;
-      return;
+      // Drawing has priority; the pump retries on its next tick.
+      return true;
     }
-    // Hydrate near shells even mid-motion (at a reduced pace) so a live pan
-    // rarely exposes an empty page. No hard 6-frame gate: the sync hydrate in
-    // the transform listener already guarantees on-screen shells, this loop
-    // just keeps a wider band ready. Safety net: if the moving flag ever gets
-    // stuck (programmatic jump without settle), force-clear it so tiles and
-    // bakes resume instead of staying blit-only forever.
-    final moving = PageRasterCacheManager.viewportMoving;
-    if (moving) {
-      _viewportMovingBlockedFrames++;
-      if (_viewportMovingBlockedFrames >= 6) {
-        PageRasterCacheManager.endProgrammaticViewportJump();
-        _viewportMovingBlockedFrames = 0;
+    final lifecycle = SchedulerBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) {
+      // Backgrounded: stop burning CPU; the observer restarts the pump on
+      // resume (there may be no other rebuild to kick it).
+      return false;
+    }
+    final pageCount = widget.pages.length;
+    if (pageCount == 0) return false;
+    final visibleStart = _lastVisibleStart.clamp(0, pageCount - 1);
+    final visibleEnd = _lastVisibleEnd.clamp(0, pageCount - 1);
+
+    // Travel direction for lead-biased hydration while scrolling.
+    if (visibleStart != _lastPassVisibleStart) {
+      if (PageRasterCacheManager.viewportMoving &&
+          _lastPassVisibleStart >= 0) {
+        _travelDirection = visibleStart > _lastPassVisibleStart ? 1 : -1;
       }
-    } else {
-      _viewportMovingBlockedFrames = 0;
+      _lastPassVisibleStart = visibleStart;
     }
 
-    final pageCount = widget.pages.length;
+    final moving = PageRasterCacheManager.viewportMoving;
     final visibleCount = (visibleEnd - visibleStart + 1).clamp(1, 64);
     // Raster keep-set stays tight (GPU bitmaps): ±N where N ≈ number of
     // visible pages (min 2).
@@ -1188,44 +1246,59 @@ class _PagesBuilderState extends State<_PagesBuilder> {
     final warmStart =
         (visibleStart - _warmHydrateRadius).clamp(0, pageCount - 1);
     final warmEnd = (visibleEnd + _warmHydrateRadius).clamp(0, pageCount - 1);
-    final prewarmed =
+    // Prewarm runs even during the post-open bake-defer window: recording a
+    // page's tile pictures up front (in budgeted slices) is far cheaper than
+    // re-recording the same dense strokes as fallback vectors on every paint
+    // until the tiles exist — measured at 55-133 ms for the first paint of a
+    // dense page whose tiles were skipped. Raster bakes (toImage) stay
+    // deferred by PageRasterCacheManager.
+    final warmRecorded =
         widget.onPrefetchNearbyPages?.call(warmStart, warmEnd) ?? 0;
     final center = ((visibleStart + visibleEnd) / 2).round().clamp(
       0,
       pageCount - 1,
     );
 
-    var hydrated = 0;
+    var started = 0;
+    var hydratedSync = 0;
     if (widget.tryHydratePage != null) {
-      // Nearest-first: walk by distance from viewport center. While moving,
-      // hydrate at most one shell per frame so gesture frames stay bounded.
-      final maxPerCall = moving ? 1 : _maxShellsPerIdleFrame;
-      final maxDist = max(center - warmStart, warmEnd - center);
+      var hydrateStart = moving ? warmStart : 0;
+      var hydrateEnd = moving ? warmEnd : pageCount - 1;
+      if (moving && _travelDirection > 0) {
+        hydrateEnd = min(pageCount - 1, hydrateEnd + _motionLeadPages);
+      } else if (moving && _travelDirection < 0) {
+        hydrateStart = max(0, hydrateStart - _motionLeadPages);
+      }
+      // Slow reading pans may start two parses per pass (parses are
+      // unthrottled there); fast flings start one so gesture frames keep
+      // the lion's share of the UI isolate.
+      final maxPerCall = !moving
+          ? _maxShellsPerWarmPass
+          : (PageRasterCacheManager.viewportSlowMotion ? 2 : 1);
+      final maxDist = max(center - hydrateStart, hydrateEnd - center);
+      hydrate:
       for (var dist = 0; dist <= maxDist; dist++) {
         for (final i in <int>{center - dist, if (dist > 0) center + dist}) {
-          if (i < warmStart || i > warmEnd) continue;
+          if (i < hydrateStart || i > hydrateEnd) continue;
           if (!widget.pages[i].isLazyShell) continue;
           if (widget.tryHydratePage!(i)) {
-            hydrated++;
-            if (hydrated >= maxPerCall) {
-              if (mounted) setState(() {});
-              _scheduleIdlePageWork(visibleStart, visibleEnd);
-              return;
+            if (widget.pages[i].isLazyShell) {
+              started++;
+            } else {
+              hydratedSync++;
             }
+            if (started + hydratedSync >= maxPerCall) break hydrate;
           }
         }
       }
     }
-    if (hydrated > 0 && mounted) setState(() {});
-    // Persistent loop: chain while making progress anywhere in the horizon;
-    // sleep when fully warm (any build kick wakes us). The trickle covers
-    // pages beyond the horizon.
-    if (mounted && (hydrated > 0 || prewarmed > 0)) {
-      _scheduleIdlePageWork(visibleStart, visibleEnd);
-    } else {
-      _warming = false;
-      _kickTrickle();
-    }
+    if (hydratedSync > 0 && mounted) setState(() {});
+    if (!mounted) return false;
+    // Keep the pump alive while the band still has tiles to record, not only
+    // while shells remain: otherwise the pump stopped ~1.3 s after open (all
+    // pages parsed) and a fling at 2 s entered pages the 48 ms cadence had
+    // not reached yet. A pass that records nothing means the band is warm.
+    return _hasLazyShells() || warmRecorded > 0;
   }
 
   int _findFirstVisiblePageIndex(double viewportTop) {
@@ -1258,6 +1331,7 @@ class _PagesBuilderState extends State<_PagesBuilder> {
   @override
   Widget build(BuildContext context) {
     if (widget.pages.isEmpty) return const SizedBox();
+    PerfProbe.hit('pages.build');
 
     final visibleWidgets = <Widget>[];
 
@@ -1276,23 +1350,85 @@ class _PagesBuilderState extends State<_PagesBuilder> {
       endIndex = i;
     }
 
-    // Union with the live transform range: the render zone above is derived
-    // from a bucket-throttled viewport, so without this an entering page
-    // would stay unbuilt (dark gap) until the next throttle window, even
-    // though its edge is already on screen.
-    final forcedStart = widget.forcedStartPage;
-    final forcedEnd = widget.forcedEndPage;
-    if (forcedStart != null &&
-        forcedEnd != null &&
-        widget.pages.isNotEmpty) {
-      startIndex = min(
-        startIndex,
-        forcedStart.clamp(0, widget.pages.length - 1),
+    // Open instant: keep only the pages actually on screen mounted for the
+    // short window right after a note opens. A cold dense page's first paint
+    // records the whole page (~60-130 ms), so mounting the ±1 look-ahead band
+    // on top of the landing page turned the open into several heavy frames in
+    // a row. The warm-up pump records the neighbors' tiles in budgeted slices
+    // meanwhile, so they blit — not re-record — when they mount (the band
+    // returns once the grace expires or their pixels enter the viewport).
+    //
+    // The clamp only describes the landing placement, which is programmatic.
+    // As soon as the user drives the viewport (first pointer down) the normal
+    // look-ahead band takes over again: panning needs the pages on both sides
+    // mounted ahead of the finger, and each cold first paint is now bounded
+    // to ~one frame by the paint budgets.
+    final graceStamp = PageRasterCacheManager.openGraceUntil;
+    final openGrace =
+        graceStamp != null &&
+        DateTime.now().isBefore(graceStamp) &&
+        !PageRasterCacheManager.userInputRecent;
+    var clampedStart = -1;
+    var clampedEnd = -1;
+    final liveTop = widget.liveContentTop;
+    final liveBottom = widget.liveContentBottom;
+    if (openGrace &&
+        !widget.isInfinite &&
+        // PDF pages start their texture chain at widget mount; keep their
+        // look-ahead band mounted (they are not the dense-stroke case this
+        // clamp targets).
+        !_hasPdfBackedPages &&
+        liveTop != null &&
+        liveBottom != null) {
+      // Pages intersecting the exact on-screen rect (skip the page above
+      // when the viewport top sits in the inter-page gap, and pages that
+      // start at/below the viewport bottom). The landing placement lands a
+      // frame or two after the first build (programmatic jump), so this is
+      // recomputed from the live transform on every build: pages mount as
+      // their pixels enter the viewport, never one whole look-ahead band
+      // early (whose cold first paints were the open hitch).
+      var visStart = _findFirstVisiblePageIndex(liveTop);
+      while (visStart < widget.pages.length - 1 &&
+          _pageOffsets[visStart] + _pageHeights[visStart] <= liveTop) {
+        visStart++;
+      }
+      var visEnd = visStart;
+      for (int i = visStart; i < widget.pages.length; i++) {
+        if (_pageOffsets[i] >= liveBottom) break;
+        visEnd = i;
+      }
+      clampedStart = visStart;
+      clampedEnd = visEnd;
+      PerfProbe.hit('band.clamp');
+      PerfProbe.markOnce(
+        'band.clamp.$graceStamp.$visStart-$visEnd',
+        'band.clamp pages=$visStart..$visEnd '
+            'top=${liveTop.toStringAsFixed(0)} '
+            'bottom=${liveBottom.toStringAsFixed(0)}',
       );
-      endIndex = max(
-        endIndex,
-        forcedEnd.clamp(0, widget.pages.length - 1),
-      );
+    }
+    if (clampedStart >= 0) {
+      startIndex = clampedStart;
+      endIndex = clampedEnd < clampedStart ? clampedStart : clampedEnd;
+    } else {
+      // Union with the live transform range: the render zone above is derived
+      // from a bucket-throttled viewport, so without this an entering page
+      // would stay unbuilt (dark gap) until the next throttle window, even
+      // though its edge is already on screen.
+      final forcedStart = widget.forcedStartPage;
+      final forcedEnd = widget.forcedEndPage;
+      if (forcedStart != null &&
+          forcedEnd != null &&
+          widget.pages.isNotEmpty) {
+        startIndex = min(
+          startIndex,
+          forcedStart.clamp(0, widget.pages.length - 1),
+        );
+        endIndex = max(
+          endIndex,
+          forcedEnd.clamp(0, widget.pages.length - 1),
+        );
+      }
     }
 
     // Build order follows distance to the visible middle (not page

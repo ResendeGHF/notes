@@ -277,71 +277,53 @@ class CanvasPainter extends CustomPainter {
         currentStroke == null &&
         identical(strokes, currentSelection!.strokes);
 
-    // Activates QuadTree/Spatial culling when there are more than 250 strokes.
-    // Extremely vital for maintaining 120fps on large documents.
     const int linearScanThreshold = 250;
     final hasSpatialIndex = quadTree != null || spatialGrid != null;
+
     if (previewingSelection) {
       visibleStrokes = strokes;
     } else if (hasSpatialIndex && strokes.length > linearScanThreshold) {
       _reusableQueryBuffer.clear();
+      
+      // Get all bounding-box overlaps from the QuadTree (Fast but unordered)
+      final List<Stroke> foundStrokes;
       if (quadTree != null) {
-        final found = quadTree!.query(cullingRect);
-        for (final s in found) {
-          _reusableQueryBuffer.add(s);
-        }
+        foundStrokes = quadTree!.query(cullingRect);
       } else {
+        foundStrokes = [];
         final indices = spatialGrid!.query(cullingRect);
         for (final i in indices) {
           if (i >= 0 && i < strokes.length) {
-            _reusableQueryBuffer.add(strokes[i]);
+            foundStrokes.add(strokes[i]);
+          }
+        }
+      }
+
+      // The QuadTree queries strokes blindly across all layers. To prevent layers 
+      // from vanishing and to enforce Z-Order, we tag the found strokes, then 
+      // do a single sequential pass over the 'strokes' array (which is already sorted) 
+      // capturing only the ones the QuadTree blessed. O(N) absolute.
+      if (foundStrokes.isNotEmpty) {
+        final allowedSet = foundStrokes.toSet();
+        for (final s in strokes) {
+          if (allowedSet.contains(s)) {
+            _reusableQueryBuffer.add(s);
+          } else if (!s.bounds.isFinite &&
+              (s.toolId == ToolId.highlighter ||
+               s.toolId == ToolId.advancedPen ||
+               s.toolId == ToolId.pencil ||
+               s.toolId == ToolId.calligraphyPen ||
+               s is ShapeStroke)) {
+            // Unbounded or globally recent strokes must always render.
+            _reusableQueryBuffer.add(s);
           }
         }
       }
       visibleStrokes = _reusableQueryBuffer;
-
-      if (strokes.isNotEmpty) {
-        final int totalStrokes = strokes.length;
-        final int checkRange = math.min(20, totalStrokes);
-        // Reuse the static set instead of `{...visibleStrokes}` spread per
-        // frame (one O(V) allocation eliminated on every dense-page paint).
-        _reusableStrokeSet.clear();
-        _reusableStrokeSet.addAll(visibleStrokes);
-        for (int i = 0; i < checkRange; i++) {
-          final stroke = strokes[totalStrokes - 1 - i];
-          final bounds = stroke.bounds;
-          final boundsFinite =
-              bounds.left.isFinite &&
-              bounds.top.isFinite &&
-              bounds.right.isFinite &&
-              bounds.bottom.isFinite;
-          final overlaps = boundsFinite && cullingRect.overlaps(bounds);
-
-          final forceRecentSensitiveStroke =
-              stroke.toolId == ToolId.highlighter ||
-              stroke.toolId == ToolId.advancedPen ||
-              stroke.toolId == ToolId.pencil ||
-              stroke.toolId == ToolId.calligraphyPen ||
-              stroke is ShapeStroke;
-          if ((overlaps || (!boundsFinite && forceRecentSensitiveStroke)) &&
-              _reusableStrokeSet.add(stroke)) {
-            visibleStrokes.add(stroke);
-          }
-        }
-        _reusableStrokeSet.clear();
-      }
-
-      if (visibleStrokes.isEmpty && strokes.isNotEmpty) {
-        visibleStrokes = strokes
-            .where((s) => cullingRect.overlaps(s.bounds))
-            .toList();
-        if (visibleStrokes.isEmpty) {
-          visibleStrokes = List<Stroke>.from(strokes);
-        }
-      }
+      
     } else {
       for (final s in strokes) {
-        if (cullingRect.overlaps(s.bounds)) {
+        if (!s.bounds.isFinite || cullingRect.overlaps(s.bounds)) {
           _reusableQueryBuffer.add(s);
         }
       }
@@ -351,19 +333,7 @@ class CanvasPainter extends CustomPainter {
     if (excludedStrokes != null && excludedStrokes!.isNotEmpty) {
       visibleStrokes = visibleStrokes
           .where((s) => !excludedStrokes!.contains(s))
-          .toList();
-    }
-
-    // Spatial queries are unordered. Stamp draw serials from the page list
-    // (older first) and sort the culled subset so newer ink, whatever its
-    // color, still ends on top. The unculled list is already in draw order.
-    if (!identical(visibleStrokes, strokes) &&
-        visibleStrokes.length > 1 &&
-        strokes.length > 1) {
-      for (var i = 0; i < strokes.length; i++) {
-        strokes[i].zIndex = i;
-      }
-      visibleStrokes.sort((a, b) => a.zIndex.compareTo(b.zIndex));
+          .toList(growable: false);
     }
 
     // One temporal pass. Highlighters are not pulled in front of later pens.
@@ -494,8 +464,9 @@ class CanvasPainter extends CustomPainter {
       ..shader = null
       ..maskFilter = null
       ..colorFilter = null
-      ..blendMode = BlendMode.srcOver;
-    _sharedPaint.color = Color(run.colorKey).withInversion(invert);
+      ..blendMode = BlendMode.srcOver
+      ..color = Color(run.colorKey).withInversion(invert);
+
     for (final mesh in run.meshes) {
       canvas.drawVertices(mesh, BlendMode.srcOver, _sharedPaint);
     }
@@ -840,11 +811,9 @@ class CanvasPainter extends CustomPainter {
         _sharedPaint.isAntiAlias = true;
         // Tile-local mesh: long strokes replay only local triangles.
         final clippedMesh = _clipMeshFor(stroke, cullingRect);
-        canvas.drawVertices(
-          clippedMesh ?? stroke.vertices!,
-          _meshBlendMode(stroke.toolId, invert: invert),
-          _sharedPaint,
-        );
+        final mesh = clippedMesh ?? stroke.vertices!;
+        final mode = _meshBlendMode(stroke.toolId, invert: invert);
+        canvas.drawVertices(mesh, mode, _sharedPaint);
       } else if (_drawClippedSolidPath(canvas, stroke, color, cullingRect)) {
         // Tile-local opaque fill drawn above (or fully outside the tile).
       } else {
@@ -955,7 +924,6 @@ class CanvasPainter extends CustomPainter {
         clipBounds.isFinite &&
         stroke.sampleCount > Stroke.kTileClipMinPoints;
     Path path;
-    ui.Vertices? mesh;
     if (clip) {
       final clippedPoly = Stroke.clipPolygonToRect(
         stroke.highQualityPolygon,
@@ -965,86 +933,45 @@ class CanvasPainter extends CustomPainter {
       path = Path()
         ..fillType = PathFillType.nonZero
         ..addPolygon(clippedPoly, true);
-      // Pencil renders the exact ballpoint spine mesh (same code path, same
-      // caps) with graphite grain on top: ballpoint geometry + texture.
-      if (stroke.toolId == ToolId.pencil) {
-        final part = Stroke.clipMeshArrays(
-          stroke.getRawPositions(),
-          stroke.getRawIndices(),
-          stroke.getRawColors(),
-          clipBounds,
-          bleed: 0,
-        );
-        // The outline above already overlaps this tile: a missing mesh clip
-        // (degenerate mesh, geometry mismatch) must fall back to the
-        // path-only grain instead of dropping the tile to blank.
-        if (part != null) {
-          mesh = ui.Vertices.raw(
-            ui.VertexMode.triangles,
-            part.positions,
-            indices: part.indices,
-            colors: part.colors,
-          );
-        }
-      }
     } else {
       path = _selectPath(stroke);
       if (path.getBounds().isEmpty) return null;
-
-      // Pencil renders the exact ballpoint spine mesh (same code path, same
-      // caps) with graphite grain on top: ballpoint geometry + texture.
-      if (stroke.toolId == ToolId.pencil) {
-        mesh = stroke.ensureMeshVertices();
-      }
     }
 
     final shader = page.tryPencilShader();
     final size = stroke.options.size;
-    final quality = currentScale < 0.82 ? 0.0 : 1.0;
+    final quality = PencilShader.qualityForScale(currentScale);
 
+    // One union-path fill, never a triangle mesh: self-overlap at curves and
+    // joins then shades each pixel exactly once (no additive darkening) and
+    // there are no mesh seams. Live uses the identical call with the staged
+    // chunk union, so both stages agree pixel-for-pixel.
     if (shader == null) {
-      PencilShader.paintCastShadow(
+      PencilShader.paintGrainFallback(
         canvas: canvas,
+        color: color,
+        cfg: stroke.paint,
         outline: path,
-        strokeColor: color,
-        size: size,
         currentScale: currentScale,
         visibleCount: visibleCount,
-        quality: 1.0,
-        lodTier: PencilShader.lodTierForScale(currentScale),
-        enabled: stroke.paint.pencilShadow,
+        strokeSize: size,
       );
-      _sharedPaint
-        ..style = PaintingStyle.fill
-        ..isAntiAlias = true
-        ..shader = null
-        ..colorFilter = null
-        ..maskFilter = null
-        ..color = color.withValues(alpha: 0.55);
-      
-      if (mesh != null) {
-        canvas.drawVertices(mesh, BlendMode.modulate, _sharedPaint);
-      } else {
-        canvas.drawPath(path, _sharedPaint);
-      }
-      return null;
+      return (color, stroke.paint, quality);
     }
 
-    PencilShader.paintIsotropicStroke(
+    PencilShader.paintGrainPath(
       canvas: canvas,
       shader: shader,
       color: color,
       cfg: stroke.paint,
       outline: path,
-      mesh: mesh,
-      stampWidth: PencilShader.stampWidthFor(size, stroke.options.maxSizeRatio),
       configureBaseUniforms: !PencilShader.sameConfig(
         color: color,
         cfg: stroke.paint,
         quality: quality,
         lastColor: lastColor,
         lastCfg: lastCfg,
-        lastQuality: lastQuality,
+        lastQuality: lastQuality, size: size, lastSize: null,
       ),
       currentScale: currentScale,
       visibleCount: visibleCount,
@@ -1228,11 +1155,10 @@ class CanvasPainter extends CustomPainter {
           canvas.drawPath(p, _sharedPaint);
         }
       } else if (currentStroke!.vertices != null) {
-        canvas.drawVertices(
-          currentStroke!.vertices!,
-          _meshBlendMode(currentStroke!.toolId, invert: invert),
-          _sharedPaint,
-        );
+        _sharedPaint.isAntiAlias = true;
+        final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
+        canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
+        canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
       } else {
         canvas.drawPath(_selectPath(currentStroke!), _sharedPaint);
       }
@@ -1250,14 +1176,12 @@ class CanvasPainter extends CustomPainter {
       // Mesh families draw their staged meshes; path-only pens (Advanced)
       // draw their staged butt-jointed outlines. Chunks carry one or the
       // other, never neither.
+      _sharedPaint.isAntiAlias = true;
       for (final c in currentStroke!.liveStagedChunks) {
         final m = c.mesh;
         if (m != null) {
-          canvas.drawVertices(
-            m,
-            _meshBlendMode(currentStroke!.toolId, invert: invert),
-            _sharedPaint,
-          );
+          final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
+          canvas.drawVertices(m, mode, _sharedPaint);
         } else if (c.path != null) {
           canvas.drawPath(c.path!, _sharedPaint);
         }
@@ -1266,11 +1190,9 @@ class CanvasPainter extends CustomPainter {
     }
 
     if (currentStroke!.vertices != null) {
-      canvas.drawVertices(
-        currentStroke!.vertices!,
-        _meshBlendMode(currentStroke!.toolId, invert: invert),
-        _sharedPaint,
-      );
+      _sharedPaint.isAntiAlias = true;
+      final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
+      canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
       return;
     }
 
@@ -1390,6 +1312,9 @@ class CanvasPainter extends CustomPainter {
     // Saturated body: GPU mesh when available (same quality as normal ballpoint).
     _sharedPaint.color = color;
     if (mesh != null) {
+      _sharedPaint.isAntiAlias = false;
+      canvas.drawVertices(mesh, BlendMode.srcOver, _sharedPaint);
+      _sharedPaint.isAntiAlias = true;
       canvas.drawVertices(mesh, BlendMode.srcOver, _sharedPaint);
     } else {
       canvas.drawPath(stroke.neonInnerPath, _sharedPaint);
@@ -1429,6 +1354,9 @@ class CanvasPainter extends CustomPainter {
       // Saturated body: GPU mesh when available, else the white-core path.
       _sharedPaint.color = color;
       if (c.mesh != null) {
+        _sharedPaint.isAntiAlias = false;
+        canvas.drawVertices(c.mesh!, BlendMode.srcOver, _sharedPaint);
+        _sharedPaint.isAntiAlias = true;
         canvas.drawVertices(c.mesh!, BlendMode.srcOver, _sharedPaint);
       } else if (c.auxPath != null) {
         canvas.drawPath(c.auxPath!, _sharedPaint);
@@ -1442,72 +1370,51 @@ class CanvasPainter extends CustomPainter {
     }
   }
 
-  /// Staged pencil: one shader pass per frozen chunk + live tail, with
-  /// uniforms configured once. Interior chunks skip the contact shadow so
-  /// butt joints never cast hairlines across the stroke.
+  /// Staged pencil: ONE union fill over the frozen chunk outlines + live tail.
+  ///
+  /// Chunks overlap by a few points so butt joints can never open a hairline
+  /// crack; because they are combined into a single non-zero fill before
+  /// drawing, that overlap still shades every pixel exactly once. A per-chunk
+  /// draw would band, and an exact butt cut would leave AA seams.
   void _drawStagedPencilStroke(Canvas canvas, Stroke stroke, Color color) {
     final chunks = stroke.liveStagedChunks;
     if (chunks.isEmpty) {
       _drawPencilNoiseStroke(canvas, stroke, color, visibleCount: 1);
       return;
     }
-    final shader = page.tryPencilShader();
     final size = stroke.options.size;
+    final union = Path()..fillType = PathFillType.nonZero;
+    for (final c in chunks) {
+      final outline = c.path;
+      if (outline != null) union.addPath(outline, Offset.zero);
+    }
+    if (union.getBounds().isEmpty) return;
+
+    final shader = page.tryPencilShader();
 
     if (shader == null) {
-      for (var i = 0; i < chunks.length; i++) {
-        final outline = chunks[i].path;
-        if (outline == null || outline.getBounds().isEmpty) continue;
-        final isEdge = i == 0 || i == chunks.length - 1;
-        PencilShader.paintCastShadow(
-          canvas: canvas,
-          outline: outline,
-          strokeColor: color,
-          size: size,
-          currentScale: currentScale,
-          visibleCount: 1,
-          quality: 1.0,
-          lodTier: PencilShader.lodTierForScale(currentScale),
-          enabled: isEdge && stroke.paint.pencilShadow,
-        );
-        _sharedPaint
-          ..style = PaintingStyle.fill
-          ..isAntiAlias = true
-          ..shader = null
-          ..colorFilter = null
-          ..maskFilter = null
-          ..color = color.withValues(alpha: 0.55);
-
-        final mesh = chunks[i].mesh;
-        if (mesh != null) {
-          canvas.drawVertices(mesh, BlendMode.modulate, _sharedPaint);
-        } else {
-          canvas.drawPath(outline, _sharedPaint);
-        }
-      }
-      return;
-    }
-
-    var first = true;
-    for (var i = 0; i < chunks.length; i++) {
-      final outline = chunks[i].path;
-      if (outline == null || outline.getBounds().isEmpty) continue;
-      PencilShader.paintIsotropicStroke(
+      PencilShader.paintGrainFallback(
         canvas: canvas,
-        shader: shader,
         color: color,
         cfg: stroke.paint,
-        outline: outline,
-        mesh: chunks[i].mesh,
-        stampWidth: PencilShader.stampWidthFor(size, stroke.options.maxSizeRatio),
-        configureBaseUniforms: first,
+        outline: union,
         currentScale: currentScale,
         visibleCount: 1,
         strokeSize: size,
-        includeShadow: i == 0 || i == chunks.length - 1,
       );
-      first = false;
+      return;
     }
+
+    PencilShader.paintGrainPath(
+      canvas: canvas,
+      shader: shader,
+      color: color,
+      cfg: stroke.paint,
+      outline: union,
+      currentScale: currentScale,
+      visibleCount: 1,
+      strokeSize: size,
+    );
   }
 
   void _drawEraserIndicator(Canvas canvas) {

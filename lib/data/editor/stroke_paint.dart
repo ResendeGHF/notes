@@ -39,12 +39,12 @@ class StrokePaintStop {
   }
 }
 
-/// Default pencil grain (cellular speckles, world-anchored).
+/// Default pencil grain (graphite speckle, page-anchored).
 class PencilNoiseDefaults {
   /// Smaller = finer grains.
   static const double grainScale = 0.05;
   /// Higher = more paper gaps / sparser graphite.
-  static const double threshold = 0.40;
+  static const double threshold = 0.50;
   /// Higher = harder grain edges.
   static const double contrast = 1.25;
   /// Higher = more fine salt-and-pepper grit.

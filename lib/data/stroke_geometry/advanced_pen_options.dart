@@ -28,7 +28,10 @@ enum AdvancedPenBuilderType {
 
   /// Google ink-stroke-modeler smoothing (`PenPathModeledBuilder`).
   /// This is Rnote's default and the recommended setting.
-  modeled('modeled');
+  modeled('modeled'),
+
+  /// Exact convex hull stamping of circles (perfect_freehand style).
+  stamped('stamped');
 
   final String id;
   const AdvancedPenBuilderType(this.id);

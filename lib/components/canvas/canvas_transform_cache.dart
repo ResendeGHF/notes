@@ -17,13 +17,20 @@ class CanvasTransformCache {
 
   CanvasTransformCache._();
 
-  static void add(String filePath, Matrix4 transform) {
+  static void add(
+    String filePath,
+    Matrix4 transform, {
+    int? pageIndex,
+    int? pageIndexEnd,
+  }) {
     for (final entry in _cache) {
       if (entry.filePath != filePath) continue;
       entry.unlink();
       break;
     }
-    _cache.add(CanvasTransformCacheItem(filePath, transform));
+    _cache.add(
+      CanvasTransformCacheItem(filePath, transform, pageIndex, pageIndexEnd),
+    );
 
     if (_cache.length > _maxCacheSize) {
       _cache.first.unlink();
@@ -50,5 +57,15 @@ base class CanvasTransformCacheItem
   final String filePath;
   final Matrix4 transform;
 
-  CanvasTransformCacheItem(this.filePath, this.transform);
+  /// Page indices visible when the transform was saved (inclusive), when
+  /// known. Used to eager-parse the restored pages on the next open.
+  final int? pageIndex;
+  final int? pageIndexEnd;
+
+  CanvasTransformCacheItem(
+    this.filePath,
+    this.transform, [
+    this.pageIndex,
+    this.pageIndexEnd,
+  ]);
 }

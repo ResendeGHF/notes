@@ -102,10 +102,6 @@ class Eraser extends Tool {
   final Map<Stroke, Stroke> _carveLive = {};
   final Map<Stroke, Stroke> _carveOriginOf = {};
 
-  List<Stroke>? _orderDrawOrder;
-  Map<Stroke, int>? _orderMap;
-  int _orderMapRebuilds = 0;
-
   static const double _minRadius = 1e-3;
 
   @override
@@ -665,33 +661,14 @@ class Eraser extends Tool {
 
   void _sortFrontToBack(List<Stroke> candidates, List<Stroke> drawOrder) {
     if (candidates.length < 2) return;
-    var order = _orderMap;
-    var rebuild =
-        !identical(_orderDrawOrder, drawOrder) ||
-        order == null ||
-        order.length != drawOrder.length;
-    if (!rebuild) {
-      for (final candidate in candidates) {
-        if (!order.containsKey(candidate)) {
-          rebuild = true;
-          break;
-        }
-      }
+    
+    if (mode != EraserMode.stroke) {
+      return;
     }
-    if (rebuild) {
-      order = <Stroke, int>{};
-      for (var i = 0; i < drawOrder.length; i++) {
-        order[drawOrder[i]] = i;
-      }
-      _orderMap = order;
-      _orderDrawOrder = drawOrder;
-      _orderMapRebuilds++;
-    }
-    final ranks = order!;
-    candidates.sort((a, b) => (ranks[b] ?? -1).compareTo(ranks[a] ?? -1));
+    
+    // Absolute O(1) comparison using the pre-assigned draw order index.
+    candidates.sort((a, b) => b.zIndex.compareTo(a.zIndex));
   }
-
-  int get debugOrderMapRebuildCount => _orderMapRebuilds;
 
   void _markRemoved(Stroke stroke) {
     if (_added.contains(stroke)) {
