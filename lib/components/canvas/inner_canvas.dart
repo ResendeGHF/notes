@@ -2056,15 +2056,13 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         isDrawing || entry == null || !inkBitmapCurrent;
 
     if (entry != null) {
-      if (entry.strokeCount > committedStrokes.length) {
-        // Cached bitmap contains removed strokes (eraser/undo): ghosts would
-        // linger, so fall back to vectors.
+      if (!inkBitmapCurrent || entry.strokeCount > committedStrokes.length) {
+        // Stale content (ink erased, added, or modified). Cannot use raster.
         useVectorFallback = true;
       } else if (isMoving) {
-        // Durante o movimento (pan/zoom), NUNCA fazemos fallback para vetores das strokes
-        // antigas se tivermos um raster base, forçando o uso do raster temporário.
+        // Moving, and content is up-to-date (only resolution might be stale). Keep blitting.
         useVectorFallback = false;
-      } else if (inkBitmapCurrent && !useVectorFallback) {
+      } else {
         if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
           // Stale resolution: keep blitting the soft bitmap while moving or
           // settling so the UI stays fluid. Switch to sharp vectors only once

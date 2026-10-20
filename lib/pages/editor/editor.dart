@@ -139,7 +139,7 @@ typedef _PhotoInfo = ({
   bool invertible,
 });
 
-typedef _LinkTargetCandidate = ({
+typedef LinkTargetCandidate = ({
   String path,
   String displayName,
   Set<String> tags,
@@ -246,6 +246,7 @@ class Editor extends StatefulWidget {
     this.initialPageIndexOverride,
     this.onEmbeddedChromeChanged,
     this.onOpenNoteInNewTab,
+    this.onAddNewTab,
     this.onDeleteNote,
   }) : initialPath = path != null
            ? Future.value(path)
@@ -280,6 +281,9 @@ class Editor extends StatefulWidget {
   /// When null (split view / standalone), falls back to in-place replace.
   final Future<void> Function(String path, {int? pageIndex})?
       onOpenNoteInNewTab;
+
+  /// Tabs host creates a new tab via the note picker.
+  final VoidCallback? onAddNewTab;
 
   /// Tabs host closes just this tab when its note is deleted.
   /// When null, deletion pops the whole route (standalone behavior).
@@ -7300,7 +7304,7 @@ class EditorState extends State<Editor>
     return trimmed;
   }
 
-  Future<List<_LinkTargetCandidate>> _loadLinkTargetCandidates() async {
+  Future<List<LinkTargetCandidate>> _loadLinkTargetCandidates() async {
     final allFiles = await FileManager.getAllFiles(includeExtensions: true);
     final normalized = <String>{};
     for (final raw in allFiles) {
@@ -7312,7 +7316,7 @@ class EditorState extends State<Editor>
     }
     final pathList = normalized.toList();
     final tagsByPath = await TagDatabase.instance.getTagsForPaths(pathList);
-    final candidates = <_LinkTargetCandidate>[
+    final candidates = <LinkTargetCandidate>[
       for (final path in pathList)
         (
           path: path,
@@ -9750,7 +9754,7 @@ class EditorState extends State<Editor>
               } else if (currentTool is ShapeTool) {
                 final tool = currentTool as ShapeTool;
                 tool.color = color;
-                tool.fillColor = color.withOpacity(0.7);
+                tool.fillColor = color.withValues(alpha: 0.7);
               } else if (currentTool is Pen) {
                 final pen = currentTool as Pen;
                 pen.color = color;
@@ -10571,6 +10575,7 @@ class EditorState extends State<Editor>
       hasPdfLinks: _hasPdfLinks,
       showPdfLinkBoxes: _showPdfLinkBoxes,
       onClose: _closeDockedSidePanel,
+      onAddNewTab: widget.onAddNewTab,
       onOpenSplitView: widget.onOpenSplitView ?? _openSplitView,
       onCloseSplitView: widget.onCloseSplitView,
       onReopenSplitView: widget.onReopenSplitView,
@@ -14109,6 +14114,7 @@ class _EditorWithTabsState extends State<EditorWithTabs> {
         showToolbar: false,
         onEmbeddedChromeChanged: _bumpChrome,
         onOpenNoteInNewTab: _openNoteInNewTab,
+        onAddNewTab: _addNewTab, // <- INJETANDO A FUNÇÃO AQUI
         onDeleteNote: () => _handleTabNoteDeleted(slot),
       ),
     );

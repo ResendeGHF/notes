@@ -43,7 +43,7 @@ class ModernEditorMenu extends StatefulWidget {
   
   final void Function(int) onGoToLocation;
   final void Function(NoteLink) onOpenLinkedNote;
-  final Future<List<_LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
+  final Future<List<LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
   final VoidCallback onSaveTagsAndLinks;
 
   /// Runs ML Kit on all handwritten strokes in the note (per page) for copyable LaTeX.
@@ -57,7 +57,7 @@ class ModernEditorMenu extends StatefulWidget {
 
   final Future<void> Function() onDeleteNote;
   final Future<void> Function()? onSaveBeforeProperties;
-  final VoidCallback? onOpenNoteInNewTab;
+  final VoidCallback? onAddNewTab;
   final VoidCallback? onOpenSplitView;
   final VoidCallback? onCloseSplitView;
   final VoidCallback? onReopenSplitView;
@@ -117,7 +117,7 @@ class ModernEditorMenu extends StatefulWidget {
     this.onSetCustomThumbnail,
     required this.onDeleteNote,
     this.onSaveBeforeProperties,
-    this.onOpenNoteInNewTab,
+    this.onAddNewTab,
     this.onOpenSplitView,
     this.onCloseSplitView,
     this.onReopenSplitView,
@@ -303,17 +303,17 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
             onTap: () => setState(() => _page = _MenuPage.backgroundSettings),
           ),
 
-        if (widget.onOpenNoteInNewTab != null || widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
+        if (widget.onAddNewTab != null || widget.onOpenSplitView != null || widget.onReopenSplitView != null) ...[
           const Divider(height: 16),
           subHeader('Multitasking'),
-          if (widget.onOpenNoteInNewTab != null)
+          if (widget.onAddNewTab != null)
             ListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 24),
               leading: const Icon(Icons.tab_outlined),
               title: const Text('Open note in new tab'),
               onTap: () {
                 widget.onClose();
-                widget.onOpenNoteInNewTab?.call();
+                widget.onAddNewTab?.call();
               },
             ),
           if (!widget.splitHasSecondary && widget.onOpenSplitView != null)
@@ -486,7 +486,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
                 ],
               ),
             );
-            if (confirmed == true) {
+            if (confirmed ?? false) {
               widget.onClose();
               widget.onClearPage();
             }
@@ -515,7 +515,7 @@ class _ModernEditorMenuState extends State<ModernEditorMenu> {
                 ],
               ),
             );
-            if (confirmed == true) {
+            if (confirmed ?? false) {
               widget.onClose();
               widget.onClearAll();
             }
@@ -554,7 +554,7 @@ class _TagsAndLinksSidebarView extends StatefulWidget {
   final VoidCallback onBack;
   final void Function(int) onGoToLocation;
   final void Function(NoteLink) onOpenLinkedNote;
-  final Future<List<_LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
+  final Future<List<LinkTargetCandidate>> Function() onLoadLinkTargetCandidates;
   final VoidCallback onSaveTagsAndLinks;
   final VoidCallback onClose;
 
@@ -575,7 +575,7 @@ class _TagsAndLinksSidebarView extends StatefulWidget {
 }
 
 class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
-  final TextEditingController _tagInputController = TextEditingController();
+  final _tagInputController = TextEditingController();
 
   @override
   void dispose() {
@@ -586,7 +586,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
   Future<void> _addLink() async {
     final candidates = await widget.onLoadLinkTargetCandidates();
     if (!mounted) return;
-    _LinkTargetCandidate? selectedCandidate;
+    LinkTargetCandidate? selectedCandidate;
     final pageController = TextEditingController(text: '1');
     final labelController = TextEditingController();
     final searchController = TextEditingController();
@@ -630,7 +630,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       filled: true,
-                      fillColor: Colors.grey.withOpacity(0.1),
+                      fillColor: Colors.grey.withValues(alpha: 0.1),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -651,7 +651,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                         return ListView.separated(
                           shrinkWrap: true,
                           itemCount: filtered.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 8),
+                          separatorBuilder: (_, _) => const SizedBox(height: 8),
                           itemBuilder: (context, index) {
                             final candidate = filtered[index];
                             final selected = selectedCandidate?.path == candidate.path;
@@ -661,7 +661,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
                               ),
-                              selectedTileColor: Colors.grey.withOpacity(0.2),
+                              selectedTileColor: Colors.grey.withValues(alpha: 0.2),
                               title: Text(
                                 candidate.displayName,
                                 maxLines: 1,
@@ -694,7 +694,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       filled: true,
-                      fillColor: Colors.grey.withOpacity(0.1),
+                      fillColor: Colors.grey.withValues(alpha: 0.1),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -706,7 +706,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       filled: true,
-                      fillColor: Colors.grey.withOpacity(0.1),
+                      fillColor: Colors.grey.withValues(alpha: 0.1),
                     ),
                   ),
                   const SizedBox(height: 32),
@@ -742,7 +742,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
       ),
     );
 
-    if (created != true || selectedCandidate == null) {
+    if (!(created ?? false) || selectedCandidate == null) {
       searchController.dispose();
       pageController.dispose();
       labelController.dispose();
@@ -772,17 +772,17 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
         onlyFirstPage: false,
       );
       final pageCount = targetInfo.pages.length;
-      if (pageCount <= 0) {
-        pageStart = 1;
-        pageEnd = null;
-      } else {
-        pageStart = pageStart.clamp(1, pageCount);
-        pageEnd = pageEnd != null ? pageEnd.clamp(pageStart, pageCount) : null;
-      }
-    } catch (_) {
-      pageStart = pageStart.clamp(1, 9999);
-      pageEnd = pageEnd != null ? pageEnd.clamp(pageStart, 9999) : null;
+    if (pageCount <= 0) {
+      pageStart = 1;
+      pageEnd = null;
+    } else {
+      pageStart = pageStart.clamp(1, pageCount);
+      pageEnd = pageEnd?.clamp(pageStart, pageCount);
     }
+  } catch (_) {
+    pageStart = pageStart.clamp(1, 9999);
+    pageEnd = pageEnd?.clamp(pageStart, 9999);
+  }
     
     final currentPage = widget.coreInfo.pages[widget.currentPageIndex];
     final link = NoteLink(
@@ -850,7 +850,7 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   filled: true,
-                  fillColor: Colors.grey.withOpacity(0.1),
+                  fillColor: Colors.grey.withValues(alpha: 0.1),
                   suffixIcon: IconButton(
                     icon: const Icon(Icons.add),
                     onPressed: () {
@@ -937,14 +937,15 @@ class _TagsAndLinksSidebarViewState extends State<_TagsAndLinksSidebarView> {
                     ),
                     leading: const Icon(Icons.link),
                     title: Text(
-                      link.label ??
-                          (link.targetPath.isEmpty
-                              ? 'Current Note'
-                              : link.targetPath.split('/').last),
-                    ),
+                        link.label?.isNotEmpty ?? false
+                            ? link.label!
+                            : (link.targetPath.isEmpty
+                                ? 'Current Note'
+                                : link.targetPath.split('/').last),
+                      ),
                     subtitle: Text(
                       link.isRange
-                          ? '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (pages ${link.targetPageIndex + 1}-${link.targetPageIndexEnd! + 1})'
+                          ? '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (pages ${link.targetPageIndex + 1}-${(link.targetPageIndexEnd ?? 0) + 1})'
                           : '${link.targetPath.isEmpty ? 'Internal' : link.targetPath} (page ${link.targetPageIndex + 1})',
                     ),
                     onTap: () {
@@ -1089,7 +1090,7 @@ class _PropertiesSidebarViewState extends State<_PropertiesSidebarView> {
               _PropRow(icon: Icons.edit_note, label: 'Modified', value: modified),
               _PropRow(icon: Icons.visibility, label: 'Accessed', value: accessed),
               _PropRow(icon: Icons.location_on_outlined, label: 'Location', value: locationStr),
-              _PropRow(icon: Icons.menu_book_outlined, label: 'Type', value: 'Paged note'),
+              const _PropRow(icon: Icons.menu_book_outlined, label: 'Type', value: 'Paged note'),
               _PropRow(icon: Icons.schedule, label: 'Time Spent', value: timeSpentStr),
               _PropRow(icon: Icons.timer_outlined, label: 'Time Editing', value: timeSpentEditingStr),
               _PropRow(icon: Icons.sd_storage, label: 'Total Size', value: sizeStr),
@@ -1295,59 +1296,6 @@ class _MenuTile extends StatelessWidget {
         ),
       ),
       onTap: onTap,
-    );
-  }
-}
-
-class _MenuLargeCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  const _MenuLargeCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    // Converte o "Card Grande com Fundo Escuro" do KDE 
-    // em um ListTile amigável com botão de ícone destacado Material 3.
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      onTap: onTap,
-      leading: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: colorScheme.secondaryContainer,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Icon(
-          icon,
-          size: 20,
-          color: colorScheme.onSecondaryContainer,
-        ),
-      ),
-      title: Text(
-        title,
-        style: TextStyle(
-          fontWeight: FontWeight.w500,
-          fontSize: 15,
-          color: colorScheme.onSurface,
-        ),
-      ),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(
-          color: colorScheme.onSurfaceVariant,
-          fontSize: 13,
-        ),
-      ),
     );
   }
 }
@@ -1928,14 +1876,14 @@ class _MatrixCalculatorDialog extends StatefulWidget {
 }
 
 class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
-  String _op = '+';
-  int _rowsA = 2;
-  int _colsA = 2;
-  int _rowsB = 2;
-  int _colsB = 2;
+  var _op = '+';
+  var _rowsA = 2;
+  var _colsA = 2;
+  var _rowsB = 2;
+  var _colsB = 2;
 
-  List<List<TextEditingController>> _matrixA = [];
-  List<List<TextEditingController>> _matrixB = [];
+  var _matrixA = <List<TextEditingController>>[];
+  var _matrixB = <List<TextEditingController>>[];
 
   @override
   void initState() {
@@ -1995,7 +1943,7 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
 
     final paragraph = builder.build()
       ..layout(const ui.ParagraphConstraints(width: 500));
-    canvas.drawParagraph(paragraph, const Offset(0, 0));
+    canvas.drawParagraph(paragraph, Offset.zero);
 
     final img = await recorder.endRecording().toImage(
       500,
@@ -2032,7 +1980,7 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
                     textAlign: TextAlign.center,
                     decoration: InputDecoration(
                       filled: true,
-                      fillColor: Colors.grey.withOpacity(0.1),
+                      fillColor: Colors.grey.withValues(alpha: 0.1),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                       ),
@@ -2083,13 +2031,13 @@ class _MatrixCalculatorDialogState extends State<_MatrixCalculatorDialog> {
                 ),
                 const SizedBox(height: 24),
                 DropdownButtonFormField<String>(
-                  value: _op,
+                  initialValue: _op,
                   decoration: InputDecoration(
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                     filled: true,
-                    fillColor: Colors.grey.withOpacity(0.1),
+                    fillColor: Colors.grey.withValues(alpha: 0.1),
                   ),
                   items: const [
                     DropdownMenuItem(value: '+', child: Text('Addition (+)')),

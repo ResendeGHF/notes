@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025 Gustavo Henrique Freitas de Resende <https://github.com/ResendeGHF>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:saber/components/canvas/_circle_stroke.dart';
@@ -356,7 +357,32 @@ class Eraser extends Tool {
     final source = entry.pieces ?? [entry.points];
     final out = <List<PointVector>>[];
     var anyHit = false;
+
+    // Fast bounding box for the eraser capsule
+    final rLeft = math.min(from.dx, to.dx) - radius;
+    final rTop = math.min(from.dy, to.dy) - radius;
+    final rRight = math.max(from.dx, to.dx) + radius;
+    final rBottom = math.max(from.dy, to.dy) + radius;
+
     for (final piece in source) {
+      if (piece.isEmpty) continue;
+
+      // Zero-allocation AABB check for the fragment
+      var minX = piece[0].x, maxX = piece[0].x;
+      var minY = piece[0].y, maxY = piece[0].y;
+      for (var i = 1; i < piece.length; i++) {
+        final p = piece[i];
+        if (p.x < minX) minX = p.x;
+        else if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        else if (p.y > maxY) maxY = p.y;
+      }
+
+      if (rRight < minX || rLeft > maxX || rBottom < minY || rTop > maxY) {
+        out.add(piece);
+        continue;
+      }
+
       final split = _splitPolyline(piece, from, to, radius);
       if (split == null) {
         out.add(piece);

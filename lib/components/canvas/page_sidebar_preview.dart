@@ -630,6 +630,9 @@ class _SidebarStrokeSketchPainter extends CustomPainter {
   final bool invert;
   final int revision;
   final int strokeCount;
+  
+  // Zero-copy shared buffer
+  static Float32List _sharedBuffer = Float32List(32768);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -647,23 +650,47 @@ class _SidebarStrokeSketchPainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = false;
 
-    // Fast zero-allocation rendering using precomputed Float32List
+    // True zero-allocation rendering using a static buffer and sublistView
     for (final stroke in strokes) {
-      final fastLine = stroke.fastRenderLine;
-      if (fastLine.isEmpty) continue;
+      final pts = stroke.pointsForEraser;
+      if (pts.isEmpty) continue;
+      
+      final step = pts.length > 50 ? (pts.length / 25).ceil() : 1;
+      int count = 0;
+      for (int i = 0; i < pts.length; i += step) count++;
+      if ((pts.length - 1) % step != 0) count++;
+      
+      final neededSize = count * 2;
+      if (neededSize > _sharedBuffer.length) {
+        _sharedBuffer = Float32List(neededSize * 2);
+      }
+      
+      int idx = 0;
+      for (int i = 0; i < pts.length; i += step) {
+        _sharedBuffer[idx++] = pts[i].x;
+        _sharedBuffer[idx++] = pts[i].y;
+      }
+      if ((pts.length - 1) % step != 0) {
+        _sharedBuffer[idx++] = pts.last.x;
+        _sharedBuffer[idx++] = pts.last.y;
+      }
+      
+      final view = Float32List.sublistView(_sharedBuffer, 0, idx);
       
       paint.color = invert ? Colors.white : stroke.color;
       final widthOnScreen = (stroke.options.size * scale).clamp(0.4, 3.0);
       paint.strokeWidth = widthOnScreen / scale;
       
-      if (fastLine.length == 2) {
+      if (idx == 2) {
+        paint.style = PaintingStyle.fill;
         canvas.drawCircle(
-          Offset(fastLine[0], fastLine[1]), 
+          Offset(view[0], view[1]), 
           paint.strokeWidth / 2, 
-          Paint()..color=paint.color..style=PaintingStyle.fill..isAntiAlias=false
+          paint
         );
+        paint.style = PaintingStyle.stroke; // Restore for next strokes
       } else {
-        canvas.drawRawPoints(ui.PointMode.polygon, fastLine, paint);
+        canvas.drawRawPoints(ui.PointMode.polygon, view, paint);
       }
     }
     
