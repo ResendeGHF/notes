@@ -639,16 +639,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// trailing raw points are re-tessellated per frame. Frozen chunks never
   /// rebuild, so already-drawn regions cannot dance, and per-frame UI
   /// work stays constant no matter how long the stroke gets.
-  static const kLiveStageTailPoints = 96;
+  static const kLiveStageTailPoints = 24;
 
   /// Scan-back window when choosing a freeze boundary: prefer a straight
   /// run so butt joints join invisibly under any blend mode.
-  static const kLiveStageGateScan = 64;
+  static const kLiveStageGateScan = 16;
 
   /// Maximum tail overrun while no straight boundary is found (continuous
   /// scribble through corners): freeze at the straightest point anyway so
   /// per-frame work stays bounded.
-  static const kLiveStageTailOverrun = 256;
+  static const kLiveStageTailOverrun = 64;
 
   /// Minimum raw points per frozen chunk (degenerate ranges are deferred).
   static const kLiveStageMinChunk = 3;
@@ -657,7 +657,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// tracks the tip and every sample would seal a micro-chunk (hundreds of
   /// draw calls). With it, extensions happen about every window/±, chunks
   /// stay ~128+ points and per-frame draw calls stay in the dozens.
-  static const kLiveStageMinFreeze = 64;
+  static const kLiveStageMinFreeze = 16;
 
   /// Joint sagitta budget: sin(turn/2) * halfWidth below this reads as a
   /// perfect joint. Scales the gate angle to the pen width.
@@ -2852,9 +2852,14 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     return true;
   }
 
+  Path? _mergedLivePath;
+  Path? _mergedLiveAuxPath;
+
   void _clearLiveStaging() {
     // Paths/Vertices are GC'd (Pictures deliberately avoided: no dispose).
     _liveFrozen.clear();
+    _mergedLivePath = null;
+    _mergedLiveAuxPath = null;
     _liveStagedEnd = -1;
     _dropLiveTailCache();
   }
@@ -2934,6 +2939,16 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final chunk = _bakeLiveChunk(_liveStagedEnd, f, isTip: false);
     if (chunk == null) return;
     _liveFrozen.add(chunk);
+    
+    if (chunk.path != null) {
+      _mergedLivePath ??= Path()..fillType = PathFillType.nonZero;
+      _mergedLivePath!.addPath(chunk.path!, Offset.zero);
+    }
+    if (chunk.auxPath != null) {
+      _mergedLiveAuxPath ??= Path()..fillType = PathFillType.nonZero;
+      _mergedLiveAuxPath!.addPath(chunk.auxPath!, Offset.zero);
+    }
+
     _liveStagedEnd = f;
     _dropLiveTailCache();
   }
@@ -3035,10 +3050,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final arrays = _buildMeshRange(
         geoSub, // Usa a array com a sobreposição de segurança (overlap)
         openStart: !startIsTrue,
-        openEnd: true, // Remove end caps during live feedback for a natural ink flow
+        openEnd: !isTip,
         withPrediction: isTip,
         startTaper: startIsTrue && options.start.taperEnabled,
-        endTaper: false, // Disable end taper during real time feedback
+        endTaper: isTip && options.end.taperEnabled,
         liveRawTip: tipRawPt,
         pathLengthOffset: chunkDashOffset,
       );
@@ -3071,7 +3086,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final poly = _buildHighlighterRangePoly(
         tipSub,
         startCap: startIsTrue,
-        endCap: false, // Remove end caps during live feedback
+        endCap: isTip,
       );
       path = _stagedPathFor(poly);
       bounds = path.getBounds();
@@ -3079,7 +3094,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final poly = _buildBallpointRangePoly(
         tipSub,
         startCap: startIsTrue,
-        endCap: false, // Remove end caps during live feedback
+        endCap: isTip,
         // True neighbors of the range: smoothed as context so the cut ends
         // follow the committed spine exactly (no hair sticking out at cuts).
         leadContext: glo > 0 ? points[glo - 1] : null,
@@ -3414,15 +3429,26 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   List<LiveStagedChunkView> get liveStagedChunks {
     if (_liveFrozen.isEmpty) return const [];
     _ensureLiveTail();
-    final out = <LiveStagedChunkView>[
-      for (final c in _liveFrozen)
-        LiveStagedChunkView(
+    final out = <LiveStagedChunkView>[];
+    
+    // Entrega todas as meshes e ignora paths originais (desenharemos o merged)
+    for (final c in _liveFrozen) {
+      if (c.mesh != null) {
+        out.add(LiveStagedChunkView(
           mesh: c.mesh,
-          path: c.path,
-          auxPath: c.auxPath,
           bounds: c.bounds,
-        ),
-    ];
+        ));
+      }
+    }
+    
+    // Entrega o path unificado com todos os chunks (salva dezenas de draw calls)
+    if (_mergedLivePath != null || _mergedLiveAuxPath != null) {
+      out.add(LiveStagedChunkView(
+        path: _mergedLivePath,
+        auxPath: _mergedLiveAuxPath,
+      ));
+    }
+    
     final tail = _liveTail;
     if (tail != null &&
         (tail.mesh != null ||

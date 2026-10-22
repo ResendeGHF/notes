@@ -1042,6 +1042,7 @@ class CanvasPainter extends CustomPainter {
           canvas,
           currentStroke!,
           currentStroke!.color.withInversion(invert),
+          isLive: true,
         );
       }
       return;
@@ -1067,13 +1068,6 @@ class CanvasPainter extends CustomPainter {
     }
 
     if (currentStroke!.hasNonSolidPaint) {
-      // NOTE: no `vertices` access here on purpose. `vertices` tessellates
-      // the full live stroke (O(n) spline+mesh per frame); the mesh is then
-      // discarded below in favor of `highQualityPath`, so touching it would
-      // burn a full mesh build every frame of every long textured stroke.
-      // `vertices != null` is equivalent to a length check anyway: it is null
-      // for path-only tools and for <2 points, and both sides below use
-      // `highQualityPath` for length>=2.
       final path = currentStroke!.length == 1
           ? (Path()..addOval(
               Rect.fromCircle(
@@ -1115,7 +1109,6 @@ class CanvasPainter extends CustomPainter {
             (currentStroke!.options.size / 2) *
             Stroke.highlighterStrokeScaleFactor;
         if (currentStroke!.flatEdge) {
-          // Flat tip: square blob matching eventual rectangular caps.
           final r = baseSize.clamp(0.5, 999.0);
           canvas.drawRect(
             Rect.fromCenter(
@@ -1133,36 +1126,31 @@ class CanvasPainter extends CustomPainter {
           );
         }
       } else if (currentStroke!.hasLiveStaging) {
-        // Frozen butt-jointed chunks + live tail: already-drawn regions are
-        // replayed verbatim, never re-tessellated.
+        _sharedPaint.isAntiAlias = false; // Desliga AA na live stroke
         for (final c in currentStroke!.liveStagedChunks) {
           final p = c.path;
           if (p == null) continue;
           canvas.drawPath(p, _sharedPaint);
         }
-      } else if (currentStroke!.vertices != null) {
         _sharedPaint.isAntiAlias = true;
+      } else if (currentStroke!.vertices != null) {
+        _sharedPaint.isAntiAlias = false; // Desliga AA na live stroke
         final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
         canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
         canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
+        _sharedPaint.isAntiAlias = true;
       } else {
+        _sharedPaint.isAntiAlias = false; // Desliga AA na live stroke
         canvas.drawPath(_selectPath(currentStroke!), _sharedPaint);
+        _sharedPaint.isAntiAlias = true;
       }
 
       _sharedPaint.blendMode = BlendMode.srcOver;
       return;
     }
 
-    // Staging first: `vertices` tessellates the WHOLE live stroke (O(n)
-    // spline+mesh per frame). For staged strokes that mesh is discarded two
-    // branches below in favor of frozen chunks + bounded tail, so touching it
-    // here burned a full mesh rebuild every frame of every long stroke —
-    // growing with stroke length. `hasLiveStaging` is O(1).
     if (currentStroke!.hasLiveStaging) {
-      // Mesh families draw their staged meshes; path-only pens (Advanced)
-      // draw their staged butt-jointed outlines. Chunks carry one or the
-      // other, never neither.
-      _sharedPaint.isAntiAlias = true;
+      _sharedPaint.isAntiAlias = false; // Desliga AA massivamente durante a escrita
       for (final c in currentStroke!.liveStagedChunks) {
         final m = c.mesh;
         if (m != null) {
@@ -1172,13 +1160,15 @@ class CanvasPainter extends CustomPainter {
           canvas.drawPath(c.path!, _sharedPaint);
         }
       }
+      _sharedPaint.isAntiAlias = true;
       return;
     }
 
     if (currentStroke!.vertices != null) {
-      _sharedPaint.isAntiAlias = true;
+      _sharedPaint.isAntiAlias = false; // Desliga AA nas pontas vivas
       final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
       canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
+      _sharedPaint.isAntiAlias = true;
       return;
     }
 
@@ -1197,7 +1187,9 @@ class CanvasPainter extends CustomPainter {
       }
       canvas.drawCircle(center, radius.clamp(0.5, 999.0), _sharedPaint);
     } else {
+      _sharedPaint.isAntiAlias = false; // Desliga AA no fallback outline
       canvas.drawPath(currentStroke!.highQualityPath, _sharedPaint);
+      _sharedPaint.isAntiAlias = true;
     }
   }
 
@@ -1279,12 +1271,12 @@ class CanvasPainter extends CustomPainter {
   ///
   /// Glow is a translucent outer path (no MaskFilter — blur stays on laser only).
   /// Body uses the fast spine mesh; white core uses a cached inset path.
-  void _drawNeonInkStroke(Canvas canvas, Stroke stroke, Color color) {
+  void _drawNeonInkStroke(Canvas canvas, Stroke stroke, Color color, {bool isLive = false}) {
     _sharedPaint.style = PaintingStyle.fill;
     _sharedPaint.shader = null;
     _sharedPaint.colorFilter = null;
     _sharedPaint.blendMode = BlendMode.srcOver;
-    _sharedPaint.isAntiAlias = true;
+    _sharedPaint.isAntiAlias = !isLive; // Desliga AA na live stroke
     _sharedPaint.maskFilter = null;
 
     final outer = _selectPath(stroke);
@@ -1319,14 +1311,14 @@ class CanvasPainter extends CustomPainter {
   void _drawStagedNeonInkStroke(Canvas canvas, Stroke stroke, Color color) {
     final chunks = stroke.liveStagedChunks;
     if (chunks.isEmpty) {
-      _drawNeonInkStroke(canvas, stroke, color);
+      _drawNeonInkStroke(canvas, stroke, color, isLive: true);
       return;
     }
     _sharedPaint.style = PaintingStyle.fill;
     _sharedPaint.shader = null;
     _sharedPaint.colorFilter = null;
     _sharedPaint.blendMode = BlendMode.srcOver;
-    _sharedPaint.isAntiAlias = true;
+    _sharedPaint.isAntiAlias = false; // Desliga AA em chunks vivos
     _sharedPaint.maskFilter = null;
 
     final onScreen = stroke.options.size * currentScale;
