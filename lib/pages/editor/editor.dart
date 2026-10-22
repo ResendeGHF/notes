@@ -818,6 +818,10 @@ class EditorState extends State<Editor>
     _interactionRepaint.value++;
   }
 
+  /// Repaints ONLY the live ink layers on each pen sample, without rebuilding
+  /// the page widget tree. See [_LiveInkOverlay] in inner_canvas.dart.
+  final ValueNotifier<int> _liveInkRepaint = ValueNotifier(0);
+
   ValueNotifier<SavingState> savingState = ValueNotifier(SavingState.saved);
 
   Timer? _delayedSaveTimer;
@@ -3929,15 +3933,22 @@ class EditorState extends State<Editor>
     });
   }
 
-  void _scheduleLiveInkRepaint(EditorPage page) {
+  void _scheduleLiveInkRepaint() {
     // Paint this pointer event — waiting for the next frame left the mesh
-    // one sample behind the stylus.
-    page.redrawStrokes();
-    _bumpInteractionRepaint();
+    // one sample behind the stylus. Staged freehand ink only repaints its
+    // bounds-sized live layers; the page widget tree and frozen prefix stay
+    // untouched.
+    final stroke = Pen.currentStroke;
+    if (stroke != null && stroke.stagesLiveGeometry) {
+      _liveInkRepaint.value++;
+    } else {
+      // Rare non-staged live families (textured fills) keep the legacy
+      // full-page live painter.
+      _bumpInteractionRepaint();
+    }
   }
 
   void _recordLivePenSample(
-    EditorPage page,
     Offset position,
     Duration timestamp, {
     required bool rawPointerSample,
@@ -3964,7 +3975,7 @@ class EditorState extends State<Editor>
       if (hadPreview && mounted) setState(() {});
     }
 
-    _scheduleLiveInkRepaint(page);
+    _scheduleLiveInkRepaint();
   }
 
   bool _shouldSkipGesturePenSample(Duration timestamp) {
@@ -4712,12 +4723,10 @@ class EditorState extends State<Editor>
     if (currentTool is Pen) {
       if (!_shouldSkipGesturePenSample(timestamp)) {
         _recordLivePenSample(
-          page,
           position,
           timestamp,
           rawPointerSample: false,
         );
-        _bumpInteractionRepaint();
       }
     } else if (currentTool is ShapeTool) {
       (currentTool as ShapeTool).onDragUpdate(position, page, dragPageIndex!);
@@ -4980,7 +4989,7 @@ class EditorState extends State<Editor>
       timestamp,
       accurateTool: event.kind != PointerDeviceKind.touch,
     );
-    _recordLivePenSample(page, position, timestamp, rawPointerSample: true);
+    _recordLivePenSample(position, timestamp, rawPointerSample: true);
     previousPosition = position;
   }
 
@@ -11270,6 +11279,7 @@ class EditorState extends State<Editor>
                   onNoteLinkTap: _onCanvasNoteLinkTap,
                   currentTool: currentTool,
                   interactionRepaintListenable: _interactionRepaint,
+                  liveInkRepaintListenable: _liveInkRepaint,
                   currentScale: _quantizedCanvasScale,
                   eraserPositionListenable: pageIndex == dragPageIndex
                       ? _eraserPositionRepaint
@@ -12441,6 +12451,7 @@ class EditorState extends State<Editor>
     stows.lastHighlighterOptions.notifyListeners();
 
     _interactionRepaint.dispose();
+    _liveInkRepaint.dispose();
     _showPdfLinkBoxes.dispose();
     _eraserPositionRepaint.dispose();
 

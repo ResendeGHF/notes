@@ -37,6 +37,7 @@ class Canvas extends StatelessWidget {
     required this.setAsBackground,
     required this.currentTool,
     this.interactionRepaintListenable,
+    this.liveInkRepaintListenable,
     required this.currentScale,
     this.onNoteLinkTap,
     this.placeholder = false,
@@ -75,6 +76,7 @@ class Canvas extends StatelessWidget {
 
   final Tool currentTool;
   final ValueListenable<int>? interactionRepaintListenable;
+  final ValueListenable<int>? liveInkRepaintListenable;
   final double currentScale;
   final bool placeholder;
   final Offset? eraserPosition;
@@ -139,6 +141,7 @@ class Canvas extends StatelessWidget {
                         setAsBackground: setAsBackground,
                         currentToolIsSelect: currentTool.toolId == ToolId.select,
                         interactionRepaintListenable: interactionRepaintListenable,
+                        liveInkRepaintListenable: liveInkRepaintListenable,
                         currentScale: currentScale,
                         eraserPosition: eraserPosition,
                         eraserPositionListenable: eraserPositionListenable,

@@ -207,6 +207,7 @@ class InnerCanvas extends StatefulWidget {
     this.onRenderObjectChange,
     required this.currentToolIsSelect,
     this.interactionRepaintListenable,
+    this.liveInkRepaintListenable,
     required this.currentScale,
     this.onNoteLinkTap,
     this.eraserPosition,
@@ -251,6 +252,7 @@ class InnerCanvas extends StatefulWidget {
 
   final bool currentToolIsSelect;
   final ValueListenable<int>? interactionRepaintListenable;
+  final ValueListenable<int>? liveInkRepaintListenable;
   final void Function(NoteLink link)? onNoteLinkTap;
 
   final double currentScale;
@@ -1403,6 +1405,13 @@ class InnerCanvasState extends State<InnerCanvas> {
 
     final paintQuadTree = page.strokeSpatialIndex;
 
+    // Freehand ink with staging support is painted as two compositor-cached
+    // layers (frozen prefix + tail) instead of repainting the whole page on
+    // every pointer sample. Other tools/shapes keep the legacy live painter.
+    final currentStroke = widget.currentStroke;
+    final bool splitLiveStroke =
+        currentStroke != null && currentStroke.stagesLiveGeometry;
+
     // Quill is only materialized while text editing: building a QuillEditor
     // per page on every open/rebuild is a major first-frames cost, and the
     // widget is IgnorePointer-wrapped otherwise.
@@ -1781,6 +1790,18 @@ class InnerCanvasState extends State<InnerCanvas> {
             ),
           ),
 
+          if (splitLiveStroke)
+            Positioned.fill(
+              child: _LiveInkOverlay(
+                stroke: currentStroke,
+                liveInkRepaintListenable: widget.liveInkRepaintListenable,
+                invert: invert,
+                currentScale: widget.currentScale,
+                page: page,
+                primaryColor: colorScheme.primary,
+              ),
+            ),
+
           if (widget.currentStroke != null ||
             page.laserStrokes.isNotEmpty ||
             widget.currentSelection != null ||
@@ -1827,7 +1848,8 @@ class InnerCanvasState extends State<InnerCanvas> {
                     totalPages: widget.coreInfo.pages.length,
                     currentScale: widget.currentScale,
                     defaultTextStyle: theme.textTheme.bodyMedium!,
-                      doneSelecting: widget.doneSelecting,
+                    doneSelecting: widget.doneSelecting,
+                    drawCurrentStroke: !splitLiveStroke,
                   ),
                   size: Size(widget.width, widget.height),
                 ),
@@ -1909,6 +1931,144 @@ class InnerCanvasState extends State<InnerCanvas> {
 
 class _LiveStrokeList {
   List<Stroke> strokes = const [];
+}
+
+/// Two compositor-cached layers for the active freehand stroke.
+///
+/// The frozen prefix lives in a bounds-sized [RepaintBoundary] that only
+/// repaints when [Stroke.liveStageRevision] changes; the live tail repaints on
+/// every pointer sample but is clipped to its own small rect. Together they
+/// replace a full-page repaint per sample.
+class _LiveInkOverlay extends StatelessWidget {
+  const _LiveInkOverlay({
+    required this.stroke,
+    required this.liveInkRepaintListenable,
+    required this.invert,
+    required this.currentScale,
+    required this.page,
+    required this.primaryColor,
+  });
+
+  final Stroke stroke;
+  final ValueListenable<int>? liveInkRepaintListenable;
+  final bool invert;
+  final double currentScale;
+  final EditorPage page;
+  final Color primaryColor;
+
+  static Rect? _padded(Rect? rect, {double pad = 1.5}) {
+    if (rect == null || rect.isEmpty || !rect.isFinite) return null;
+    return rect.inflate(pad);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final listenable = liveInkRepaintListenable == null
+        ? stroke.liveStageRevision
+        : Listenable.merge([
+            stroke.liveStageRevision,
+            liveInkRepaintListenable!,
+          ]);
+
+    return IgnorePointer(
+      child: ListenableBuilder(
+        listenable: listenable,
+        builder: (context, _) {
+          final frozenBounds = _padded(stroke.liveFrozenBoundsUnion);
+          final bool staged = stroke.hasLiveStaging;
+          // Before the first freeze the tail owns the whole stroke. [bounds]
+          // covers only committed points, so union in the prediction tail;
+          // otherwise a fast flick's live tip gets clipped by the layer rect.
+          var tailBounds = _padded(
+            staged ? stroke.liveTailBounds : stroke.bounds,
+            // Before the first freeze [bounds] is only the committed center
+            // line plus brush width; leave room for spline overshoot/AA. The
+            // prediction tail is added precisely below.
+            pad: staged ? 1.5 : 12.0,
+          );
+          if (!staged && tailBounds != null) {
+            final tipBounds = stroke.liveTipBounds;
+            if (tipBounds != null) {
+              tailBounds = tailBounds.expandToInclude(tipBounds);
+            }
+          }
+          return Stack(
+            fit: StackFit.expand,
+            clipBehavior: Clip.none,
+            children: [
+              if (frozenBounds != null)
+                _LiveBoundsLayer(
+                  stroke: stroke,
+                  layer: LiveStrokeLayer.frozen,
+                  bounds: frozenBounds,
+                  repaint: stroke.liveStageRevision,
+                  invert: invert,
+                  currentScale: currentScale,
+                  page: page,
+                  primaryColor: primaryColor,
+                ),
+              if (tailBounds != null)
+                _LiveBoundsLayer(
+                  stroke: stroke,
+                  layer: LiveStrokeLayer.tail,
+                  bounds: tailBounds,
+                  repaint: listenable,
+                  invert: invert,
+                  currentScale: currentScale,
+                  page: page,
+                  primaryColor: primaryColor,
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// One page-space rect of live ink, painted by a minimal [CanvasPainter].
+class _LiveBoundsLayer extends StatelessWidget {
+  const _LiveBoundsLayer({
+    required this.stroke,
+    required this.layer,
+    required this.bounds,
+    required this.repaint,
+    required this.invert,
+    required this.currentScale,
+    required this.page,
+    required this.primaryColor,
+  });
+
+  final Stroke stroke;
+  final LiveStrokeLayer layer;
+  final Rect bounds;
+  final Listenable repaint;
+  final bool invert;
+  final double currentScale;
+  final EditorPage page;
+  final Color primaryColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fromRect(
+      rect: bounds,
+      child: RepaintBoundary(
+        child: CustomPaint(
+          willChange: layer == LiveStrokeLayer.tail,
+          painter: CanvasPainter.liveStrokeLayer(
+            repaint: repaint,
+            currentStroke: stroke,
+            liveLayer: layer,
+            liveLayerBounds: bounds,
+            invert: invert,
+            currentScale: currentScale,
+            page: page,
+            primaryColor: primaryColor,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _PageRasterBgLayerPainter extends CustomPainter {

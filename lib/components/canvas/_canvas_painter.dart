@@ -82,6 +82,11 @@ class SelectionRasterTuning {
   }
 }
 
+/// Which half of a live freehand stroke a [CanvasPainter] renders.
+/// The frozen prefix is cached by the compositor; only the tail layer is
+/// invalidated on pointer samples.
+enum LiveStrokeLayer { frozen, tail }
+
 class CanvasPainter extends CustomPainter {
   const CanvasPainter({
     super.repaint,
@@ -117,7 +122,51 @@ class CanvasPainter extends CustomPainter {
     this.paintSelectionChrome = true,
     this.preferPathFill = false,
     this.scaleAgnosticRepaint = false,
+    this.drawCurrentStroke = true,
+    this.liveLayer,
+    this.liveLayerBounds,
   });
+
+  /// Minimal painter for one live-stroke layer. It paints only the frozen
+  /// prefix or the live tail, translated into its own bounds-sized widget, so
+  /// the compositor never re-rasterizes the whole page while inking.
+  CanvasPainter.liveStrokeLayer({
+    super.repaint,
+    required this.currentStroke,
+    required this.liveLayer,
+    required this.liveLayerBounds,
+    required this.invert,
+    required this.currentScale,
+    required this.page,
+    required this.primaryColor,
+  }) : strokes = const [],
+       spatialGrid = null,
+       quadTree = null,
+       orderedBatches = null,
+       laserStrokes = const [],
+       currentStrokeDetectedShape = null,
+       shapePreviewPulse = 0,
+       currentSelection = null,
+       selectionPreview = null,
+       showPageIndicator = false,
+       pageIndex = 0,
+       totalPages = 0,
+       defaultTextStyle = const TextStyle(),
+       eraserPosition = null,
+       eraserPositionListenable = null,
+       eraserSize = null,
+       doneSelecting = true,
+       lineHeight = null,
+       lineThickness = null,
+       lineColor = null,
+       excludedStrokes = null,
+       pendingStrokes = null,
+       selectionRasterImage = null,
+       selectionRasterBounds = null,
+       paintSelectionChrome = false,
+       preferPathFill = false,
+       scaleAgnosticRepaint = false,
+       drawCurrentStroke = true;
 
   final bool invert;
   final List<Stroke> strokes;
@@ -179,6 +228,19 @@ class CanvasPainter extends CustomPainter {
   /// so re-rasterizing full-page highlighter paths on every pinch frame is
   /// pure waste (the pinch lag on highlighter-heavy pages).
   final bool scaleAgnosticRepaint;
+
+  /// When false, [currentStroke] is still available for its shape color in
+  /// `_drawDetectedShape`, but the stroke itself is painted by a dedicated
+  /// live layer (see [LiveStrokeLayer]).
+  final bool drawCurrentStroke;
+
+  /// Set on the minimal painters used for the cached frozen prefix / live
+  /// tail layers. Null for the normal full-page painters.
+  final LiveStrokeLayer? liveLayer;
+
+  /// Page-space bounds of the live layer widget. The painter translates into
+  /// this origin and clips to it; the widget itself is exactly this rect.
+  final Rect? liveLayerBounds;
 
   static final _reusableQueryBuffer = <Stroke>[];
 
@@ -259,6 +321,21 @@ class CanvasPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final layer = liveLayer;
+    if (layer != null) {
+      // Layer painters are sized to their own page-space rect and translated
+      // into it, so the compositor only re-rasterizes that rect instead of the
+      // whole page on every pointer sample.
+      final bounds = liveLayerBounds;
+      if (bounds == null || bounds.isEmpty || !bounds.isFinite) return;
+      canvas.save();
+      canvas.clipRect(Offset.zero & size);
+      canvas.translate(-bounds.left, -bounds.top);
+      _drawCurrentStroke(canvas, layer: layer);
+      canvas.restore();
+      return;
+    }
+
     final canvasRect = Offset.zero & size;
 
     canvas.save();
@@ -384,7 +461,7 @@ class CanvasPainter extends CustomPainter {
       );
     }
 
-    _drawCurrentStroke(canvas);
+    if (drawCurrentStroke) _drawCurrentStroke(canvas);
     _drawDetectedShape(canvas);
 
     canvas.restore();
@@ -396,7 +473,20 @@ class CanvasPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(CanvasPainter oldDelegate) {
+    if (liveLayer != null || oldDelegate.liveLayer != null) {
+      // Live layers are tiny widgets that are recreated every sample; only
+      // repaint when their actual content/bounds changed. The frozen layer
+      // otherwise stays compositor-cached between freezes.
+      return liveLayer != oldDelegate.liveLayer ||
+          currentStroke != oldDelegate.currentStroke ||
+          liveLayerBounds != oldDelegate.liveLayerBounds ||
+          invert != oldDelegate.invert ||
+          currentScale != oldDelegate.currentScale ||
+          page != oldDelegate.page ||
+          primaryColor != oldDelegate.primaryColor;
+    }
     return false ||
+        drawCurrentStroke != oldDelegate.drawCurrentStroke ||
         (currentStroke != null || oldDelegate.currentStroke != null) ||
         (!doneSelecting && currentSelection != null) ||
         (laserStrokes.isNotEmpty || oldDelegate.laserStrokes.isNotEmpty) ||
@@ -967,10 +1057,40 @@ class CanvasPainter extends CustomPainter {
     return (color, stroke.paint, quality);
   }
 
-  void _drawCurrentStroke(Canvas canvas) {
+  void _drawCurrentStroke(Canvas canvas, {LiveStrokeLayer? layer}) {
     if (currentStroke == null) return;
 
     currentStroke!.setLodScale(currentScale);
+
+    final Stroke stroke = currentStroke!;
+    if (layer == LiveStrokeLayer.frozen &&
+        (stroke is LaserStroke ||
+            stroke is ShapeStroke ||
+            stroke is CircleStroke ||
+            stroke is RectangleStroke)) {
+      // Non-staged stroke families never have a frozen prefix layer.
+      return;
+    }
+
+    final bool hasStaging = stroke.hasLiveStaging;
+    List<LiveStagedChunkView> stagedChunks = const [];
+    var useStaged = hasStaging;
+    if (layer == LiveStrokeLayer.frozen) {
+      if (!hasStaging) return;
+      stagedChunks = stroke.liveFrozenChunks;
+      if (stagedChunks.isEmpty) return;
+    } else if (layer == LiveStrokeLayer.tail) {
+      if (!hasStaging) {
+        // Before the first freeze the tail layer owns the whole (short)
+        // stroke, keeping the exact legacy single-build rendering.
+        useStaged = false;
+      } else {
+        stagedChunks = stroke.liveTailChunks;
+        if (stagedChunks.isEmpty) return;
+      }
+    } else if (hasStaging) {
+      stagedChunks = stroke.liveStagedChunks;
+    }
 
     if (currentStroke! is LaserStroke) {
       return _drawLaserStroke(canvas, currentStroke as LaserStroke);
@@ -1031,11 +1151,12 @@ class CanvasPainter extends CustomPainter {
     _sharedPaint.style = PaintingStyle.fill;
 
     if (currentStroke!.neon && currentStroke!.toolId == ToolId.ballpointPen) {
-      if (currentStroke!.hasLiveStaging) {
+      if (useStaged) {
         _drawStagedNeonInkStroke(
           canvas,
           currentStroke!,
           currentStroke!.color.withInversion(invert),
+          chunks: stagedChunks,
         );
       } else {
         _drawNeonInkStroke(
@@ -1050,11 +1171,12 @@ class CanvasPainter extends CustomPainter {
 
     if (currentStroke!.toolId == ToolId.pencil ||
         currentStroke!.paint.usesPencilNoise) {
-      if (currentStroke!.hasLiveStaging) {
+      if (useStaged) {
         _drawStagedPencilStroke(
           canvas,
           currentStroke!,
           currentStroke!.color.withInversion(invert),
+          chunks: stagedChunks,
         );
       } else {
         _drawPencilNoiseStroke(
@@ -1125,9 +1247,9 @@ class CanvasPainter extends CustomPainter {
             _sharedPaint,
           );
         }
-      } else if (currentStroke!.hasLiveStaging) {
+      } else if (useStaged) {
         _sharedPaint.isAntiAlias = false; // Desliga AA na live stroke
-        for (final c in currentStroke!.liveStagedChunks) {
+        for (final c in stagedChunks) {
           final p = c.path;
           if (p == null) continue;
           canvas.drawPath(p, _sharedPaint);
@@ -1136,7 +1258,6 @@ class CanvasPainter extends CustomPainter {
       } else if (currentStroke!.vertices != null) {
         _sharedPaint.isAntiAlias = false; // Desliga AA na live stroke
         final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
-        canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
         canvas.drawVertices(currentStroke!.vertices!, mode, _sharedPaint);
         _sharedPaint.isAntiAlias = true;
       } else {
@@ -1149,9 +1270,9 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    if (currentStroke!.hasLiveStaging) {
+    if (useStaged) {
       _sharedPaint.isAntiAlias = false; // Desliga AA massivamente durante a escrita
-      for (final c in currentStroke!.liveStagedChunks) {
+      for (final c in stagedChunks) {
         final m = c.mesh;
         if (m != null) {
           final mode = _meshBlendMode(currentStroke!.toolId, invert: invert);
@@ -1293,7 +1414,6 @@ class CanvasPainter extends CustomPainter {
       _sharedPaint.isAntiAlias = false;
       canvas.drawVertices(mesh, BlendMode.srcOver, _sharedPaint);
       _sharedPaint.isAntiAlias = true;
-      canvas.drawVertices(mesh, BlendMode.srcOver, _sharedPaint);
     } else {
       canvas.drawPath(stroke.neonInnerPath, _sharedPaint);
     }
@@ -1308,9 +1428,14 @@ class CanvasPainter extends CustomPainter {
   /// Staged neon ink: frozen butt-jointed chunks + live tail, same three
   /// draws per chunk as [_drawNeonInkStroke]. Falls back to the single
   /// build when staging produced nothing (degenerate).
-  void _drawStagedNeonInkStroke(Canvas canvas, Stroke stroke, Color color) {
-    final chunks = stroke.liveStagedChunks;
-    if (chunks.isEmpty) {
+  void _drawStagedNeonInkStroke(
+    Canvas canvas,
+    Stroke stroke,
+    Color color, {
+    List<LiveStagedChunkView>? chunks,
+  }) {
+    final staged = chunks ?? stroke.liveStagedChunks;
+    if (staged.isEmpty) {
       _drawNeonInkStroke(canvas, stroke, color, isLive: true);
       return;
     }
@@ -1322,7 +1447,7 @@ class CanvasPainter extends CustomPainter {
     _sharedPaint.maskFilter = null;
 
     final onScreen = stroke.options.size * currentScale;
-    for (final c in chunks) {
+    for (final c in staged) {
       final outer = c.path;
       if (outer == null) continue;
       // Soft halo without blur.
@@ -1335,7 +1460,6 @@ class CanvasPainter extends CustomPainter {
         _sharedPaint.isAntiAlias = false;
         canvas.drawVertices(c.mesh!, BlendMode.srcOver, _sharedPaint);
         _sharedPaint.isAntiAlias = true;
-        canvas.drawVertices(c.mesh!, BlendMode.srcOver, _sharedPaint);
       } else if (c.auxPath != null) {
         canvas.drawPath(c.auxPath!, _sharedPaint);
       }
@@ -1354,15 +1478,20 @@ class CanvasPainter extends CustomPainter {
   /// crack; because they are combined into a single non-zero fill before
   /// drawing, that overlap still shades every pixel exactly once. A per-chunk
   /// draw would band, and an exact butt cut would leave AA seams.
-  void _drawStagedPencilStroke(Canvas canvas, Stroke stroke, Color color) {
-    final chunks = stroke.liveStagedChunks;
-    if (chunks.isEmpty) {
+  void _drawStagedPencilStroke(
+    Canvas canvas,
+    Stroke stroke,
+    Color color, {
+    List<LiveStagedChunkView>? chunks,
+  }) {
+    final staged = chunks ?? stroke.liveStagedChunks;
+    if (staged.isEmpty) {
       _drawPencilNoiseStroke(canvas, stroke, color, visibleCount: 1);
       return;
     }
     final size = stroke.options.size;
     final union = Path()..fillType = PathFillType.nonZero;
-    for (final c in chunks) {
+    for (final c in staged) {
       final outline = c.path;
       if (outline != null) union.addPath(outline, Offset.zero);
     }

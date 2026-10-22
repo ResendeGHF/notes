@@ -2827,10 +2827,15 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   double _liveTailPredX = double.nan;
   double _liveTailPredY = double.nan;
   int _liveTailBrushN = -1;
+  bool? _liveTailBackOverlap;
 
   /// True once a prefix has been frozen (painter then draws staged chunks).
   /// Short strokes never stage: they use the exact legacy single-build path.
   bool get hasLiveStaging => _liveFrozen.isNotEmpty;
+
+  /// Whether this stroke's live feedback is eligible for the split
+  /// frozen-prefix / live-tail compositor layers.
+  bool get stagesLiveGeometry => _stagesLiveGeometry;
 
   /// Freehand ink families whose live rendering is staged. Textured fills
   /// (bounds-anchored gradients/images), lasers and shapes keep the global
@@ -2854,19 +2859,38 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   Path? _mergedLivePath;
   Path? _mergedLiveAuxPath;
+  Rect? _mergedLivePathBounds;
+  Rect? _liveFrozenBoundsUnion;
+
+  /// Bumped whenever a frozen chunk is appended or the staging is reset.
+  /// The live overlay uses it to repaint ONLY the frozen prefix layer (which
+  /// the compositor can keep rasterized between freezes) instead of
+  /// re-submitting the whole stroke on every pointer sample.
+  ValueNotifier<int>? _liveStageRevision;
+
+  ValueNotifier<int> get liveStageRevision =>
+      _liveStageRevision ??= ValueNotifier<int>(0);
+
+  void _bumpLiveStageRevision() {
+    _liveStageRevision?.value++;
+  }
 
   void _clearLiveStaging() {
     // Paths/Vertices are GC'd (Pictures deliberately avoided: no dispose).
     _liveFrozen.clear();
     _mergedLivePath = null;
     _mergedLiveAuxPath = null;
+    _mergedLivePathBounds = null;
+    _liveFrozenBoundsUnion = null;
     _liveStagedEnd = -1;
     _dropLiveTailCache();
+    _bumpLiveStageRevision();
   }
 
   void _dropLiveTailCache() {
     _liveTail = null;
     _liveTailN = -1;
+    _liveTailBackOverlap = null;
   }
 
   /// Live append bookkeeping: committed caches are dropped (rebuilt lazily
@@ -2948,9 +2972,19 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       _mergedLiveAuxPath ??= Path()..fillType = PathFillType.nonZero;
       _mergedLiveAuxPath!.addPath(chunk.auxPath!, Offset.zero);
     }
+    final chunkBounds = chunk.bounds;
+    if (chunkBounds != null && !chunkBounds.isEmpty) {
+      _mergedLivePathBounds = _mergedLivePathBounds == null
+          ? chunkBounds
+          : _mergedLivePathBounds!.expandToInclude(chunkBounds);
+      _liveFrozenBoundsUnion = _liveFrozenBoundsUnion == null
+          ? chunkBounds
+          : _liveFrozenBoundsUnion!.expandToInclude(chunkBounds);
+    }
 
     _liveStagedEnd = f;
     _dropLiveTailCache();
+    _bumpLiveStageRevision();
   }
 
   /// Picks a freeze boundary near [ideal] on the straightest run behind the
@@ -2991,7 +3025,12 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// joints). Interior ends are butt-cut; true start/end caps only when the
   /// chunk touches the true stroke ends ([isTip] keeps the live end cap).
   /// Returns null for degenerate ranges (caller defers).
-  _LiveStageChunk? _bakeLiveChunk(int s, int e, {required bool isTip}) {
+  _LiveStageChunk? _bakeLiveChunk(
+    int s,
+    int e, {
+    required bool isTip,
+    bool allowBackOverlap = true,
+  }) {
     final start = math.max(0, s);
     if (e - start + 1 < 2 || e >= points.length) return null;
     final sub = points.sublist(start, e + 1);
@@ -3003,7 +3042,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     // mismatch). Opaque overdraw is pixel-identical; bookkeeping below still
     // uses the exact committed [start..e] range. The live tip truth point
     // rides on top of the widened range when it extends past it.
-    final int overlap = _liveStageOverlaps ? _liveStageOverlap : 0;
+    final int overlap = (allowBackOverlap && _liveStageOverlaps)
+        ? _liveStageOverlap
+        : 0;
     final int glo = start > 0 ? math.max(0, start - overlap) : start;
     final int ghi = e < points.length - 1
         ? math.min(points.length - 1, e + overlap)
@@ -3337,7 +3378,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
   /// Rebuilds the live tail chunk when the tip moved. Frozen chunks are
   /// never touched here.
-  void _ensureLiveTail() {
+  void _ensureLiveTail({bool allowBackOverlap = true}) {
     if (!_stagesLiveGeometry || points.length < 2) {
       _liveTail = null;
       return;
@@ -3366,10 +3407,17 @@ class Stroke implements HasBounds, Comparable<Stroke> {
             : pred != null &&
                   _liveTailPredX == pred.x &&
                   _liveTailPredY == pred.y) &&
-        _liveTailBrushN == brushN) {
+        _liveTailBrushN == brushN &&
+        _liveTailBackOverlap == allowBackOverlap) {
       return;
     }
-    _liveTail = _bakeLiveChunk(_liveStagedEnd, n - 1, isTip: true);
+    _liveTail = _bakeLiveChunk(
+      _liveStagedEnd,
+      n - 1,
+      isTip: true,
+      allowBackOverlap: allowBackOverlap,
+    );
+    _liveTailBackOverlap = allowBackOverlap;
     _liveTailN = n;
     _liveTailTipX = tip.x;
     _liveTailTipY = tip.y;
@@ -3426,46 +3474,122 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       if (c.bounds != null) c.bounds!,
   ];
 
-  /// Painter-facing staged chunks: frozen prefix + live tail (when built).
-  /// Empty unless a prefix has been frozen.
-  List<LiveStagedChunkView> get liveStagedChunks {
+  /// Painter-facing frozen prefix chunks. Mesh families keep one mesh per
+  /// chunk (they are already GPU-friendly); path families expose the single
+  /// merged outline so a freeze costs one draw call, not one per chunk.
+  /// This list is stable between freezes, which lets the live overlay keep
+  /// it in a cached [RepaintBoundary] instead of replaying it every frame.
+  List<LiveStagedChunkView> get liveFrozenChunks {
     if (_liveFrozen.isEmpty) return const [];
-    _ensureLiveTail();
     final out = <LiveStagedChunkView>[];
-    
-    // Entrega todas as meshes e ignora paths originais (desenharemos o merged)
     for (final c in _liveFrozen) {
       if (c.mesh != null) {
-        out.add(LiveStagedChunkView(
-          mesh: c.mesh,
-          bounds: c.bounds,
-        ));
+        out.add(LiveStagedChunkView(mesh: c.mesh, bounds: c.bounds));
       }
     }
-    
-    // Entrega o path unificado com todos os chunks (salva dezenas de draw calls)
     if (_mergedLivePath != null || _mergedLiveAuxPath != null) {
-      out.add(LiveStagedChunkView(
-        path: _mergedLivePath,
-        auxPath: _mergedLiveAuxPath,
-      ));
-    }
-    
-    final tail = _liveTail;
-    if (tail != null &&
-        (tail.mesh != null ||
-            tail.path != null ||
-            tail.auxPath != null)) {
       out.add(
         LiveStagedChunkView(
-          mesh: tail.mesh,
-          path: tail.path,
-          auxPath: tail.auxPath,
-          bounds: tail.bounds,
+          path: _mergedLivePath,
+          auxPath: _mergedLiveAuxPath,
+          bounds: _mergedLivePathBounds,
         ),
       );
     }
     return out;
+  }
+
+  /// Whether the split live tail may re-bake points shared with the frozen
+  /// prefix. Opaque mesh bodies can overlap harmlessly; translucent grain
+  /// (pencil) and the neon halo would otherwise composite twice in their own
+  /// compositor layer.
+  bool get _liveTailAllowsBackOverlap =>
+      !paint.usesPencilNoise &&
+      !(neon && toolId == ToolId.ballpointPen);
+
+  /// Painter-facing live tail (only the bounded trailing window). Empty
+  /// unless a prefix has already frozen; before that the painter uses the
+  /// legacy single-build path (short strokes only).
+  List<LiveStagedChunkView> get liveTailChunks {
+    if (_liveFrozen.isEmpty) return const [];
+    _ensureLiveTail(allowBackOverlap: _liveTailAllowsBackOverlap);
+    return _liveTailChunkView();
+  }
+
+  List<LiveStagedChunkView> _liveTailChunkView() {
+    final tail = _liveTail;
+    if (tail == null ||
+        (tail.mesh == null && tail.path == null && tail.auxPath == null)) {
+      return const [];
+    }
+    return [
+      LiveStagedChunkView(
+        mesh: tail.mesh,
+        path: tail.path,
+        auxPath: tail.auxPath,
+        bounds: tail.bounds,
+      ),
+    ];
+  }
+
+  /// Page-space bounds of the tail geometry (cheap, cached by
+  /// [_ensureLiveTail]). Null until the tail exists.
+  Rect? get liveTailBounds {
+    _ensureLiveTail(allowBackOverlap: _liveTailAllowsBackOverlap);
+    final b = _liveTail?.bounds;
+    if (b == null || b.isEmpty || !b.isFinite) return null;
+    return b;
+  }
+
+  /// Bounds of transient live-tip geometry that is painted but not committed:
+  /// the prediction tail, the raw-lift truth point and the brush radius.
+  /// [bounds] only covers committed points, so a fast flick's predicted tip
+  /// can reach well beyond it and would be clipped by a bounds-sized live
+  /// layer. Null when there is no live-only geometry.
+  Rect? get liveTipBounds {
+    if (options.isComplete) return null;
+    var minX = double.infinity;
+    var minY = double.infinity;
+    var maxX = double.negativeInfinity;
+    var maxY = double.negativeInfinity;
+    void include(double x, double y) {
+      if (!x.isFinite || !y.isFinite) return;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+
+    final useAdvancedPred =
+        toolId == ToolId.advancedPen &&
+        brushOptions.builderType == AdvancedPenBuilderType.modeled;
+    final pred = useAdvancedPred
+        ? _brushPredictionTail()
+        : (_predictedTail ?? const <PointVector>[]);
+    for (final p in pred) {
+      include(p.x, p.y);
+    }
+    if (_hasRawLiveTip) include(_rawLiveTipX, _rawLiveTipY);
+    if (minX > maxX) return null;
+    return Rect.fromLTRB(
+      minX,
+      minY,
+      maxX,
+      maxY,
+    ).inflate(options.size / 2 + 1.5);
+  }
+
+  /// Page-space union of the frozen prefix bounds, or null when empty.
+  Rect? get liveFrozenBoundsUnion => _liveFrozenBoundsUnion;
+
+  /// Painter-facing staged chunks: frozen prefix + live tail (when built).
+  /// Empty unless a prefix has been frozen. This is the legacy single-painter
+  /// view; it keeps the overlap between prefix and tail so one union fill can
+  /// shade it once.
+  List<LiveStagedChunkView> get liveStagedChunks {
+    if (_liveFrozen.isEmpty) return const [];
+    _ensureLiveTail();
+    return [...liveFrozenChunks, ..._liveTailChunkView()];
   }
 
   @visibleForTesting

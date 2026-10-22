@@ -69,17 +69,16 @@ void main() {
     _drawWave(stroke, 0, 520);
     expect(stroke.debugLiveChunkCount, greaterThan(0));
 
-    final frozen = stroke.liveStagedChunks.first;
-    final frozenPath = frozen.path;
-    final frozenBounds = frozen.bounds;
+    final frozenPath = stroke.liveFrozenPaths.first;
+    final frozenBounds = stroke.liveFrozenBounds.first;
 
     _drawWave(stroke, 520, 1040);
 
-    final after = stroke.liveStagedChunks.first;
     // Same Path instance: frozen chunks are never rebuilt, so ink already on
-    // screen cannot move or remap its grain.
-    expect(identical(after.path, frozenPath), isTrue);
-    expect(after.bounds, frozenBounds);
+    // screen cannot move or remap its grain. (liveStagedChunks exposes one
+    // merged prefix path for painting; the per-chunk accessors stay stable.)
+    expect(identical(stroke.liveFrozenPaths.first, frozenPath), isTrue);
+    expect(stroke.liveFrozenBounds.first, frozenBounds);
     expect(stroke.debugLiveChunkCount, greaterThan(1));
   });
 
