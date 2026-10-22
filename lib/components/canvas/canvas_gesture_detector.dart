@@ -22,6 +22,7 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/eraser.dart';
 import 'package:saber/data/tools/pen.dart';
 import 'package:saber/pages/editor/editor.dart';
+import 'package:saber/services/frame_rate_manager.dart';
 import 'package:vector_math/vector_math_64.dart';
 
 class CanvasGestureDetector extends StatefulWidget {
@@ -642,6 +643,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   }
 
   void _listenerPointerEvent(PointerEvent event) {
+    FrameRateManager.instance.notifyInteraction();
+
     if (event is PointerDownEvent) {
       widget.onPointerDown?.call(event);
     }
@@ -677,6 +680,8 @@ class CanvasGestureDetectorState extends State<CanvasGestureDetector> {
   var stylusButtonWasPressed = false;
 
   void _listenerPointerHoverEvent(PointerEvent event) {
+    FrameRateManager.instance.notifyInteraction();
+    
     final isEraserHover = event.kind == PointerDeviceKind.invertedStylus;
     if (event.kind != PointerDeviceKind.stylus && !isEraserHover) return;
 

@@ -639,7 +639,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// trailing raw points are re-tessellated per frame. Frozen chunks never
   /// rebuild, so already-drawn regions cannot dance, and per-frame UI
   /// work stays constant no matter how long the stroke gets.
-  static const kLiveStageTailPoints = 192;
+  static const kLiveStageTailPoints = 96;
 
   /// Scan-back window when choosing a freeze boundary: prefer a straight
   /// run so butt joints join invisibly under any blend mode.
@@ -657,7 +657,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
   /// tracks the tip and every sample would seal a micro-chunk (hundreds of
   /// draw calls). With it, extensions happen about every window/±, chunks
   /// stay ~128+ points and per-frame draw calls stay in the dozens.
-  static const kLiveStageMinFreeze = 128;
+  static const kLiveStageMinFreeze = 64;
 
   /// Joint sagitta budget: sin(turn/2) * halfWidth below this reads as a
   /// perfect joint. Scales the gate angle to the pen width.
@@ -1301,7 +1301,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     _cachedPath ??= Path();
     _cachedPath!.reset();
 
-    final poly = getPolygon(quality: StrokeQuality.high);
+    final poly = highQualityPolygon;
     if (poly.isEmpty) return _cachedPath!;
 
     const epsilon = 1e-6;
@@ -3035,10 +3035,10 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final arrays = _buildMeshRange(
         geoSub, // Usa a array com a sobreposição de segurança (overlap)
         openStart: !startIsTrue,
-        openEnd: !isTip,
+        openEnd: true, // Remove end caps during live feedback for a natural ink flow
         withPrediction: isTip,
         startTaper: startIsTrue && options.start.taperEnabled,
-        endTaper: isTip && options.end.taperEnabled,
+        endTaper: false, // Disable end taper during real time feedback
         liveRawTip: tipRawPt,
         pathLengthOffset: chunkDashOffset,
       );
@@ -3071,7 +3071,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final poly = _buildHighlighterRangePoly(
         tipSub,
         startCap: startIsTrue,
-        endCap: isTip,
+        endCap: false, // Remove end caps during live feedback
       );
       path = _stagedPathFor(poly);
       bounds = path.getBounds();
@@ -3079,7 +3079,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
       final poly = _buildBallpointRangePoly(
         tipSub,
         startCap: startIsTrue,
-        endCap: isTip,
+        endCap: false, // Remove end caps during live feedback
         // True neighbors of the range: smoothed as context so the cut ends
         // follow the committed spine exactly (no hair sticking out at cuts).
         leadContext: glo > 0 ? points[glo - 1] : null,
@@ -3561,8 +3561,8 @@ class Stroke implements HasBounds, Comparable<Stroke> {
         .clamp(0.0, 1.0);
     if (amount <= 0.001) return point;
 
-    final minCutoff = 10.0 * math.pow(0.05, amount);
-    final beta = 0.1 * math.pow(0.01, amount);
+    final minCutoff = 18.0 * math.pow(0.05, amount);
+    final beta = 0.3 * math.pow(0.01, amount);
     const dCutoff = 1.0;
 
     final double now =
@@ -3702,7 +3702,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final dy = b.y - a.y;
     final l = math.sqrt(dx * dx + dy * dy);
     if (l <= 1e-6) return true;
-    return (dx * vel.dx + dy * vel.dy) / (l * vl) >= 0.5;
+    return (dx * vel.dx + dy * vel.dy) / (l * vl) >= 0.0;
   }
 
   /// Raw-tip connector point for live renders, or null when nothing beyond
@@ -3727,7 +3727,7 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final dx = _rawLiveTipX - last.x;
     final dy = _rawLiveTipY - last.y;
     // Sub-pixel truth adds no visible ink; skip to keep caches valid.
-    if (dx * dx + dy * dy <= 0.75 * 0.75) return null;
+    if (dx * dx + dy * dy <= 0.25 * 0.25) return null;
     // Wild filter state (sharp turn) abstains exactly like prediction: the
     // direction gate alone cannot tell a stop from a turn (both align with
     // travel), but jank can. Calm flight and rests extend to the pen.
@@ -4399,16 +4399,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     }
 
     // Keep authored stroke outlines as-is (see [highQualityPath]).
-    // Fountain is excluded so completed paths keep their prior smoothed look.
-    final bool maySmooth =
-        smooth &&
-        options.isComplete &&
-        toolId != ToolId.highlighter &&
-        toolId != ToolId.advancedPen &&
-        toolId != ToolId.pencil &&
-        toolId != ToolId.advancedPen &&
-        toolId != ToolId.ballpointPen &&
-        toolId != ToolId.laserPointer;
+    // Disabling extra smoothing for all tools to prevent square-ish corners,
+    // as the generated polygon is already smooth and precise.
+    final bool maySmooth = false;
 
     if (maySmooth) {
       return smoothPathFromPolygon(polygon)..fillType = PathFillType.nonZero;
@@ -5951,6 +5944,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
 
     final bool isStamped = isAdvanced && brushOptions != null && brushOptions.builderType == AdvancedPenBuilderType.stamped;
     
+    // Safety check for empty arrays caused by extreme thinning or fast movements
+    if (count < 2) return null;
+
     if (isStamped) {
       final int maxVerts = count * 40 + 128;
       final int maxInds = count * 120 + 256;
@@ -6562,6 +6558,36 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final Float32List pts = cleanBuilder.finish();
     final int n = pts.length ~/ 3;
     if (n < 3) return pts;
+
+    if (smoothing > 0.0) {
+      final int iters = (smoothing * 4).ceil().clamp(1, 4);
+      final double weight = (smoothing * 0.6).clamp(0.1, 0.45);
+      for (int iter = 0; iter < iters; iter++) {
+        double prevX = pts[0], prevY = pts[1];
+        for (int i = 1; i < n - 1; i++) {
+          final int idx = i * 3;
+          final double currX = pts[idx];
+          final double currY = pts[idx + 1];
+          final double nextX = pts[idx + 3];
+          final double nextY = pts[idx + 4];
+          
+          if (keptIdx != null) {
+            final int origIdx = keptIdx[i];
+            if (origIdx < keepFrom || origIdx > keepTo) {
+              prevX = currX;
+              prevY = currY;
+              continue;
+            }
+          }
+
+          pts[idx] = currX + weight * ((prevX + nextX) / 2.0 - currX);
+          pts[idx + 1] = currY + weight * ((prevY + nextY) / 2.0 - currY);
+          
+          prevX = currX;
+          prevY = currY;
+        }
+      }
+    }
 
     // Emission window over the cleaned list: context samples are smoothed (so
     // the real segments see their true neighbors) but never emitted.

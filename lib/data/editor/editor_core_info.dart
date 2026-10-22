@@ -6,7 +6,6 @@
 
 import 'dart:async' show Future, unawaited;
 import 'dart:convert';
-import 'dart:io';
 import 'dart:isolate' show Isolate;
 import 'dart:math' as math;
 
@@ -19,15 +18,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:logging/logging.dart';
-import 'package:uuid/uuid.dart';
-
 import 'package:saber/components/canvas/_asset_cache.dart';
 import 'package:saber/data/editor/binary_writer.dart';
 import 'package:saber/data/editor/canvas_background_pattern.dart';
-import 'package:saber/data/editor/note_page_format.dart';
-import 'package:saber/data/editor/note_page_index.dart';
 import 'package:saber/data/editor/note_tool_settings.dart';
+import 'package:saber/data/editor/note_page_format.dart';
 import 'package:saber/data/editor/page.dart';
+import 'package:saber/data/editor/note_page_index.dart';
 import 'package:saber/data/editor/pdf_outline.dart';
 import 'package:saber/data/extensions/dynamic_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
@@ -35,10 +32,10 @@ import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tags_database.dart';
 import 'package:saber/pages/editor/editor.dart';
 import 'package:saber/services/note_open_store.dart';
-import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:saber/services/vault_blob_crypto.dart';
 import 'package:saber/services/vault_worker.dart';
+import 'package:uuid/uuid.dart';
 
 class _SbaArchiveFile {
   const _SbaArchiveFile({required this.name, required this.bytes});
@@ -125,11 +122,21 @@ class _LazyPageLoadState {
     required this.fileVersion,
   });
 
+  /// Full decompressed body when it lives in the Dart heap. Empty when page
+  /// bytes stay in the native session and are fetched per range.
   Uint8List buffer;
   final List<int> pageByteOffsets;
   final int fileVersion;
   final Set<int> unhydratedIndices = {};
   final Map<int, Uint8List> sliceCache = {};
+  Future<Uint8List> Function(int start, int end)? readRange;
+  int? fullLength;
+
+  bool get bufferCoversAll {
+    final expected = fullLength;
+    if (expected == null) return buffer.isNotEmpty;
+    return buffer.length == expected;
+  }
 
   Uint8List? residentSlice(int index) {
     final cached = sliceCache[index];
@@ -137,6 +144,7 @@ class _LazyPageLoadState {
     if (index < 0 || index + 1 >= pageByteOffsets.length) return null;
     final start = pageByteOffsets[index];
     final end = pageByteOffsets[index + 1];
+    if (!bufferCoversAll) return null;
     if (start < 0 || end < start || end > buffer.length) return null;
     return Uint8List.sublistView(buffer, start, end);
   }
@@ -144,11 +152,23 @@ class _LazyPageLoadState {
   Future<Uint8List> sliceAsync(int index) async {
     final resident = residentSlice(index);
     if (resident != null) return resident;
-    throw StateError('Page $index bytes are not resident');
+    final read = readRange;
+    if (read == null) {
+      throw StateError('Page $index bytes are not resident');
+    }
+    final start = pageByteOffsets[index];
+    final end = pageByteOffsets[index + 1];
+    final bytes = await read(start, end);
+    sliceCache[index] = bytes;
+    return bytes;
   }
 
-  Future<void> ensureUnhydratedResident() async {}
-
+  Future<void> ensureUnhydratedResident() async {
+    if (bufferCoversAll || readRange == null) return;
+    for (final index in unhydratedIndices.toList()) {
+      await sliceAsync(index);
+    }
+  }
 }
 
 class _SbnHeader {
@@ -412,15 +432,15 @@ class _SbnHeader {
       }
     }
 
-    var replaceDefaultLoaded = false;
-    var isInfiniteLoaded = false;
-    var showPdfLinkBoxesLoaded = true;
-    var infiniteThumbnailModeLoaded = 'jdenticon';
-    var creationDateLoaded = 0;
-    var lastModificationLoaded = 0;
-    var lastAccessLoaded = 0;
-    var totalTimeSpentEditingLoaded = 0;
-    var totalTimeSpentLoaded = 0;
+    bool replaceDefaultLoaded = false;
+    bool isInfiniteLoaded = false;
+    bool showPdfLinkBoxesLoaded = true;
+    String infiniteThumbnailModeLoaded = 'jdenticon';
+    int creationDateLoaded = 0;
+    int lastModificationLoaded = 0;
+    int lastAccessLoaded = 0;
+    int totalTimeSpentEditingLoaded = 0;
+    int totalTimeSpentLoaded = 0;
     String? locationLoaded;
     String? noteIdLoaded;
     CanvasBackgroundPattern? noteDefaultPatternLoaded;
@@ -568,32 +588,13 @@ class _SbnHeader {
 }
 
 
-/// Outcome of a smart lazy-page hydration attempt
-/// ([EditorCoreInfo.hydratePageSmart]).
-enum PageHydrateOutcome {
-  /// Not a lazy shell (already materialized): nothing to do.
-  alreadyLoaded,
-
-  /// Small slice: parsed and swapped synchronously; callers may rebuild now.
-  hydratedSync,
-
-  /// A chunked parse was just started; completion arrives via callback.
-  startedAsync,
-
-  /// A chunked parse for this page is already running.
-  alreadyInFlight,
-
-  /// Not started (concurrent-parse cap saturated); retry after a completion.
-  deferred,
-}
-
 class EditorCoreInfo extends ChangeNotifier {
   static final log = Logger('EditorCoreInfo');
 
   /// Bumped to 21 when the `notePageFormat` header key (28) was added: older
   /// builds cannot skip unknown header payloads and would desync, so files
   /// written from v21 open read-only there instead.
-  static const sbnVersion = 21;
+  static const int sbnVersion = 21;
 
   /// First four bytes `FF FF FF FF` marks custom SABER binary (not BSON).
   /// Full parse must run on the root isolate (Quill [FocusNode], image providers).
@@ -649,27 +650,20 @@ class EditorCoreInfo extends ChangeNotifier {
   @visibleForTesting
   List<int>? get debugLazyPageByteOffsets => _lazyPages?.pageByteOffsets;
 
-  /// Page bodies stay resident in [body] (a zero-copy view of the note body,
-  /// read + inflated in a background isolate). [length] is the decompressed
-  /// note size. Without [body] the ranges are fetched through [read] — used by
-  /// storage backends that cannot keep the whole body in memory.
-  
-
+  /// Page bodies stay in the native session. [length] is the decompressed
+  /// note size; [read] copies only the requested range into Dart.
   void attachLazyRangeReader({
     required int length,
     required Future<Uint8List> Function(int start, int end) read,
     required Future<void> Function() close,
-    Uint8List? body,
   }) {
     final lazy = _lazyPages;
     if (lazy == null) {
       unawaited(close());
       return;
     }
-    if (body != null && body.length == length) {
-      // Zero-copy: Atribui a view direto na RAM (resolve o Lag de leitura)
-      lazy.buffer = body;
-    }
+    lazy.fullLength = length;
+    lazy.readRange = read;
     _closeLazyRange = close;
   }
 
@@ -805,33 +799,13 @@ class EditorCoreInfo extends ChangeNotifier {
     return !isLazyShellPage(index);
   }
 
-  /// Slices at or below this parse synchronously from [hydratePageSmart].
-  /// ~4KB (a few dozen strokes) parses in well under a millisecond, so the
-  /// page swap is visually instant and can never stall a transform frame.
-  /// Anything bigger goes through the chunked async path: the old 256KB fast
-  /// path could run a 10-25ms parse on a transform or idle frame — exactly
-  /// the page-transition freeze this design must prevent. Kept deliberately
-  /// small: the sync path runs inline on whatever frame calls it (pan
-  /// transform, idle callback), so only slices that are provably trivial
-  /// qualify.
-  static const _kSyncHydrateByteThreshold = 4 * 1024;
-
-  /// Pages parsing concurrently. Each in-flight parse yields on a small time
-  /// slice, so many interleaved parses would sum their slices into every
-  /// frame. Two keeps a ready queue without starving input.
-  static const _kMaxConcurrentHydrateParses = 2;
+  /// Slices bigger than this hydrate chunked-async (yields to the UI loop)
+  /// instead of one synchronous parse. ~256KB is a few hundred strokes.
+  static const _kChunkedHydrateByteThreshold = 256 * 1024;
 
   /// Pages with a chunked hydrate in flight. Collapses duplicate work when
   /// idle frames overlap a slow dense page.
   final Set<int> _hydratingIndices = <int>{};
-
-  /// True while a chunked hydrate for [index] is running. Callers use this
-  /// to avoid counting an in-flight page as fresh progress.
-  bool isHydratingPage(int index) => _hydratingIndices.contains(index);
-
-  /// Number of chunked page parses currently in flight (concurrency-paced by
-  /// the open-grace scheduler in the editor).
-  int get hydratingPageCount => _hydratingIndices.length;
 
   Future<void> hydratePageAtIndexAsync(int index) async {
     await hydratePageChunked(index);
@@ -839,25 +813,13 @@ class EditorCoreInfo extends ChangeNotifier {
 
   /// Chunked hydrate: parses a lazy page slice with UI yields between stroke
   /// batches so dense pages never freeze scrolling. Returns the new page, or
-  /// null when aborted (index invalid, page replaced mid-flight, concurrent
-  /// parse cap reached).
+  /// null when aborted (index invalid, page replaced mid-flight).
   /// Safe to fire-and-forget: concurrent calls for one page collapse.
-  ///
-  /// [throttleWhile] stretches the yields while it returns true (fast pans):
-  /// the parse converges one slice per frame instead of competing with
-  /// gestures, and speeds back up when motion settles.
-  Future<EditorPage?> hydratePageChunked(
-    int index, {
-    bool Function()? throttleWhile,
-  }) async {
+  Future<EditorPage?> hydratePageChunked(int index) async {
     final lazy = _lazyPages;
     if (lazy == null || !lazy.unhydratedIndices.contains(index)) return null;
     if (index < 0 || index >= pages.length) return null;
-    if (_hydratingIndices.contains(index)) return null;
-    if (_hydratingIndices.length >= _kMaxConcurrentHydrateParses) return null;
-    _hydratingIndices.add(index);
-    final hydrateWatch = PerfProbe.enabled ? (Stopwatch()..start()) : null;
-    PerfProbe.mark('hydrate.start i=$index');
+    if (!_hydratingIndices.add(index)) return null;
     try {
       final slice = lazy.residentSlice(index) ?? await lazy.sliceAsync(index);
       final old = pages[index];
@@ -868,7 +830,6 @@ class EditorCoreInfo extends ChangeNotifier {
         fileVersion: lazy.fileVersion,
         sbnPath: filePath,
         assetCacheAll: assetCacheAll,
-        throttleWhile: throttleWhile,
       );
       if (index >= pages.length || !identical(pages[index], old)) return null;
       pages[index] = page;
@@ -877,78 +838,45 @@ class EditorCoreInfo extends ChangeNotifier {
       if (lazy.unhydratedIndices.isEmpty) {
         _lazyPages = null;
       }
-      PerfProbe.mark(
-        'hydrate.done i=$index ms=${hydrateWatch?.elapsedMilliseconds} '
-        'strokes=${page.strokes.length} bytes=${slice.length}',
-      );
       return page;
     } finally {
       _hydratingIndices.remove(index);
     }
   }
 
-  /// Outcome of a [hydratePageSmart] attempt. The idle/scroll sweeps use the
-  /// distinction between "started" and "already in flight" to keep exactly one
-  /// new parse in flight per frame without spinning rebuilds while waiting.
-  PageHydrateOutcome hydratePageSmart(
-    int index, {
-    void Function(EditorPage page)? onAsyncHydrated,
-    bool Function()? throttleWhile,
-  }) {
-    final lazy = _lazyPages;
-    if (lazy == null || !lazy.unhydratedIndices.contains(index)) {
-      return PageHydrateOutcome.alreadyLoaded;
-    }
-    if (index < 0 || index >= pages.length) {
-      return PageHydrateOutcome.alreadyLoaded;
-    }
-    if (_hydratingIndices.contains(index)) {
-      return PageHydrateOutcome.alreadyInFlight;
-    }
-    final resident = lazy.residentSlice(index);
-    if (resident != null) {
-      final sliceBytes =
-          lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
-      if (sliceBytes <= _kSyncHydrateByteThreshold) {
-        final sw = PerfProbe.enabled ? (Stopwatch()..start()) : null;
-        _hydratePageAtIndex(index);
-        PerfProbe.mark(
-          'hydrate.sync i=$index ms=${sw?.elapsedMilliseconds} bytes=$sliceBytes',
-        );
-        return isLazyShellPage(index)
-            ? PageHydrateOutcome.deferred
-            : PageHydrateOutcome.hydratedSync;
-      }
-    }
-    if (_hydratingIndices.length >= _kMaxConcurrentHydrateParses) {
-      return PageHydrateOutcome.deferred;
-    }
-    unawaited(
-      hydratePageChunked(index, throttleWhile: throttleWhile).then((page) {
-        if (page != null) onAsyncHydrated?.call(page);
-      }),
-    );
-    return PageHydrateOutcome.startedAsync;
-  }
-
-  /// Smart hydrate for scroll/idle paths: tiny slices parse synchronously
-  /// (instant), everything else hydrates chunked without freezing the UI.
+  /// Smart hydrate for scroll/idle paths: small slices parse synchronously
+  /// (instant), dense slices hydrate chunked without freezing the UI.
   /// Returns true when the page is ready, already in flight, or a chunked
   /// hydrate started — [onAsyncHydrated] fires on async completion so the UI
   /// can wire callbacks and rebuild.
   bool tryHydratePageSmart(
     int index, {
     void Function(EditorPage page)? onAsyncHydrated,
-    bool Function()? throttleWhile,
   }) {
-    final outcome = hydratePageSmart(
-      index,
-      onAsyncHydrated: onAsyncHydrated,
-      throttleWhile: throttleWhile,
+    final lazy = _lazyPages;
+    if (lazy == null || !lazy.unhydratedIndices.contains(index)) return false;
+    if (index < 0 || index >= pages.length) return false;
+    if (_hydratingIndices.contains(index)) return true;
+    if (lazy.residentSlice(index) == null) {
+      unawaited(
+        hydratePageChunked(index).then((page) {
+          if (page != null) onAsyncHydrated?.call(page);
+        }),
+      );
+      return true;
+    }
+    final sliceBytes =
+        lazy.pageByteOffsets[index + 1] - lazy.pageByteOffsets[index];
+    if (sliceBytes <= _kChunkedHydrateByteThreshold) {
+      _hydratePageAtIndex(index);
+      return !isLazyShellPage(index);
+    }
+    unawaited(
+      hydratePageChunked(index).then((page) {
+        if (page != null) onAsyncHydrated?.call(page);
+      }),
     );
-    return outcome == PageHydrateOutcome.hydratedSync ||
-        outcome == PageHydrateOutcome.startedAsync ||
-        outcome == PageHydrateOutcome.alreadyInFlight;
+    return true;
   }
 
   /// Materializes every page that was skipped during lazy BSON load.
@@ -1650,8 +1578,6 @@ class EditorCoreInfo extends ChangeNotifier {
     String path, {
     bool readOnly = false,
     bool onlyFirstPage = false,
-    int? restoredPageIndex,
-    int? restoredPageIndexEnd,
   }) async {
     log.info(
       '[EditorCoreInfo.loadFromFilePath] Loading file: $path (readOnly: $readOnly)',
@@ -1663,7 +1589,6 @@ class EditorCoreInfo extends ChangeNotifier {
     if (vaultOpen) {
       VaultAdapter.instance.beginOpenQuiesce();
     }
-    NoteBodySession? bodySession;
     try {
       var hasPdfAsset0 = false;
       if (vaultOpen && !onlyFirstPage) {
@@ -1672,66 +1597,50 @@ class EditorCoreInfo extends ChangeNotifier {
           hasPdfAsset0 = await VaultAdapter.instance.fileExists(
             FileManager.toRelativePath(pdfAsset0Path),
           );
-        } catch (e) {
+        } catch (e, _) {
           log.fine('Vault PDF .0 exists check skipped: $e');
         }
       } else if (!onlyFirstPage) {
+        // Disk mode: cheap exists check for lazy-page policy.
         try {
           hasPdfAsset0 = await FileManager.doesFileExist('$noteBodyPath.0');
         } catch (_) {}
       }
 
       final tBody0 = DateTime.now();
-
-      final noteBodyDiskPath =
-          vaultOpen ? noteBodyPath : FileManager.getFilePath(noteBodyPath);
+      // Disk notes with a sidecar: the inflated body stays in the Kotlin
+      // heap. Dart copies the header and the landing page only.
+      NoteBodySession? bodySession;
       NotePageDirectory? sessionDirectory;
-
       if (!vaultOpen && !onlyFirstPage) {
-        bodySession = await NoteOpenStore.open(noteBodyDiskPath);
+        bodySession = await NoteOpenStore.open(noteBodyPath);
         if (bodySession != null) {
           sessionDirectory = NotePageIndex.tryLoadMatching(
-            noteBodyDiskPath,
+            noteBodyPath,
             bodySession.sampleHash,
             bodySession.length,
           );
-          if (sessionDirectory != null && sessionDirectory.pageCount <= 2) {
+          if (sessionDirectory == null || sessionDirectory.pageCount <= 2) {
+            await bodySession.close();
+            bodySession = null;
             sessionDirectory = null;
-          }
-          if (sessionDirectory == null) {
-            try {
-              sessionDirectory = await vaultWorkerRun(
-                EditorCoreInfo.scanNotePageDirectory,
-                bodySession.body,
-              );
-              final indexed = sessionDirectory;
-              if (indexed != null && indexed.pageCount > 2) {
-                unawaited(NotePageIndex.store(noteBodyDiskPath, indexed));
-              }
-            } catch (e, st) {
-              log.fine('Background page index failed on session: $e', e, st);
-              sessionDirectory = null;
-            }
           }
         }
       }
-
       Uint8List? bsonBytes;
-      String? jsonString;
-
       if (bodySession == null) {
         bsonBytes = await FileManager.readFile(noteBodyPath);
-      } else if (sessionDirectory == null) {
-        bsonBytes = bodySession.body;
       }
-
       log.info(
-        'PDFTIMING coreInfo.readBody bytes=${bsonBytes?.length ?? bodySession?.length ?? 0} elapsed=${DateTime.now().difference(tBody0).inMilliseconds}ms',
+        'PDFTIMING coreInfo.readBody bytes=${bsonBytes?.length ?? 0} elapsed=${DateTime.now().difference(tBody0).inMilliseconds}ms',
       );
 
+      // After note body is cached, warm PDF in background (do not race body
+      // AES). Asset capacity counting runs after parse off the critical path
+      // so the first paint never waits on sequential file-exists I/O.
       if (vaultOpen && hasPdfAsset0 && !onlyFirstPage) {
         final pdfAsset0Path = '$noteBodyPath.0';
-        const largeVaultPdfCipherBytes = 40 * 1024 * 1024;
+        const int largeVaultPdfCipherBytes = 40 * 1024 * 1024;
         unawaited(() async {
           try {
             final cipherSize =
@@ -1743,16 +1652,26 @@ class EditorCoreInfo extends ChangeNotifier {
               await FileManager.readFileToTempFile(pdfAsset0Path);
               return;
             }
+            // RAM branch registers a shared future: the asset open consumes
+            // these exact bytes (no size gate — sharing costs zero extra RAM
+            // versus the open decrypting alone). Warms concurrently with the
+            // body parse below instead of serializing after it.
             await VaultAdapter.instance.prefetchFileForOpen(pdfAsset0Path);
-          } catch (e) {
+          } catch (e, _) {
             log.fine('Vault PDF .0 prefetch skipped: $e');
           }
         }());
       }
 
+      final String? jsonString;
       if (bodySession != null) {
         jsonString = null;
-      } else if (bsonBytes == null) {
+      } else if (bsonBytes != null) {
+        log.fine(
+          '[EditorCoreInfo.loadFromFilePath] Found binary file: $noteBodyPath',
+        );
+        jsonString = null;
+      } else {
         log.fine(
           '[EditorCoreInfo.loadFromFilePath] Binary file not found, trying JSON: ${path + Editor.extensionOldJson}',
         );
@@ -1760,6 +1679,11 @@ class EditorCoreInfo extends ChangeNotifier {
           path + Editor.extensionOldJson,
         );
         jsonString = jsonBytes != null ? utf8.decode(jsonBytes) : null;
+        if (jsonString != null) {
+          log.fine(
+            '[EditorCoreInfo.loadFromFilePath] Found JSON file: ${path + Editor.extensionOldJson}',
+          );
+        }
       }
 
       if (bsonBytes == null && jsonString == null && bodySession == null) {
@@ -1789,7 +1713,6 @@ class EditorCoreInfo extends ChangeNotifier {
       try {
         final tParse0 = DateTime.now();
         EditorCoreInfo? sessionCore;
-
         if (bodySession != null && sessionDirectory != null) {
           final session = bodySession;
           final directory = sessionDirectory;
@@ -1804,32 +1727,6 @@ class EditorCoreInfo extends ChangeNotifier {
           ).toInt();
           final span = directory.spans[center];
           final pageBytes = await session.slice(span.start, span.end);
-          int? restoreIdx = restoredPageIndex;
-          if (restoreIdx != null &&
-              (restoreIdx < 0 ||
-                  restoreIdx >= directory.pageCount ||
-                  restoreIdx == center)) {
-            restoreIdx = null;
-          }
-          
-          int? restoreEnd = restoreIdx == null
-              ? null
-              : (restoredPageIndexEnd ?? restoreIdx).clamp(
-                  restoreIdx,
-                  math.min(directory.pageCount - 1, restoreIdx + 2),
-                );
-          Map<int, Uint8List>? extraEagerBytes;
-          if (restoreIdx != null) {
-            extraEagerBytes = <int, Uint8List>{};
-            for (var i = restoreIdx; i <= (restoreEnd ?? restoreIdx); i++) {
-              if (i == center) continue;
-              final restoreSpan = directory.spans[i];
-              extraEagerBytes[i] = await session.slice(
-                restoreSpan.start,
-                restoreSpan.end,
-              );
-            }
-          }
           final coreInfo = await EditorCoreInfo.fromBinaryAsync(
             buffer: headerBytes,
             filePath: path,
@@ -1838,14 +1735,11 @@ class EditorCoreInfo extends ChangeNotifier {
             pageDirectory: directory,
             trustPageDirectory: true,
             eagerPageBytes: pageBytes,
-            restoredPageIndex: restoreIdx,
-            extraEagerPageBytes: extraEagerBytes,
           );
           coreInfo.attachLazyRangeReader(
             length: session.length,
             read: session.slice,
             close: session.close,
-            body: session.view(0, session.length),
           );
           bodySession = null;
           log.info(
@@ -1853,51 +1747,53 @@ class EditorCoreInfo extends ChangeNotifier {
           );
           sessionCore = coreInfo;
         }
-
-        if (sessionCore == null) {
-          NotePageDirectory? pageDirectory;
-          if (bsonBytes != null && _isCustomSbnBinaryHeader(bsonBytes)) {
-            if (!vaultOpen) {
-              pageDirectory = NotePageIndex.tryLoad(noteBodyDiskPath, bsonBytes);
+        if (sessionCore != null) {
+          // Shared tail below warms tags and asset slots off the first frame.
+        } else {
+        NotePageDirectory? pageDirectory;
+        if (bsonBytes != null && _isCustomSbnBinaryHeader(bsonBytes)) {
+          if (!vaultOpen) {
+            pageDirectory = NotePageIndex.tryLoad(noteBodyPath, bsonBytes);
+          }
+          if (pageDirectory == null) {
+            try {
+              pageDirectory = await vaultWorkerRun(
+                EditorCoreInfo.scanNotePageDirectory,
+                bsonBytes,
+              );
+            } catch (e, st) {
+              log.fine('Background page index failed; scanning inline: $e', e, st);
+              pageDirectory = EditorCoreInfo.scanNotePageDirectory(bsonBytes);
             }
-            if (pageDirectory == null) {
-              try {
-                pageDirectory = await vaultWorkerRun(
-                  EditorCoreInfo.scanNotePageDirectory,
-                  bsonBytes,
-                );
-              } catch (e, st) {
-                log.fine('Background page index failed; scanning inline: $e', e, st);
-                pageDirectory = EditorCoreInfo.scanNotePageDirectory(bsonBytes);
-              }
-              final indexed = pageDirectory;
-              if (!vaultOpen && indexed != null && indexed.pageCount > 2) {
-                unawaited(NotePageIndex.store(noteBodyDiskPath, indexed));
-              }
+            final indexed = pageDirectory;
+            if (!vaultOpen && indexed != null && indexed.pageCount > 2) {
+              unawaited(NotePageIndex.store(noteBodyPath, indexed));
             }
           }
-
-          final loaded = await loadFromFileContents(
-            jsonString: jsonString,
-            bsonBytes: bsonBytes,
-            path: path,
-            readOnly: readOnly,
-            onlyFirstPage: onlyFirstPage,
-            preferEagerAllPages: hasPdfAsset0,
-            pageDirectory: pageDirectory,
-            restoredPageIndex: restoredPageIndex,
-          );
-
-          log.info(
-            'PDFTIMING coreInfo.parseBody elapsed=${DateTime.now().difference(tParse0).inMilliseconds}ms',
-          );
-          sessionCore = loaded;
         }
 
-        final coreInfo = sessionCore;
+        final loaded = await loadFromFileContents(
+          jsonString: jsonString,
+          bsonBytes: bsonBytes,
+          path: path,
+          readOnly: readOnly,
+          onlyFirstPage: onlyFirstPage,
+          preferEagerAllPages: hasPdfAsset0,
+          pageDirectory: pageDirectory,
+        );
+        log.info(
+          'PDFTIMING coreInfo.parseBody elapsed=${DateTime.now().difference(tParse0).inMilliseconds}ms',
+        );
+        sessionCore = loaded;
+        }
+
+        final coreInfo = sessionCore!;
         coreInfo.ensureDocumentDefaultsFromGlobal();
+
         coreInfo.ensureNoteId();
 
+        // Off the critical path: asset placeholders and tag merge must never
+        // delay the first paint. Tags do not affect the canvas.
         final loadedTags = coreInfo.tags;
         unawaited(() async {
           try {
@@ -1993,7 +1889,6 @@ class EditorCoreInfo extends ChangeNotifier {
     required bool onlyFirstPage,
     bool preferEagerAllPages = false,
     NotePageDirectory? pageDirectory,
-    int? restoredPageIndex,
   }) async {
     EditorCoreInfo coreInfo;
     try {
@@ -2008,7 +1903,6 @@ class EditorCoreInfo extends ChangeNotifier {
         onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
         pageDirectory: pageDirectory,
-        restoredPageIndex: restoredPageIndex,
       );
 
       final bool customBinary =
@@ -2098,7 +1992,6 @@ class EditorCoreInfo extends ChangeNotifier {
     int? lineHeightFallback,
     int? lineThicknessFallback,
     NotePageDirectory? pageDirectory,
-    int? restoredPageIndex,
   }) async {
     final dynamic json;
     final bool isBinaryFile;
@@ -2156,7 +2049,6 @@ class EditorCoreInfo extends ChangeNotifier {
         onlyFirstPage: onlyFirstPage,
         preferEagerAllPages: preferEagerAllPages,
         pageDirectory: pageDirectory,
-        restoredPageIndex: restoredPageIndex,
       );
     }
   }
@@ -2203,8 +2095,6 @@ class EditorCoreInfo extends ChangeNotifier {
     NotePageDirectory? pageDirectory,
     bool trustPageDirectory = false,
     Uint8List? eagerPageBytes,
-    int? restoredPageIndex,
-    Map<int, Uint8List>? extraEagerPageBytes,
   }) async {
     final reader = BinaryReader(buffer);
 
@@ -2256,16 +2146,15 @@ class EditorCoreInfo extends ChangeNotifier {
     if (key == SBNBinaryKeys.pages) {
       final int count = reader.readIntNoKey();
       final directory = pageDirectory;
-      final int landingCenter = initialPageIndex
-          .clamp(0, math.max(0, count - 1))
-          .toInt();
       late final Set<int> eagerIndices;
       if (onlyFirstPage) {
         eagerIndices = count > 0 ? {0} : {};
       } else if (count <= 2) {
         eagerIndices = Set<int>.from(List.generate(count, (i) => i));
       } else {
-        final center = landingCenter;
+        final center = initialPageIndex
+            .clamp(0, math.max(0, count - 1))
+            .toInt();
         final indexedLandingOnly = pageDirectory != null &&
             pageDirectory.pageCount == count;
         if (indexedLandingOnly) {
@@ -2283,24 +2172,6 @@ class EditorCoreInfo extends ChangeNotifier {
           ) {
             eagerIndices.add(i);
           }
-        }
-        // The canvas may restore a saved viewport (per-note transform cache)
-        // that is not the header's landing page. Parsing those pages eagerly
-        // too keeps the first painted frame from showing a blank lazy-shell
-        // placeholder until their background parses arrive.
-        if (extraEagerPageBytes != null) {
-          for (final i in extraEagerPageBytes.keys) {
-            if (i >= 0 && i < count && i != center) eagerIndices.add(i);
-          }
-        } else if (restoredPageIndex != null &&
-            restoredPageIndex >= 0 &&
-            restoredPageIndex < count &&
-            restoredPageIndex != center) {
-          // Without eagerPageBytes the Dart reader holds the whole buffer,
-          // so the restored page can always be materialized here. With it
-          // (indexed load), a restore page needs its own slice, which the
-          // caller supplies through [extraEagerPageBytes].
-          if (eagerPageBytes == null) eagerIndices.add(restoredPageIndex);
         }
       }
 
@@ -2326,20 +2197,12 @@ class EditorCoreInfo extends ChangeNotifier {
           lazyState?.pageByteOffsets[i] = span.start;
           if (eagerIndices.contains(i)) {
             final BinaryReader pageReader;
-            final Uint8List? restoreBytes = extraEagerPageBytes?[i];
-            if (restoreBytes != null) {
-              pageReader = BinaryReader(restoreBytes);
-            } else if (eagerPageBytes != null && i == landingCenter) {
+            if (eagerPageBytes != null) {
               pageReader = BinaryReader(eagerPageBytes);
             } else {
               reader.offset = span.start;
               pageReader = reader;
             }
-            
-            // CRÍTICO: Cede o controle para o Event Loop após cada página parseada,
-            // garantindo que as animações de abertura ocorram a 60FPS!
-            if (i > 0) await Future<void>.delayed(Duration.zero);
-            
             pages.add(
               await EditorPage.fromBinaryAsync(
                 pageReader,
@@ -2358,9 +2221,6 @@ class EditorCoreInfo extends ChangeNotifier {
               ),
             );
             lazyState?.unhydratedIndices.add(i);
-            
-            // Para as páginas fantasma (shell) em notas colossais (+1000 páginas)
-            if ((i & 3) == 3) await Future<void>.delayed(Duration.zero);
           }
         } else {
           lazyState?.pageByteOffsets[i] = reader.offset;
@@ -2656,15 +2516,15 @@ class EditorCoreInfo extends ChangeNotifier {
       }
     }
 
-    var replaceDefaultLoaded = false;
-    var isInfiniteLoaded = false;
-    var showPdfLinkBoxesLoaded = true;
-    var infiniteThumbnailModeLoaded = 'jdenticon';
-    var creationDateLoaded = 0;
-    var lastModificationLoaded = 0;
-    var lastAccessLoaded = 0;
-    var totalTimeSpentEditingLoaded = 0;
-    var totalTimeSpentLoaded = 0;
+    bool replaceDefaultLoaded = false;
+    bool isInfiniteLoaded = false;
+    bool showPdfLinkBoxesLoaded = true;
+    String infiniteThumbnailModeLoaded = 'jdenticon';
+    int creationDateLoaded = 0;
+    int lastModificationLoaded = 0;
+    int lastAccessLoaded = 0;
+    int totalTimeSpentEditingLoaded = 0;
+    int totalTimeSpentLoaded = 0;
     String? locationLoaded;
     String? noteIdLoaded;
     CanvasBackgroundPattern? noteDefaultPatternLoaded;
@@ -2909,8 +2769,8 @@ class EditorCoreInfo extends ChangeNotifier {
   }
 
   /// Magic before outline format version + count (legacy files store count only).
-  static const _outlineBinaryMagic = -2;
-  static const _outlineBinaryFormatVersion = 2;
+  static const int _outlineBinaryMagic = -2;
+  static const int _outlineBinaryFormatVersion = 2;
 
   static void _writeOutlinesBlock(
     BinaryWriter writer,
@@ -3591,7 +3451,6 @@ class EditorCoreInfo extends ChangeNotifier {
 
   @override
   void dispose() {
-    releaseLazyRangeReader();
     _lazyPages = null;
     for (final page in pages) {
       page.dispose();
@@ -3633,7 +3492,7 @@ class EditorCoreInfo extends ChangeNotifier {
     String? location,
     String? noteId,
     String? floatingCalculatorMetadata,
-    bool? showPdfLinkBoxesOverride,
+    bool? showPdfLinkBoxes,
   }) {
     final info = EditorCoreInfo._(
       filePath: filePath ?? this.filePath,
@@ -3665,7 +3524,7 @@ class EditorCoreInfo extends ChangeNotifier {
       noteId: noteId ?? this.noteId,
       floatingCalculatorMetadata:
           floatingCalculatorMetadata ?? this.floatingCalculatorMetadata,
-      showPdfLinkBoxes: showPdfLinkBoxesOverride ?? showPdfLinkBoxes,
+      showPdfLinkBoxes: showPdfLinkBoxes ?? this.showPdfLinkBoxes,
     );
     info.noteDefaultPattern = noteDefaultPattern;
     info.noteDefaultPageColor = noteDefaultPageColor;

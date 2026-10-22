@@ -33,6 +33,7 @@ import 'package:saber/pages/home/vault_pdf_load_overrides_page.dart';
 import 'package:saber/pages/logs.dart';
 import 'package:saber/pages/vault_login.dart';
 import 'package:saber/services/background_operation_queue.dart';
+import 'package:saber/services/frame_rate_manager.dart';
 import 'package:saber/services/perf_probe.dart';
 import 'package:saber/services/vault_adapter.dart';
 import 'package:window_manager/window_manager.dart';
@@ -138,6 +139,8 @@ Future<void> appRunner(List<String> args) async {
   unawaited(_initVlmEngine());
 
   pdfrxFlutterInitialize(dismissPdfiumWasmWarnings: true);
+
+  await FrameRateManager.instance.init();
 
   await Future.wait([
     stows.customDataDir.waitUntilRead().then((_) => FileManager.init()),

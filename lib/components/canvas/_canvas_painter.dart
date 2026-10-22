@@ -299,24 +299,11 @@ class CanvasPainter extends CustomPainter {
       }
 
       // The QuadTree queries strokes blindly across all layers. To prevent layers 
-      // from vanishing and to enforce Z-Order, we tag the found strokes, then 
-      // do a single sequential pass over the 'strokes' array (which is already sorted) 
-      // capturing only the ones the QuadTree blessed. O(N) absolute.
+      // from vanishing and to enforce Z-Order, we simply sort the found strokes 
+      // using their natural Z-Order. O(K log K) where K is strokes in view.
       if (foundStrokes.isNotEmpty) {
-        final allowedSet = foundStrokes.toSet();
-        for (final s in strokes) {
-          if (allowedSet.contains(s)) {
-            _reusableQueryBuffer.add(s);
-          } else if (!s.bounds.isFinite &&
-              (s.toolId == ToolId.highlighter ||
-               s.toolId == ToolId.advancedPen ||
-               s.toolId == ToolId.pencil ||
-               s.toolId == ToolId.calligraphyPen ||
-               s is ShapeStroke)) {
-            // Unbounded or globally recent strokes must always render.
-            _reusableQueryBuffer.add(s);
-          }
-        }
+        foundStrokes.sort();
+        _reusableQueryBuffer.addAll(foundStrokes);
       }
       visibleStrokes = _reusableQueryBuffer;
       
@@ -1577,7 +1564,9 @@ class CanvasPainter extends CustomPainter {
 
   Path _selectPath(Stroke stroke) {
     // First frames after open: cheap outline until HQ polygon is built.
-    if (stroke.hasCachedHighQualityPolygon) return stroke.highQualityPath;
+    // If we are painting a small number of strokes (e.g., newly added ones over a raster during zoom),
+    // we can afford to use the high quality path immediately to avoid the ugly fallback.
+    if (stroke.hasCachedHighQualityPolygon || strokes.length < 100) return stroke.highQualityPath;
     return stroke.lowQualityPath;
   }
 }

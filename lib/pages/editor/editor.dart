@@ -1812,6 +1812,12 @@ class EditorState extends State<Editor>
         selectedImage.assetId,
       );
 
+      // Força a atualização imediata da imagem em tela para que ela não desapareça
+      selectedImage.assetCacheAll.setImageProvider(
+        selectedImage.assetId,
+        MemoryImage(croppedBytes),
+      );
+
       if (!mounted) return;
       final select = Select.currentSelect;
       setState(() {
@@ -1990,6 +1996,7 @@ class EditorState extends State<Editor>
     }
     for (final image in select.selectResult.images) {
       final newImage = image.copy();
+      newImage.id = coreInfo.nextImageId++; // Garante um ID único para o Flutter não mesclar as imagens
       newImage.dstRect = newImage.dstRect.shift(offset);
       newImages.add(newImage);
     }
@@ -7994,6 +8001,7 @@ class EditorState extends State<Editor>
                 sbnPath: coreInfo.filePath,
                 assetCacheAll: coreInfo.assetCacheAll,
               );
+              img.id = coreInfo.nextImageId++; // Garante um ID único para imagens vindas da área de transferência
               img.pageIndex = pageIndex;
               img.onMoveImage = onMoveImage;
               img.onDeleteImage = onDeleteImage;

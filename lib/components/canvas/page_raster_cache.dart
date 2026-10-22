@@ -572,7 +572,6 @@ final class PageRasterCacheManager {
     bool forceSchedule = false,
   }) {
     final hasExisting = _inkCaches.containsKey(pageIndex);
-    // Permite agendar as rasters iniciais MESMO durante o zoom se for um arquivo recém-aberto
     if ((viewportMoving || inkInputBusy) && !forceSchedule && hasExisting) return;
     _dropInferiorQueuedJobs(pageIndex: pageIndex, isInk: true, minRes: res);
     final hasQueued = _jobQueue.any(
@@ -607,7 +606,7 @@ final class PageRasterCacheManager {
     bool forceSchedule = false,
   }) {
     final hasExisting = _bgCaches.containsKey(pageIndex);
-    if (viewportMoving && !forceSchedule && hasExisting) return;
+    if ((viewportMoving || inkInputBusy) && !forceSchedule && hasExisting) return;
     _dropInferiorQueuedJobs(pageIndex: pageIndex, isInk: false, minRes: res);
     final hasQueued = _jobQueue.any(
       (j) => !j.isInk && j.pageIndex == pageIndex && j.generation == generation && _resSufficient(j.res, res),
@@ -686,19 +685,11 @@ final class PageRasterCacheManager {
   /// vector-painting the whole page — that path caused stylus lag / square ink.
   /// Pass [discardStale] when content was removed (eraser/undo) so ghosts do not
   /// linger.
-  /// Wall-clock of the last ink content edit (commit/erase/undo). Full-page
-  /// raster bakes stay out of the way while the user is actively writing: a
-  /// bake repaints the whole page vectorially on the UI thread (~20ms dense),
-  /// and with letter cadence the next pen-down would otherwise land mid-bake
-  /// every time (dropped samples / square ink at stroke starts). Tiles +
-  /// pending vectors already show fresh ink exactly, so the raster — purely a
-  /// pan/zoom blit optimization — waits for real quiet instead of chasing
-  /// every commit. journal + binary save still run on their own schedule.
+  /// Wall-clock of the last ink content edit (commit/erase/undo).
   DateTime? _lastInkEditAt;
 
   /// Quiet period after an ink edit before an ink raster bake may start.
-  /// Matches the autosave idle philosophy (2s of no edits = a real pause).
-  static const int _inkBakeQuietMs = 2000;
+  static const int _inkBakeQuietMs = 150;
 
   bool _inkBakeQuietActive() {
     if (debugForceSyncRaster) return false;
@@ -987,9 +978,6 @@ final class PageRasterCacheManager {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
       }
-      // Commit-quiet: never start a full-page ink bake while the user is in a
-      // writing burst (see [_lastInkEditAt]). BG jobs proceed — only ink
-      // repaints whole vector pages.
       if (_jobQueue.isNotEmpty &&
           _jobQueue.first.isInk &&
           _inkBakeQuietActive()) {
@@ -1279,9 +1267,8 @@ final class _RasterJob {
     required this.cacheGen,
     required this.devicePixelRatio,
     required this.viewportScale,
-    required PageRasterInkParams inkParams,
+    required this.inkParams,
   }) : isInk = true,
-       inkParams = inkParams,
        bgParams = null;
 
   _RasterJob.bg({
@@ -1292,10 +1279,9 @@ final class _RasterJob {
     required this.cacheGen,
     required this.devicePixelRatio,
     required this.viewportScale,
-    required PageRasterBgParams bgParams,
+    required this.bgParams,
   }) : isInk = false,
-       inkParams = null,
-       bgParams = bgParams;
+       inkParams = null;
 
   final bool isInk;
   final int pageIndex;
@@ -1326,7 +1312,7 @@ PageRasterBgParams pageRasterBgParamsFor({
     invert: invert,
     backgroundColor: hasBgImage
         ? Colors.white
-        : (page.backgroundColor.value != 0xFFFFFFFF
+        : (page.backgroundColor.toARGB32() != 0xFFFFFFFF
               ? page.backgroundColor
               : defaultBackgroundColor),
     backgroundPattern: hasBgImage
@@ -1338,10 +1324,10 @@ PageRasterBgParams pageRasterBgParamsFor({
     lineThickness: page.hasLocalLineThickness
         ? page.lineThickness.toDouble()
         : defaultLineThickness,
-    primaryColor: page.lineColor.value != 0xFF9E9E9E
+    primaryColor: page.lineColor.toARGB32() != 0xFF9E9E9E
         ? page.lineColor
         : primaryColor,
-    secondaryColor: (page.lineColor.value != 0xFF9E9E9E
+    secondaryColor: (page.lineColor.toARGB32() != 0xFF9E9E9E
             ? page.lineColor
             : secondaryColor)
         .withValues(alpha: 0.5),

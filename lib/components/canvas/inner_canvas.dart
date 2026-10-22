@@ -679,7 +679,8 @@ class InnerCanvasState extends State<InnerCanvas> {
       // Complex ops (undo/redo/erase/paste): synchronous eager refill as
       // before — scope is computed, not assumed. Replacements render from
       // tiles in draw order (never from the above-everything wet cover).
-      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true);
+      // Discard stale raster immediately so undo/redo doesn't ghost the old stroke position.
+      _invalidateCommittedStrokeCache(dirty: dirty, eagerRefill: true, discardStale: true);
     }
     _layer2Repaint.value++;
     _pendingRepaint.value++;
@@ -1050,7 +1051,7 @@ class InnerCanvasState extends State<InnerCanvas> {
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
         _tiledStrokesSnapshot = const [];
         _invalidateCommittedStrokesFlatCache();
-        _invalidateCommittedStrokeCache(eagerRefill: true);
+        _invalidateCommittedStrokeCache(eagerRefill: true, discardStale: true);
         _layer2Repaint.value++;
       } else if (revisionChanged && _lastObservedSaveBinaryRevision != -1) {
         // Same stroke count/order but committed content changed (e.g. color).
@@ -1058,7 +1059,7 @@ class InnerCanvasState extends State<InnerCanvas> {
         _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
         _tiledStrokesSnapshot = const [];
         _invalidateCommittedStrokesFlatCache();
-        _invalidateCommittedStrokeCache(eagerRefill: true);
+        _invalidateCommittedStrokeCache(eagerRefill: true, discardStale: true);
         _invalidatePageRasterBg();
         _layer2Repaint.value++;
       } else if (invertChanged) {
@@ -1178,8 +1179,12 @@ class InnerCanvasState extends State<InnerCanvas> {
     final strokeCount = _totalStrokesAcrossLayers(page);
     final laserCount = page.laserStrokes.length;
     final laserCountChanged = laserCount != _lastLaserStrokeCount;
+    final revisionChanged = page.saveBinaryRevision != _lastObservedSaveBinaryRevision;
+    
     _lastLayerOrderHash = _layerOrderHash(page);
     _lastLaserStrokeCount = laserCount;
+    _lastObservedSaveBinaryRevision = page.saveBinaryRevision;
+    
     if (eraserActive) {
       _applyPageStrokeDelta(page);
       
@@ -1211,8 +1216,17 @@ class InnerCanvasState extends State<InnerCanvas> {
     }
     final countChanged = strokeCount != _lastStrokeCount;
     _lastStrokeCount = strokeCount;
+    
     if (countChanged) {
       _applyPageStrokeDelta(page);
+    } else if (revisionChanged) {
+      _bakePendingNow();
+      _pageStrokeSnapshot = page.allStrokesInDrawOrder.toList(growable: false);
+      _tiledStrokesSnapshot = const [];
+      _invalidateCommittedStrokesFlatCache();
+      _invalidateCommittedStrokeCache(eagerRefill: true, discardStale: true);
+      _invalidatePageRasterBg();
+      _layer2Repaint.value++;
     } else if (laserCountChanged) {
       setState(() {});
     } else if (page.laserStrokes.isNotEmpty) {
@@ -2052,25 +2066,33 @@ class _PageRasterInkLayerPainter extends CustomPainter {
         !PageRasterCacheManager.zoomLodSettled;
 
     final isDrawing = pendingStrokes.isNotEmpty || Pen.currentStroke != null;
-    bool useVectorFallback =
-        isDrawing || entry == null || !inkBitmapCurrent;
+    final useVectorLod = currentScale >= DisplayInkFeel.instance.vectorLodThreshold;
+    
+    bool useVectorFallback = false;
 
-    if (entry != null) {
-      if (!inkBitmapCurrent || entry.strokeCount > committedStrokes.length) {
-        // Stale content (ink erased, added, or modified). Cannot use raster.
-        useVectorFallback = true;
-      } else if (isMoving) {
-        // Moving, and content is up-to-date (only resolution might be stale). Keep blitting.
-        useVectorFallback = false;
+    if (entry == null) {
+      useVectorFallback = true;
+    } else if (useVectorLod) {
+      if (isMoving || settling) {
+        useVectorFallback = false; // Keep smooth 60fps raster blits while moving/coasting
       } else {
-        if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
-          // Stale resolution: keep blitting the soft bitmap while moving or
-          // settling so the UI stays fluid. Switch to sharp vectors only once
-          // fully settled, and even then the settle rebake lands shortly after.
-          if (!settling) {
-            useVectorFallback = true;
-          }
+        useVectorFallback = true;  // Crisp vectors immediately when resting at high zoom
+      }
+    } else {
+      if (entry.strokeCount > committedStrokes.length) {
+        useVectorFallback = true;
+      } else if (!inkBitmapCurrent && entry.strokeCount == committedStrokes.length) {
+        useVectorFallback = true;
+      } else if (!inkBitmapCurrent) {
+        useVectorFallback = false;
+      } else if (!pageRasterCacheResCoversTarget(entry.res, idealRes)) {
+        if (!settling && !isDrawing) {
+          useVectorFallback = true;
+        } else {
+          useVectorFallback = false;
         }
+      } else {
+        useVectorFallback = false;
       }
     }
 
@@ -2144,7 +2166,7 @@ class _PageRasterInkLayerPainter extends CustomPainter {
       }
     }
 
-    if (pendingStrokes.isNotEmpty) {
+    if (pendingStrokes.isNotEmpty && useVectorFallback) {
       CanvasPainter(
         invert: invert,
         strokes: const [],
@@ -3269,7 +3291,8 @@ final pathOnly = needsMesh;
         if (_pictures.containsKey(key)) continue;
         final tileStrokes = _strokesForTile(tileRect, strokeList, page);
         if (tileStrokes.isEmpty) continue;
-        final coldTile = _tileNeedsMeshBuild(tileStrokes);
+        // Same here, disable cheap fallbacks on prewarm.
+        final coldTile = false;
         final picture = _recordTile(
           tileRect: tileRect,
           tileStrokes: tileStrokes,
@@ -3287,11 +3310,7 @@ final pathOnly = needsMesh;
         );
         _pictures[key] = picture;
         _markFineInk(key, tileStrokes);
-        if (coldTile) {
-          _pathOnlyKeys.add(key);
-        } else {
           _pathOnlyKeys.remove(key);
-        }
         recorded++;
       }
     }
