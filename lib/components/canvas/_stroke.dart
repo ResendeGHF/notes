@@ -2964,7 +2964,9 @@ class Stroke implements HasBounds, Comparable<Stroke> {
     final halfW = math.max(options.size / 2, 0.5);
     var minDot = 1.0 - 2.0 * math.pow(kLiveStageGateSagittaPx / halfW, 2);
     minDot = minDot.clamp(0.7, 0.995);
-    final start = math.max(_liveStagedEnd + 1, ideal - kLiveStageGateScan);
+    // Garante que o limite mínimo da busca nunca seja menor que 'k'
+    // Evita o RangeError ao acessar points[f - k] com índices negativos.
+    final start = math.max(math.max(_liveStagedEnd + 1, k), ideal - kLiveStageGateScan);
     var best = -1;
     var bestDot = -2.0;
     for (var f = ideal; f >= start; f--) {
